@@ -164,21 +164,20 @@ export const propertyService = {
       };
     }
 
-    const [total, properties] = await Promise.all([
-      prisma.property.count({ where }),
-      prisma.property.findMany({
-        where,
-        orderBy: [sort, { id: 'asc' }],
-        skip,
-        take: limit,
-        include: {
-          images: {
-            where: { isCover: true },
-            take: 1
-          }
+    // Fetch total and properties sequentially to reduce connection pool pressure
+    const total = await prisma.property.count({ where });
+    const properties = await prisma.property.findMany({
+      where,
+      orderBy: [sort, { id: 'asc' }],
+      skip,
+      take: limit,
+      include: {
+        images: {
+          where: { isCover: true },
+          take: 1
         }
-      }),
-    ]);
+      }
+    });
 
     return {
       data: properties,
@@ -283,19 +282,17 @@ export const propertyService = {
 
     const where: Prisma.PropertyWhereInput = { moderationStatus: status };
 
-    const [total, data] = await Promise.all([
-      prisma.property.count({ where }),
-      prisma.property.findMany({
-        where,
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        skip,
-        take: limit,
-        include: {
-          landlord: { select: { id: true, name: true, phoneNumber: true } },
-          images: { where: { isCover: true }, take: 1 },
-        },
-      }),
-    ]);
+    const total = await prisma.property.count({ where });
+    const data = await prisma.property.findMany({
+      where,
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      skip,
+      take: limit,
+      include: {
+        landlord: { select: { id: true, name: true, phoneNumber: true } },
+        images: { where: { isCover: true }, take: 1 },
+      },
+    });
 
     return {
       data,
