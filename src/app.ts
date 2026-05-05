@@ -9,6 +9,8 @@ import userRoutes from './routes/userRoutes';
 import visitRoutes from './routes/visitRoutes';
 import adminRoutes from './routes/adminRoutes';
 import notificationRoutes from './routes/notificationRoutes';
+import authRoutes from './routes/authRoutes';
+import { authController } from './controllers/authController';
 import { checkJwt, authSyncMiddleware, validateAuthConfig } from './middlewares/authMiddleware';
 import prisma from './config/db';
 import { queueRedisConnection } from './queues/whatsappQueue';
@@ -83,6 +85,12 @@ const authStack = [checkJwt, authSyncMiddleware];
 // Routes
 app.use('/api', webhookRoutes);
 app.use('/api', propertyRoutes);
+
+// Auth Routes (public — register and login)
+app.use('/api', authRoutes);
+
+// Auth Me (protected — requires valid token)
+app.get('/api/auth/me', authStack, authController.me);
 
 // User Routes
 app.use('/api', authStack, userRoutes);
