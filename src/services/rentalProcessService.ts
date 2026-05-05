@@ -78,8 +78,8 @@ export const rentalProcessService = {
         userId: tenantId,
         fcmToken: tenantFcmToken,
         type: 'RENTAL_CLOSED',
-        title: 'Processo de Locação Encerrado',
-        body: `O processo de locação do imóvel "${propertyTitle}" foi concluído.`,
+        title: 'Processo de Locação Concluído',
+        body: `O processo do imóvel "${propertyTitle}" foi finalizado com sucesso.`,
         data: { rentalProcessId: id, type: 'RENTAL_CLOSED' },
       }).catch((err) =>
         logger.error({ err, rentalProcessId: id }, '[rentalProcessService] Falha ao notificar inquilino sobre RENTAL_CLOSED')
@@ -92,8 +92,8 @@ export const rentalProcessService = {
           userId: landlord.id,
           fcmToken: landlord.fcmToken,
           type: 'RENTAL_CLOSED',
-          title: 'Processo de Locação Encerrado',
-          body: `O processo de locação do imóvel "${propertyTitle}" foi concluído com sucesso.`,
+          title: 'Processo de Locação Concluído',
+          body: `O processo do imóvel "${propertyTitle}" foi finalizado com sucesso.`,
           data: { rentalProcessId: id, type: 'RENTAL_CLOSED' },
         }).catch((err) =>
           logger.error({ err, rentalProcessId: id }, '[rentalProcessService] Falha ao notificar locador sobre RENTAL_CLOSED')
