@@ -90,6 +90,14 @@ enum NotificationType {
   BROADCAST
 }
 
+enum ProposalStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  COUNTER_OFFER
+  WITHDRAWN
+}
+
 // 3. Modelos (Tabelas)
 
 model User {
@@ -103,19 +111,23 @@ model User {
   createdAt   DateTime @default(now()) @map("created_at")
 
   // Relacionamentos inversos (Obrigações do Prisma)
-  properties       Property[]      @relation("LandlordProperties")
-  chatSessions     ChatSession[]   @relation("TenantChats")
-  rentalProcesses  RentalProcess[] @relation("TenantProcesses")
-  visitsAsTenant   Visit[]         @relation("TenantVisits")
-  visitsAsLandlord Visit[]         @relation("LandlordVisits")
-  notifications    Notification[]
+  properties          Property[]      @relation("LandlordProperties")
+  chatSessions        ChatSession[]   @relation("TenantChats")
+  rentalProcesses     RentalProcess[] @relation("TenantProcesses")
+  visitsAsTenant      Visit[]         @relation("TenantVisits")
+  visitsAsLandlord    Visit[]         @relation("LandlordVisits")
+  notifications       Notification[]
+  proposalsMade       Proposal[]      @relation("TenantProposals")
+  favorites           Favorite[]      @relation("UserFavorites")
+  contractsAsTenant   Contract[]      @relation("TenantContracts")
+  contractsAsLandlord Contract[]      @relation("LandlordContracts")
 
   @@map("users")
 }
 
 model Property {
-  id          String         @id @default(uuid())
-  landlordId  String         @map("landlord_id")
+  id               String           @id @default(uuid())
+  landlordId       String           @map("landlord_id")
   title            String
   description      String
   price            Decimal          @db.Decimal(10, 2)
@@ -125,9 +137,9 @@ model Property {
   moderatedAt      DateTime?        @map("moderated_at")
   moderatedBy      String?          @map("moderated_by")
   address          String
-  city        String?
-  state       String?        @db.VarChar(2)
-  zipCode     String?        @map("zip_code")
+  city             String?
+  state            String?          @db.VarChar(2)
+  zipCode          String?          @map("zip_code")
 
   // Novos campos para busca e filtros
   type         PropertyType @default(APARTMENT)
@@ -147,10 +159,15 @@ model Property {
   propertyTax  Decimal?     @map("property_tax") @db.Decimal(10, 2)
 
   // Relacionamentos
-  landlord        User            @relation("LandlordProperties", fields: [landlordId], references: [id])
+  landlord        User              @relation("LandlordProperties", fields: [landlordId], references: [id])
   rentalProcesses RentalProcess[]
   images          PropertyImage[]
   visits          Visit[]
+  proposals       Proposal[]
+  favoritedBy     Favorite[]
+  contracts       Contract[]
+  expenses        PropertyExpense[]
+  maintenanceLogs MaintenanceLog[]
 
   @@index([moderationStatus], name: "properties_moderation_status_idx")
   @@map("properties")
@@ -307,17 +324,131 @@ model Visit {
 }
 
 model Notification {
-  id        String           @id @default(uuid())
-  userId    String           @map("user_id")
-  type      NotificationType
-  title     String
-  body      String
-  data      Json?            // Payload extra (visitId, propertyId, etc.)
-  readAt    DateTime?        @map("read_at")  // null = não lida
-  sentAt    DateTime         @default(now()) @map("sent_at")
+  id     String           @id @default(uuid())
+  userId String           @map("user_id")
+  type   NotificationType
+  title  String
+  body   String
+  data   Json? // Payload extra (visitId, propertyId, etc.)
+  readAt DateTime?        @map("read_at") // null = não lida
+  sentAt DateTime         @default(now()) @map("sent_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, readAt], name: "notifications_user_read_idx")
   @@map("notifications")
+}
+
+model Proposal {
+  id            String         @id @default(uuid())
+  tenantId      String         @map("tenant_id")
+  propertyId    String         @map("property_id")
+  proposedPrice Decimal        @map("proposed_price") @db.Decimal(10, 2)
+  status        ProposalStatus @default(PENDING)
+  message       String?        @db.Text
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  tenant   User     @relation("TenantProposals", fields: [tenantId], references: [id])
+  property Property @relation(fields: [propertyId], references: [id])
+
+  @@index([propertyId], name: "proposals_property_idx")
+  @@index([tenantId], name: "proposals_tenant_idx")
+  @@map("proposals")
+}
+
+model Favorite {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  propertyId String   @map("property_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user     User     @relation("UserFavorites", fields: [userId], references: [id], onDelete: Cascade)
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, propertyId], name: "favorites_user_property_key")
+  @@index([userId], name: "favorites_user_idx")
+  @@map("favorites")
+}
+
+model PropertyExpense {
+  id         String   @id @default(uuid())
+  propertyId String   @map("property_id")
+  type       String // "IPTU", "CONDO", "INSURANCE", etc.
+  amount     Decimal  @db.Decimal(10, 2)
+  dueDate    DateTime @map("due_date")
+  isPaid     Boolean  @default(false) @map("is_paid")
+  year       Int
+  month      Int
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@index([propertyId, year, month])
+  @@map("property_expenses")
+}
+
+model MaintenanceLog {
+  id          String   @id @default(uuid())
+  propertyId  String   @map("property_id")
+  title       String
+  description String?  @db.Text
+  cost        Decimal? @db.Decimal(10, 2)
+  date        DateTime
+  status      String   @default("COMPLETED") // "PLANNED", "IN_PROGRESS", "COMPLETED"
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@map("maintenance_logs")
+}
+
+model Contract {
+  id          String         @id @default(uuid())
+  propertyId  String         @map("property_id")
+  tenantId    String         @map("tenant_id")
+  landlordId  String         @map("landlord_id")
+  startDate   DateTime       @map("start_date")
+  endDate     DateTime       @map("end_date")
+  monthlyRent Decimal        @map("monthly_rent") @db.Decimal(10, 2)
+  dueDay      Int            @map("due_day")
+  contractUrl String?        @map("contract_url")
+  status      ContractStatus @default(ACTIVE)
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  property Property        @relation(fields: [propertyId], references: [id])
+  tenant   User            @relation("TenantContracts", fields: [tenantId], references: [id])
+  landlord User            @relation("LandlordContracts", fields: [landlordId], references: [id])
+  payments TenantPayment[]
+
+  @@map("contracts")
+}
+
+enum ContractStatus {
+  ACTIVE
+  TERMINATED
+  COMPLETED
+}
+
+model TenantPayment {
+  id         String        @id @default(uuid())
+  contractId String        @map("contract_id")
+  amount     Decimal       @db.Decimal(10, 2)
+  dueDate    DateTime      @map("due_date")
+  paidDate   DateTime?     @map("paid_date")
+  status     PaymentStatus @default(PENDING)
+  createdAt  DateTime      @default(now()) @map("created_at")
+
+  contract Contract @relation(fields: [contractId], references: [id])
+
+  @@map("tenant_payments")
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  OVERDUE
+  CANCELLED
 }

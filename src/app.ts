@@ -9,8 +9,16 @@ import userRoutes from './routes/userRoutes';
 import visitRoutes from './routes/visitRoutes';
 import adminRoutes from './routes/adminRoutes';
 import notificationRoutes from './routes/notificationRoutes';
+<<<<<<< feat/auth-endpoints
 import authRoutes from './routes/authRoutes';
 import { authController } from './controllers/authController';
+=======
+import proposalRoutes from './routes/proposalRoutes';
+import contractRoutes from './routes/contractRoutes';
+import chatRoutes from './routes/chatRoutes';
+import favoriteRoutes from './routes/favoriteRoutes';
+import financeRoutes from './routes/financeRoutes';
+>>>>>>> main
 import { checkJwt, authSyncMiddleware, validateAuthConfig } from './middlewares/authMiddleware';
 import prisma from './config/db';
 import { queueRedisConnection } from './queues/whatsappQueue';
@@ -103,6 +111,21 @@ app.use('/api', authStack, adminRoutes);
 
 // Notification Routes (histórico + leitura)
 app.use('/api', authStack, notificationRoutes);
+
+// Proposal Routes
+app.use('/api', authStack, proposalRoutes);
+
+// Contract & Tenant Routes
+app.use('/api', authStack, contractRoutes);
+
+// Chat Routes
+app.use('/api', authStack, chatRoutes);
+
+// Favorite Routes
+app.use('/api', authStack, favoriteRoutes);
+
+// Finance & Dossier Routes
+app.use('/api', authStack, financeRoutes);
 
 // Apply Global Error Handler
 app.use(errorHandler);
