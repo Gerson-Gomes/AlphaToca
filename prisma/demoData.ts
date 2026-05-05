@@ -14,6 +14,15 @@ export const demoUsers = [
     phoneNumber: '+5511999990002',
     role: Role.TENANT,
     createdAt: new Date(),
+  },
+  {
+    id: 'user-demo-admin',
+    name: process.env.ADMIN_NAME || 'Admin AlphaToca',
+    email: process.env.ADMIN_EMAIL || 'admin@alphatoca.com',
+    phoneNumber: process.env.ADMIN_PHONE_NUMBER || '+5511900000000',
+    firebaseUid: process.env.ADMIN_FIREBASE_UID || 'mock-admin-firebase-uid',
+    role: Role.ADMIN,
+    createdAt: new Date(),
   }
 ];
 
@@ -192,5 +201,39 @@ export const demoPropertyImages = [
     isCover: false,
     caption: 'Quarto',
     createdAt: new Date(),
-  }
+  },
+  {
+    id: 'img-demo-rj2-1',
+    propertyId: 'prop-demo-rj-2',
+    url: 'http://10.0.2.2:3000/uploads/prop-demo-rj-2/0001.png',
+    isCover: true,
+    caption: 'Sala',
+    createdAt: new Date(),
+  },
+  {
+    id: 'img-demo-rj2-2',
+    propertyId: 'prop-demo-rj-2',
+    url: 'http://10.0.2.2:3000/uploads/prop-demo-rj-2/0002.png',
+    isCover: false,
+    caption: 'Quarto',
+    createdAt: new Date(),
+  },
+  {
+    id: 'img-demo-rj2-3',
+    propertyId: 'prop-demo-rj-2',
+    url: 'http://10.0.2.2:3000/uploads/prop-demo-rj-2/0003.png',
+    isCover: false,
+    caption: 'Banheiro',
+    createdAt: new Date(),
+  },
+  {
+    id: 'img-demo-rj2-4',
+    propertyId: 'prop-demo-rj-2',
+    url: 'http://10.0.2.2:3000/uploads/prop-demo-rj-2/0004.png',
+    isCover: false,
+    caption: 'Cozinha',
+    createdAt: new Date(),
+  },
+
+
 ];
