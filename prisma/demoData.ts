@@ -164,7 +164,7 @@ export const demoPropertyImages = [
   {
     id: 'img-demo-rj-1',
     propertyId: 'prop-demo-rj-1',
-    url: 'http://localhost:3000/uploads/prop-demo-rj-1/0001.png',
+    url: 'http://10.0.2.2:3000/uploads/prop-demo-rj-1/0001.png',
     isCover: true,
     caption: 'Fachada Principal',
     createdAt: new Date(),
@@ -172,7 +172,7 @@ export const demoPropertyImages = [
   {
     id: 'img-demo-rj-2',
     propertyId: 'prop-demo-rj-1',
-    url: 'http://localhost:3000/uploads/prop-demo-rj-1/0002.png',
+    url: 'http://10.0.2.2:3000/uploads/prop-demo-rj-1/0002.png',
     isCover: false,
     caption: 'Sala de Estar',
     createdAt: new Date(),
@@ -180,7 +180,7 @@ export const demoPropertyImages = [
   {
     id: 'img-demo-rj-3',
     propertyId: 'prop-demo-rj-1',
-    url: 'http://localhost:3000/uploads/prop-demo-rj-1/0003.png',
+    url: 'http://10.0.2.2:3000/uploads/prop-demo-rj-1/0003.png',
     isCover: false,
     caption: 'Cozinha',
     createdAt: new Date(),
@@ -188,7 +188,7 @@ export const demoPropertyImages = [
   {
     id: 'img-demo-rj-4',
     propertyId: 'prop-demo-rj-1',
-    url: 'http://localhost:3000/uploads/prop-demo-rj-1/0004.png',
+    url: 'http://10.0.2.2:3000/uploads/prop-demo-rj-1/0004.png',
     isCover: false,
     caption: 'Quarto',
     createdAt: new Date(),
