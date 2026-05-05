@@ -21,6 +21,11 @@ export const RATE_LIMIT_REPLY =
 export const NON_TEXT_REPLY =
     'Por enquanto só consigo entender mensagens de texto. Pode me mandar sua dúvida escrita, por favor?';
 
+export const WELCOME_MESSAGE =
+    'Olá! Seja bem-vindo(a) ao I-Moveis. Sou seu assistente virtual e estou aqui para ajudar com o que precisar sobre aluguel de imóveis. Como posso te auxiliar hoje?';
+
+const GREETING_REGEX = /^(oi|olá|oie|oii|ola|bom dia|boa tarde|boa noite|e aí|eai|fala|falaí|fala ai)[!.]*\s*$/i;
+
 export const LEAD_EXTRACTION_CONCURRENCY = Number(process.env.LEAD_EXTRACTION_CONCURRENCY ?? 3);
 
 export const PHONE_RATE_LIMIT = Number(process.env.PHONE_RATE_LIMIT ?? 10);
@@ -181,32 +186,35 @@ export async function handleWhatsappMessage(
         },
     });
 
-    let chatSession: ChatSession | null = await deps.prisma.chatSession.findFirst({
+    const previousSession = await deps.prisma.chatSession.findFirst({
         where: { tenantId: user.id },
         orderBy: { startedAt: 'desc' },
     });
 
-    const expired = isSessionExpired(chatSession);
-    if (!chatSession || chatSession.status !== 'ACTIVE_BOT' || expired) {
-        if (chatSession) {
-            log.info(
-                {
-                    sessionId: chatSession.id,
-                    reason: expired ? 'expired' : 'inactive',
-                    previousStatus: chatSession.status,
-                    expiresAt: chatSession.expiresAt?.toISOString?.() ?? null,
-                },
-                '[worker] replacing inactive session with new ACTIVE_BOT',
-            );
-        }
-        chatSession = await deps.prisma.chatSession.create({
-            data: {
-                tenantId: user.id,
-                status: 'ACTIVE_BOT',
-                expiresAt: new Date(Date.now() + SESSION_TTL_MS),
+    const expired = isSessionExpired(previousSession);
+    const isNewOrResetSession = !previousSession || previousSession.status !== 'ACTIVE_BOT' || expired;
+
+    if (isNewOrResetSession && previousSession) {
+        log.info(
+            {
+                sessionId: previousSession.id,
+                reason: expired ? 'expired' : 'inactive',
+                previousStatus: previousSession.status,
+                expiresAt: previousSession.expiresAt?.toISOString?.() ?? null,
             },
-        });
+            '[worker] replacing inactive session with new ACTIVE_BOT',
+        );
     }
+
+    const chatSession: ChatSession = isNewOrResetSession
+        ? await deps.prisma.chatSession.create({
+              data: {
+                  tenantId: user.id,
+                  status: 'ACTIVE_BOT',
+                  expiresAt: new Date(Date.now() + SESSION_TTL_MS),
+              },
+          })
+        : previousSession;
 
     await deps.prisma.message.create({
         data: {
@@ -216,6 +224,23 @@ export async function handleWhatsappMessage(
             content: messageText,
         },
     });
+
+    if (isNewOrResetSession && GREETING_REGEX.test(messageText.trim())) {
+        try {
+            await deps.sendMessage(phoneNumber, WELCOME_MESSAGE);
+            await deps.prisma.message.create({
+                data: {
+                    sessionId: chatSession.id,
+                    senderType: 'BOT',
+                    content: WELCOME_MESSAGE,
+                },
+            });
+            log.info({ phoneNumber }, '[worker] welcome message sent for new session');
+        } catch (err) {
+            log.error({ err }, '[worker] failed to send welcome message');
+        }
+        return { success: true };
+    }
 
     let useStructuredSearch = false;
 

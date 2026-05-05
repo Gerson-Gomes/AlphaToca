@@ -35,7 +35,7 @@ export interface TextChunker {
 
 export type PrismaIngestClient = Pick<
   PrismaClient,
-  "$queryRawUnsafe" | "$executeRawUnsafe" | "$transaction"
+  "$queryRawUnsafe" | "$executeRawUnsafe"
 >;
 
 export const EMBEDDING_BATCH_SIZE = Number(process.env.EMBEDDING_BATCH_SIZE ?? 100);
@@ -65,9 +65,6 @@ export function deriveTitle(filePath: string, chunkIndex: number): string {
 }
 
 // Serializa um vetor no formato textual aceito pelo pgvector: "[n1,n2,...]".
-// Valida estritamente porque o literal resultante é interpolado via bind
-// param ($N::vector) — um elemento não-numérico quebraria o cast do Postgres
-// com mensagem confusa. Rejeitar cedo dá erro legível no cliente.
 export function toVectorLiteral(vector: number[]): string {
   if (!Array.isArray(vector)) {
     throw new Error("[toVectorLiteral] vector must be a number[]");
@@ -140,128 +137,76 @@ export async function runIngestion(deps: IngestDeps): Promise<IngestSummary> {
     allChunks.push(...chunks);
   }
 
-  const sourcePaths = Array.from(new Set(allChunks.map((c) => c.sourcePath)));
-  const existingRows =
-    sourcePaths.length === 0
-      ? []
-      : await deps.prisma.$queryRawUnsafe<ExistingRow[]>(
-          `SELECT id, source_path, chunk_index, content_hash
-           FROM knowledge_documents
-           WHERE source_path = ANY($1::text[])`,
-          sourcePaths,
-        );
-
-  const existingByKey = new Map<string, ExistingRow>();
-  for (const row of existingRows) {
-    existingByKey.set(`${row.source_path}|${row.chunk_index}`, row);
-  }
-
-  type Action =
-    | { type: "insert"; chunk: ChunkRecord }
-    | { type: "update"; chunk: ChunkRecord; existingId: string };
-
-  const actions: Action[] = [];
-  const toEmbed: ChunkRecord[] = [];
-
-  for (const chunk of allChunks) {
-    const key = `${chunk.sourcePath}|${chunk.chunkIndex}`;
-    const existing = existingByKey.get(key);
-    if (!existing) {
-      actions.push({ type: "insert", chunk });
-      toEmbed.push(chunk);
-    } else if (existing.content_hash === chunk.contentHash) {
-      summary.skipped++;
-    } else {
-      actions.push({ type: "update", chunk, existingId: existing.id });
-      toEmbed.push(chunk);
-    }
+  if (allChunks.length === 0) {
+    return summary;
   }
 
   const embeddings: number[][] = [];
-  if (toEmbed.length > 0) {
-    for (let start = 0; start < toEmbed.length; start += EMBEDDING_BATCH_SIZE) {
-      const batch = toEmbed.slice(start, start + EMBEDDING_BATCH_SIZE);
-      const vectors = await deps.embedder.embedDocuments(
-        batch.map((c) => c.content),
+  for (let start = 0; start < allChunks.length; start += EMBEDDING_BATCH_SIZE) {
+    const batch = allChunks.slice(start, start + EMBEDDING_BATCH_SIZE);
+    const vectors = await deps.embedder.embedDocuments(
+      batch.map((c) => c.content),
+    );
+    if (vectors.length !== batch.length) {
+      throw new Error(
+        `[ingest:knowledge] embedder returned ${vectors.length} vectors for ${batch.length} chunks in batch starting at ${start}`,
       );
-      if (vectors.length !== batch.length) {
-        throw new Error(
-          `[ingest:knowledge] embedder returned ${vectors.length} vectors for ${batch.length} chunks in batch starting at ${start}`,
-        );
-      }
-      embeddings.push(...vectors);
     }
+    embeddings.push(...vectors);
   }
 
-  if (embeddings.length !== toEmbed.length) {
+  if (embeddings.length !== allChunks.length) {
     throw new Error(
-      `[ingest:knowledge] embedder returned ${embeddings.length} vectors for ${toEmbed.length} chunks`,
+      `[ingest:knowledge] embedder returned ${embeddings.length} vectors for ${allChunks.length} chunks`,
     );
   }
 
-  const embeddingByKey = new Map<string, number[]>();
-  for (let i = 0; i < toEmbed.length; i++) {
-    const chunk = toEmbed[i];
-    embeddingByKey.set(`${chunk.sourcePath}|${chunk.chunkIndex}`, embeddings[i]);
+  for (let i = 0; i < allChunks.length; i++) {
+    const chunk = allChunks[i];
+    const vectorLiteral = toVectorLiteral(embeddings[i]);
+
+    await deps.prisma.$executeRawUnsafe(
+      `INSERT INTO knowledge_documents
+         (id, title, content, embedding, source_path, chunk_index, content_hash, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3::vector, $4, $5, $6, now())
+       ON CONFLICT (source_path, chunk_index)
+       DO UPDATE SET
+         title = EXCLUDED.title,
+         content = EXCLUDED.content,
+         embedding = EXCLUDED.embedding,
+         content_hash = EXCLUDED.content_hash,
+         updated_at = now()`,
+      chunk.title,
+      chunk.content,
+      vectorLiteral,
+      chunk.sourcePath,
+      chunk.chunkIndex,
+      chunk.contentHash,
+    );
+    summary.inserted++;
   }
 
-  const desiredKeys = new Set(
+  const sourcePaths = Array.from(new Set(allChunks.map((c) => c.sourcePath)));
+  const desiredSet = new Set(
     allChunks.map((c) => `${c.sourcePath}|${c.chunkIndex}`),
   );
-  const rowsToDelete = existingRows.filter(
-    (row) => !desiredKeys.has(`${row.source_path}|${row.chunk_index}`),
+
+  const existingRows = await deps.prisma.$queryRawUnsafe<ExistingRow[]>(
+    `SELECT id, source_path, chunk_index, content_hash
+     FROM knowledge_documents
+     WHERE source_path = ANY($1::text[])`,
+    sourcePaths,
   );
 
-  await deps.prisma.$transaction(async (tx) => {
-    for (const action of actions) {
-      const chunk = action.chunk;
-      const key = `${chunk.sourcePath}|${chunk.chunkIndex}`;
-      const vector = embeddingByKey.get(key);
-      if (!vector) {
-        throw new Error(`[ingest:knowledge] missing embedding for ${key}`);
-      }
-      const vectorLiteral = toVectorLiteral(vector);
-
-      if (action.type === "insert") {
-        await tx.$executeRawUnsafe(
-          `INSERT INTO knowledge_documents
-             (id, title, content, embedding, source_path, chunk_index, content_hash, updated_at)
-           VALUES (gen_random_uuid(), $1, $2, $3::vector, $4, $5, $6, now())`,
-          chunk.title,
-          chunk.content,
-          vectorLiteral,
-          chunk.sourcePath,
-          chunk.chunkIndex,
-          chunk.contentHash,
-        );
-        summary.inserted++;
-      } else {
-        await tx.$executeRawUnsafe(
-          `UPDATE knowledge_documents
-             SET title = $1,
-                 content = $2,
-                 embedding = $3::vector,
-                 content_hash = $4,
-                 updated_at = now()
-           WHERE id = $5`,
-          chunk.title,
-          chunk.content,
-          vectorLiteral,
-          chunk.contentHash,
-          action.existingId,
-        );
-        summary.updated++;
-      }
-    }
-
-    for (const row of rowsToDelete) {
-      await tx.$executeRawUnsafe(
+  for (const row of existingRows) {
+    if (!desiredSet.has(`${row.source_path}|${row.chunk_index}`)) {
+      await deps.prisma.$executeRawUnsafe(
         `DELETE FROM knowledge_documents WHERE id = $1`,
         row.id,
       );
       summary.deleted++;
     }
-  });
+  }
 
   return summary;
 }
@@ -276,9 +221,6 @@ async function main(): Promise<void> {
 
   const embedder = createGeminiEmbedder();
 
-  // Envolvemos o embedder para que a ingestão use `RETRIEVAL_DOCUMENT`
-  // (task type otimizado para RAG) e inclua o título de cada chunk,
-  // o que ajuda o retriever a dar mais peso ao tópico/arquivo de origem.
   const summary = await runIngestion({
     prisma,
     embedder: {
