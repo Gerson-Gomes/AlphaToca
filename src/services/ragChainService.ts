@@ -56,6 +56,11 @@ const OFF_TOPIC_KEYWORDS = new RegExp(
   "i",
 );
 
+const GREETING_RAG_REGEX = /^(oi|olá|oie|oii|ola|bom dia|boa tarde|boa noite|e aí|eai|fala|falaí|fala ai)[!.]*\s*$/i;
+
+const GREETING_REPLY =
+  "Em que mais posso ajudar? Estou aqui para tirar dúvidas sobre aluguel de imóveis no I-Moveis!";
+
 const DOMAIN_TRIGGERS = new RegExp(
   "aluguel?|imóve[li]|casa|apartamento|contrato|visita|propriet[áa]rio|" +
   "inquilino|locação|fiador|vistoria|taxa|condomínio|iptu|" +
@@ -202,6 +207,14 @@ export async function generateAnswer(
   // Pré-filtro off-topic: mensagens curtas e emocionais/saudações sem
   // termos de domínio são encaminhadas para humano sem custo de LLM.
   if (isLikelyOffTopic(userMessage)) {
+    if (GREETING_RAG_REGEX.test(userMessage.trim())) {
+      return {
+        answer: GREETING_REPLY,
+        handoff: false,
+        topScore: 0,
+        usedChunkIds: [],
+      };
+    }
     return {
       answer: FALLBACK_ANSWER,
       handoff: true,

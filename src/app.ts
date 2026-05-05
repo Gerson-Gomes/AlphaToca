@@ -16,6 +16,7 @@ import contractRoutes from './routes/contractRoutes';
 import chatRoutes from './routes/chatRoutes';
 import favoriteRoutes from './routes/favoriteRoutes';
 import financeRoutes from './routes/financeRoutes';
+import rentalProcessRoutes from './routes/rentalProcessRoutes';
 import { checkJwt, authSyncMiddleware, validateAuthConfig } from './middlewares/authMiddleware';
 import prisma from './config/db';
 import { queueRedisConnection } from './queues/whatsappQueue';
@@ -123,6 +124,9 @@ app.use('/api', authStack, favoriteRoutes);
 
 // Finance & Dossier Routes
 app.use('/api', authStack, financeRoutes);
+
+// Rental Process Routes
+app.use('/api', authStack, rentalProcessRoutes);
 
 // Apply Global Error Handler
 app.use(errorHandler);

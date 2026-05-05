@@ -1,23 +1,7 @@
 services:
-  db:
-    image: ankane/pgvector:latest
-    container_name: alphatoca_db
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin_pwd}
-      POSTGRES_DB: ${POSTGRES_DB:-alphatoca}
-    ports:
-      - "${DB_PORT_EXTERNAL:-5433}:5432"
-    volumes:
-      - pg-data:/var/lib/postgresql/data
-    restart: unless-stopped
-
   redis:
     image: redis:alpine
     container_name: alphatoca_redis
     ports:
       - "6380:6379"
     restart: unless-stopped
-
-volumes:
-  pg-data:
