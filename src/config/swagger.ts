@@ -169,7 +169,22 @@ const options: swaggerJsdoc.Options = {
 const specs = swaggerJsdoc(options);
 
 export const setupSwagger = (app: Express) => {
-  app.use('/docs', swaggerUi.serve, swaggerUi.setup(specs));
+  // Montamos em '/docs/' (com a barra final) para evitar que o swagger-ui-express
+  // emita um redirect 301 absoluto de '/docs' -> '/docs/' que quebra por trás de
+  // um reverse proxy com prefixo (ex: Nginx /server01/).
+  // Com a barra final o Express não faz o redirect e o Swagger já carrega direto.
+  app.use(
+    '/docs',
+    swaggerUi.serve,
+    swaggerUi.setup(specs, {
+      // Força os assets (CSS/JS do Swagger UI) a usarem caminhos relativos,
+      // necessário quando a app está servida sob um subpath via proxy.
+      customJs: undefined,
+      swaggerOptions: {
+        persistAuthorization: true,
+      },
+    }),
+  );
   console.log('[swagger]: Documentação disponível em /docs');
 };
 
