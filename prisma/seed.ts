@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import {
   generateUsers,
-  generateProperties,
+  // generateProperties,
   generateChatSessions,
   generateMessages,
   generateKnowledgeDocuments,
@@ -17,9 +17,9 @@ export async function main() {
   console.log('Clearing database...');
   await prisma.message.deleteMany();
   await prisma.chatSession.deleteMany();
-  await prisma.rentalDocument.deleteMany().catch(() => {});
-  await prisma.aiExtractedInsight.deleteMany().catch(() => {});
-  await prisma.rentalProcess.deleteMany().catch(() => {});
+  await prisma.rentalDocument.deleteMany().catch(() => { });
+  await prisma.aiExtractedInsight.deleteMany().catch(() => { });
+  await prisma.rentalProcess.deleteMany().catch(() => { });
   await prisma.propertyImage.deleteMany();
   await prisma.property.deleteMany();
   await prisma.user.deleteMany();
@@ -39,10 +39,8 @@ export async function main() {
   if (tenantIds.length === 0) tenantIds.push(users[0].id);
 
   // 3. Generate and insert Properties
-  console.log('Generating Properties...');
-  const randomProperties = generateProperties(98, landlordIds);
-  const properties = [...demoProperties, ...randomProperties];
-  await prisma.property.createMany({ data: properties });
+  console.log('Inserting Demo Properties...');
+  await prisma.property.createMany({ data: demoProperties });
 
   console.log('Inserting Property Images...');
   await prisma.propertyImage.createMany({ data: demoPropertyImages });

@@ -10,7 +10,7 @@ export const generateUsers = (count: number) => {
   }));
 };
 
-export const generateProperties = (count: number, landlordIds: string[]) => {
+/*export const generateProperties = (count: number, landlordIds: string[]) => {
   return Array.from({ length: count }).map(() => ({
     id: faker.string.uuid(),
     landlordId: faker.helpers.arrayElement(landlordIds),
@@ -40,7 +40,7 @@ export const generateProperties = (count: number, landlordIds: string[]) => {
     propertyTax: faker.number.float({ min: 50, max: 500, fractionDigits: 2 }),
   }));
 };
-
+*/
 export const generateChatSessions = (count: number, tenantIds: string[]) => {
   return Array.from({ length: count }).map(() => ({
     id: faker.string.uuid(),

@@ -234,6 +234,22 @@ export const demoPropertyImages = [
     caption: 'Cozinha',
     createdAt: new Date(),
   },
+  {
+    id: 'img-demo-rj3-1',
+    propertyId: 'prop-demo-rj-3',
+    url: 'http://10.0.2.2:3000/uploads/prop-demo-rj-3/0001.jpeg',
+    isCover: true,
+    caption: 'Estudio',
+    createdAt: new Date(),
+  },
+  {
+    id: 'img-demo-rj3-2',
+    propertyId: 'prop-demo-rj-3',
+    url: 'http://10.0.2.2:3000/uploads/prop-demo-rj-3/0002.jpeg',
+    isCover: false,
+    caption: 'Estudio',
+    createdAt: new Date(),
+  },
 
 
 ];
