@@ -169,7 +169,7 @@ const options: swaggerJsdoc.Options = {
 const specs = swaggerJsdoc(options);
 
 export const setupSwagger = (app: Express) => {
-  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(specs));
-  console.log('[swagger]: Documentação disponível em /api-docs');
+  app.use('/docs', swaggerUi.serve, swaggerUi.setup(specs));
+  console.log('[swagger]: Documentação disponível em /docs');
 };
 
