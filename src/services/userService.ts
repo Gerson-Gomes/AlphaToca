@@ -50,8 +50,15 @@ export const userService = {
 
   /**
    * Upsert a user from Firebase Auth JWT payload.
-   * Uses firebaseUid (the "uid" claim) as the unique identifier for sync.
-   * If the user doesn't exist, creates a new one with a UUID id.
+   *
+   * Handles the "WhatsApp first, register later" scenario: if a user with
+   * the same phoneNumber already exists (created by the WhatsApp worker
+   * without firebaseUid), links the firebaseUid to that existing record
+   * instead of creating a duplicate.
+   *
+   * Also handles the reverse: if the Firebase user already exists with a
+   * placeholder phone and a real phone is provided, migrates the phone and
+   * merges with any WhatsApp-created user that already owns that phone.
    */
   async upsertUserFromFirebase(firebasePayload: any): Promise<User> {
     const uid = firebasePayload.uid;
@@ -59,16 +66,13 @@ export const userService = {
       throw new Error('Firebase payload is missing the "uid" claim.');
     }
 
-    // Attempt to extract name from payload or email
     const name = (firebasePayload.name as string) || (firebasePayload.email ? firebasePayload.email.split('@')[0] : 'Unknown');
     const email = firebasePayload.email as string | undefined;
     const phoneNumber = firebasePayload.phone_number as string | undefined;
-    
-    // Custom claims in Firebase are usually accessed directly from the payload.
-    // If you plan to set 'role' via custom claims, we can read it here.
+
     const rolesClaim = firebasePayload.roles || firebasePayload.role;
-    const roles = Array.isArray(rolesClaim) 
-      ? rolesClaim.map((r) => String(r).toUpperCase())
+    const roles = Array.isArray(rolesClaim)
+      ? rolesClaim.map((r: string) => String(r).toUpperCase())
       : typeof rolesClaim === 'string' ? [rolesClaim.toUpperCase()] : null;
 
     let mappedRole: Role | undefined;
@@ -78,25 +82,69 @@ export const userService = {
       else mappedRole = 'TENANT';
     }
 
-    // phoneNumber is @unique in the schema, so a shared "pending" placeholder
-    // would collide for the second user without a phone claim. Scope it per uid.
     const placeholderPhone = `pending:${uid}`;
 
-    return await prisma.user.upsert({
+    // 1. Try to find user by firebaseUid
+    const existingByUid = await prisma.user.findUnique({
       where: { firebaseUid: uid },
-      update: {
+    });
+
+    if (existingByUid) {
+      const updateData: any = {
         name,
         ...(email && { email }),
-        ...(phoneNumber && { phoneNumber }),
-        ...(mappedRole && { role: mappedRole })
-      },
-      create: {
+        ...(mappedRole && { role: mappedRole }),
+      };
+
+      if (phoneNumber) {
+        // Check if another user (from WhatsApp) already has this phone
+        const phoneOwner = await prisma.user.findUnique({
+          where: { phoneNumber },
+        });
+
+        if (phoneOwner && phoneOwner.id !== existingByUid.id) {
+          // Merge: delete the WhatsApp duplicate, then update the Firebase user
+          await prisma.user.delete({ where: { id: phoneOwner.id } });
+        }
+
+        updateData.phoneNumber = phoneNumber;
+      }
+
+      return prisma.user.update({
+        where: { firebaseUid: uid },
+        data: updateData,
+      });
+    }
+
+    // 2. If phoneNumber is provided, try to find user by phone
+    // (created by WhatsApp worker without firebaseUid yet).
+    if (phoneNumber) {
+      const existingByPhone = await prisma.user.findUnique({
+        where: { phoneNumber },
+      });
+
+      if (existingByPhone) {
+        return prisma.user.update({
+          where: { id: existingByPhone.id },
+          data: {
+            firebaseUid: uid,
+            name,
+            ...(email && { email }),
+            ...(mappedRole && { role: mappedRole }),
+          },
+        });
+      }
+    }
+
+    // 3. No existing user found — create new
+    return prisma.user.create({
+      data: {
         firebaseUid: uid,
         name,
         email,
         phoneNumber: phoneNumber || placeholderPhone,
-        role: mappedRole ?? 'TENANT'
-      }
+        role: mappedRole ?? 'TENANT',
+      },
     });
   }
 };

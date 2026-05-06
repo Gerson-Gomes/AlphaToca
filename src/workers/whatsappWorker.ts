@@ -459,7 +459,14 @@ export const whatsappWorker = new Worker<WhatsAppWebhookPayload>(
                         windowSeconds: PHONE_RATE_WINDOW_SECONDS,
                     }),
                 emitEvent: async (event: string, data: any) => {
-                    socketEmitter.emit(event, data);
+                    const tenantId = data?.tenantId;
+                    const senderType = data?.message?.senderType;
+                    if (tenantId) {
+                        socketEmitter.to(`user:${tenantId}`).emit(event, data);
+                    }
+                    if (senderType === 'TENANT' || event === 'session_updated') {
+                        socketEmitter.to('provider:all').emit(event, data);
+                    }
                 },
             });
         } catch (dbError: any) {
