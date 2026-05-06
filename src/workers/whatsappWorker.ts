@@ -1,5 +1,6 @@
 import { Worker, Job } from 'bullmq';
 import IORedis from 'ioredis';
+import { Emitter } from '@socket.io/redis-emitter';
 import type { ChatSession, PrismaClient } from '@prisma/client';
 import { WhatsAppWebhookPayload } from '../types/whatsapp';
 import prisma from '../config/db';
@@ -103,6 +104,7 @@ export interface WhatsappHandlerDeps {
     leadExtractionLimiter?: ConcurrencyLimiter;
     log?: Logger;
     checkRateLimit?: PhoneRateLimitCheck;
+    emitEvent?: (event: string, data: any) => Promise<void>;
 }
 
 export interface WhatsappHandlerResult {
@@ -216,7 +218,7 @@ export async function handleWhatsappMessage(
           })
         : previousSession;
 
-    await deps.prisma.message.create({
+    const tenantMsg = await deps.prisma.message.create({
         data: {
             wamid: wamid || null,
             sessionId: chatSession.id,
@@ -225,14 +227,42 @@ export async function handleWhatsappMessage(
         },
     });
 
+    await deps.emitEvent?.('new_message', {
+        tenantId: user.id,
+        sessionId: chatSession.id,
+        message: {
+            id: tenantMsg.id,
+            sessionId: chatSession.id,
+            senderType: 'TENANT',
+            content: messageText,
+            status: 'sent',
+            timestamp: tenantMsg.timestamp,
+            wamid: wamid || null,
+        },
+    });
+
     if (isNewOrResetSession && GREETING_REGEX.test(messageText.trim())) {
         try {
             await deps.sendMessage(phoneNumber, WELCOME_MESSAGE);
-            await deps.prisma.message.create({
+            const welcomeMsg = await deps.prisma.message.create({
                 data: {
                     sessionId: chatSession.id,
                     senderType: 'BOT',
                     content: WELCOME_MESSAGE,
+                },
+            });
+
+            await deps.emitEvent?.('new_message', {
+                tenantId: user.id,
+                sessionId: chatSession.id,
+                message: {
+                    id: welcomeMsg.id,
+                    sessionId: chatSession.id,
+                    senderType: 'BOT',
+                    content: WELCOME_MESSAGE,
+                    status: 'sent',
+                    timestamp: welcomeMsg.timestamp,
+                    wamid: null,
                 },
             });
             log.info({ phoneNumber }, '[worker] welcome message sent for new session');
@@ -266,11 +296,25 @@ export async function handleWhatsappMessage(
             });
 
             await deps.sendMessage(phoneNumber, searchAnswer);
-            await deps.prisma.message.create({
+            const searchMsg = await deps.prisma.message.create({
                 data: {
                     sessionId: chatSession.id,
                     senderType: 'BOT',
                     content: searchAnswer,
+                },
+            });
+
+            await deps.emitEvent?.('new_message', {
+                tenantId: user.id,
+                sessionId: chatSession.id,
+                message: {
+                    id: searchMsg.id,
+                    sessionId: chatSession.id,
+                    senderType: 'BOT',
+                    content: searchAnswer,
+                    status: 'sent',
+                    timestamp: searchMsg.timestamp,
+                    wamid: null,
                 },
             });
 
@@ -315,7 +359,7 @@ export async function handleWhatsappMessage(
         log.error({ err: sendError }, '[worker] failed to send WhatsApp message');
     }
 
-    await deps.prisma.message.create({
+    const ragMsg = await deps.prisma.message.create({
         data: {
             wamid: outboundWamid,
             sessionId: chatSession.id,
@@ -324,10 +368,30 @@ export async function handleWhatsappMessage(
         },
     });
 
+    await deps.emitEvent?.('new_message', {
+        tenantId: user.id,
+        sessionId: chatSession.id,
+        message: {
+            id: ragMsg.id,
+            sessionId: chatSession.id,
+            senderType: 'BOT',
+            content: answer,
+            status: 'sent',
+            timestamp: ragMsg.timestamp,
+            wamid: outboundWamid,
+        },
+    });
+
     if (handoff) {
         await deps.prisma.chatSession.update({
             where: { id: chatSession.id },
             data: { status: 'WAITING_HUMAN' },
+        });
+
+        await deps.emitEvent?.('session_updated', {
+            tenantId: user.id,
+            sessionId: chatSession.id,
+            status: 'WAITING_HUMAN',
         });
     }
 
@@ -371,6 +435,8 @@ connection.on('error', (err) => {
     process.exit(1);
 });
 
+const socketEmitter = new Emitter(connection);
+
 export const whatsappWorker = new Worker<WhatsAppWebhookPayload>(
     'whatsapp-messages',
     async (job: Job<WhatsAppWebhookPayload>) => {
@@ -392,6 +458,9 @@ export const whatsappWorker = new Worker<WhatsAppWebhookPayload>(
                         limit: PHONE_RATE_LIMIT,
                         windowSeconds: PHONE_RATE_WINDOW_SECONDS,
                     }),
+                emitEvent: async (event: string, data: any) => {
+                    socketEmitter.emit(event, data);
+                },
             });
         } catch (dbError: any) {
             if (dbError?.code === 'P2002' && dbError?.meta?.target?.includes('wamid')) {

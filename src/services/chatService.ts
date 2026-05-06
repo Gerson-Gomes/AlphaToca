@@ -32,14 +32,22 @@ export async function getOrCreateSession(tenantId: string) {
   return session;
 }
 
-export async function listSessions(filters: { tenantId?: string }) {
+export async function listSessions(filters: { tenantId?: string; status?: ChatStatus }) {
+  const where: any = {};
+  if (filters.tenantId) where.tenantId = filters.tenantId;
+  if (filters.status) where.status = filters.status;
   return prisma.chatSession.findMany({
-    where: filters,
+    where,
     include: {
-      tenant: { select: { id: true, name: true } },
-      _count: { select: { messages: true } }
+      tenant: { select: { id: true, name: true, phoneNumber: true } },
+      _count: { select: { messages: true } },
+      messages: {
+        orderBy: { timestamp: 'desc' },
+        take: 1,
+        select: { content: true, timestamp: true, senderType: true },
+      },
     },
-    orderBy: { startedAt: 'desc' }
+    orderBy: { startedAt: 'desc' },
   });
 }
 
@@ -60,6 +68,7 @@ export async function saveMessage(data: {
   senderType: SenderType;
   content: string;
   mediaUrl?: string;
+  wamid?: string | null;
 }) {
   return prisma.message.create({
     data: {
@@ -67,8 +76,9 @@ export async function saveMessage(data: {
       senderType: data.senderType,
       content: data.content,
       mediaUrl: data.mediaUrl,
-      status: 'sent'
-    }
+      wamid: data.wamid ?? null,
+      status: 'sent',
+    },
   });
 }
 

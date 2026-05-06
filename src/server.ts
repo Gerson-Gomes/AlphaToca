@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import http from 'http';
 
 import app from './app';
 import './workers/whatsappWorker';
@@ -7,6 +8,7 @@ import { setupSwagger } from './config/swagger';
 import { bootstrapLangSmith } from './config/langsmith';
 import { assertRagSecrets } from './config/rag';
 import { validateWebhookConfig } from './controllers/webhookController';
+import { initializeSocket } from './config/socket';
 import { logger } from './config/logger';
 
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -17,8 +19,13 @@ validateWebhookConfig();
 
 // Inicializa integrações
 bootstrapLangSmith();
-setupSwagger(app); // Habilita a documentação visual do Swagger
+setupSwagger(app);
 
-app.listen(port, '0.0.0.0', () => {
-    logger.info({ port }, '[server] server is running on 0.0.0.0');
+const server = http.createServer(app);
+
+// Anexa WebSocket (Socket.IO) ao servidor HTTP
+initializeSocket(server);
+
+server.listen(port, '0.0.0.0', () => {
+    logger.info({ port }, '[server] HTTP + WebSocket running on 0.0.0.0');
 });
