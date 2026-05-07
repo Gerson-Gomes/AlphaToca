@@ -16,8 +16,8 @@
         "progress.txt has a clear 'Root cause: <hypothesis N>' line so US-002 can act on it"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "Investigation complete — all 3 backend hypotheses REJECTED. Live curl on `/uploads/b0000001-.../0001.png` returns 200 + `Access-Control-Allow-Origin: *` + `Content-Type: image/png`. Files exist on disk (see progress.txt). `src/app.ts` applies `cors()` at line 40 BEFORE `express.static('/uploads', ...)` at line 50. Real placeholder issue is frontend-side (`_normalizeLocalHost` rewrites `10.0.2.2` → `localhost` unconditionally, breaking Android emulator builds). US-002 has no backend fix to apply — see progress.txt `US-002 decision` section."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",

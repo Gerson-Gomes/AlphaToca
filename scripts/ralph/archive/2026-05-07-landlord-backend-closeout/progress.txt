@@ -1,0 +1,6 @@
+# Ralph Progress Log
+Started: Thu May  7 2026 (backend-gaps-finais)
+---
+
+## Codebase Patterns
+(Carry over from archive/2026-05-07-landlord-backend-closeout/progress.txt — add new ones as discovered during this run.)
