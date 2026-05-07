@@ -62,7 +62,7 @@ const options: swaggerJsdoc.Options = {
             title: { type: 'string', minLength: 3, example: 'Apartamento Decorado Centro' },
             description: { type: 'string', minLength: 10, example: 'Lindo apartamento com 2 quartos e varanda gourmet.' },
             price: { type: 'number', minimum: 0, example: 2500.00 },
-            status: { type: 'string', enum: ['AVAILABLE', 'IN_NEGOTIATION', 'RENTED'], default: 'AVAILABLE' },
+            status: { type: 'string', enum: ['AVAILABLE', 'NEGOTIATING', 'RENTED'], default: 'AVAILABLE' },
             address: { type: 'string', minLength: 5, example: 'Rua das Flores, 123, São Paulo - SP' },
             type: { type: 'string', enum: ['APARTMENT', 'HOUSE', 'STUDIO', 'CONDO_HOUSE'], default: 'APARTMENT' },
             bedrooms: { type: 'integer', minimum: 0, example: 2 },

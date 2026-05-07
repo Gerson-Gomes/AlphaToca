@@ -34,8 +34,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented as a rename migration: schema previously shipped with PropertyStatus=AVAILABLE|IN_NEGOTIATION|RENTED (since 20260414200145_init_whatsapp_tables), so the contract-matching change was renaming IN_NEGOTIATION→NEGOTIATING. Schema updated (prisma/schema.prisma), new migration prisma/migrations/20260507151907_add_property_status/migration.sql uses ALTER TYPE ... RENAME VALUE (in-place catalog rewrite — zero data loss on the existing Supabase DB). Code callsites updated: src/services/proposalService.ts (property.update data.status literal + comment), src/config/swagger.ts (Property.status enum), src/routes/propertyRoutes.ts (2 JSDoc enum lines for POST), documentation/owner_listing_guide.md + documentation/app_guide.md (status label). npx prisma validate → valid; npx prisma generate → ok; npx tsc --noEmit → clean; property/seed/proposal/routes test set → 55/55 pass; full suite: 218 pass / 15 fail (unchanged pre-existing Auth0→Firebase baseline). DB migration apply not run against live Supabase (pooler-only DATABASE_URL, production data) — reviewer must run `prisma migrate reset --force` on a fresh dev DB before closing."
     },
     {
       "id": "US-003",

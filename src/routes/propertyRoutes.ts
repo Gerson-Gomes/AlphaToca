@@ -87,7 +87,7 @@ const adminAuthStack = [checkJwt, authSyncMiddleware, requireRole('ADMIN')];
  *                 example: 150.00
  *               status:
  *                 type: string
- *                 enum: [AVAILABLE, IN_NEGOTIATION, RENTED]
+ *                 enum: [AVAILABLE, NEGOTIATING, RENTED]
  *         multipart/form-data:
  *           schema:
  *             type: object
@@ -150,7 +150,7 @@ const adminAuthStack = [checkJwt, authSyncMiddleware, requireRole('ADMIN')];
  *                 example: 150.00
  *               status:
  *                 type: string
- *                 enum: [AVAILABLE, IN_NEGOTIATION, RENTED]
+ *                 enum: [AVAILABLE, NEGOTIATING, RENTED]
  *               photos:
  *                 type: array
  *                 maxItems: 20

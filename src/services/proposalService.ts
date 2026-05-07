@@ -71,11 +71,11 @@ export async function createProposal(input: CreateProposalInput) {
     }
   });
 
-  // Update property status to IN_NEGOTIATION if it was AVAILABLE
+  // Update property status to NEGOTIATING if it was AVAILABLE
   if (property.status === 'AVAILABLE') {
     await prisma.property.update({
       where: { id: input.propertyId },
-      data: { status: 'IN_NEGOTIATION' }
+      data: { status: 'NEGOTIATING' }
     });
   }
 

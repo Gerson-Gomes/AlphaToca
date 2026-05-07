@@ -70,7 +70,7 @@ Você recebe uma notificação push com o resultado da moderação (PROPERTY_APP
 ### Status do imóvel
 Você pode alterar o status do seu imóvel a qualquer momento:
 - **Disponível (AVAILABLE):** Imóvel disponível para locação e visível nas buscas
-- **Em Negociação (IN_NEGOTIATION):** Há uma proposta sendo analisada
+- **Em Negociação (NEGOTIATING):** Há uma proposta sendo analisada
 - **Alugado (RENTED):** Imóvel já alugado
 
 ### Visualizações

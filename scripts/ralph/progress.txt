@@ -8,6 +8,10 @@ Started: Thu May  7 12:11:39 PM -03 2026
 - Test runner: `npx vitest run` (vitest config in `vitest.config.ts`). Many pre-existing tests fail due to an unfinished Auth0→Firebase migration (`userService.upsertUserFromAuth0` missing, `tests/auth.test.ts`, `tests/ingestKnowledge.test.ts`) — treat those as baseline noise, not regressions.
 - Grep scope for "seed" lookups: include `prisma/` (generators.ts, demoData.ts, demoIds.ts, seed.ts) — seeds are not under `src/` in this repo.
 - Typecheck: `npx tsc --noEmit` — must pass before commit.
+- `.env` DATABASE_URL points at the live Supabase project — DO NOT run `prisma migrate dev/deploy/reset` locally; hand-author `prisma/migrations/<stamp>_<name>/migration.sql` instead and verify with `npx prisma validate` + `npx prisma generate`. Reviewer runs the actual `migrate reset --force` on a disposable dev DB before landing.
+- Swagger is split: `src/config/swagger.ts` owns component schemas (e.g., `Property`); per-route JSDoc blocks in `src/routes/*.ts` own request/response shapes — when an enum changes, both files need an edit.
+- Prisma enum value rename: use `ALTER TYPE "X" RENAME VALUE 'OLD' TO 'NEW';` — it rewrites the catalog label in place, so existing rows carry over with zero data loss (no `UPDATE` pass required).
+- `propertyValidation.ts` uses `z.nativeEnum(PropertyStatus)` — it re-reads the Prisma client enum at import time, so bumping the enum only requires a `prisma generate`, not a Zod edit.
 
 ---
 
@@ -31,4 +35,30 @@ Started: Thu May  7 12:11:39 PM -03 2026
   - The seed mock in `tests/seed.test.ts` swaps `@prisma/client`'s `PrismaClient` — so any future seed tweak must keep the same deleteMany/createMany call surface or that test snaps.
   - `tests/seedUuidRegression.test.ts` mocks both `authMiddleware` and `propertyService.searchProperties` and proves the chain `/users/me → /properties/search?landlordId=<id>` returns 200 for a canonical UUID and 400 for a non-UUID. This is the regression baseline.
   - Pre-existing failing tests (auth, userSync, ingestKnowledge, generators.test.ts before this story) are noise from an incomplete Auth0→Firebase migration — not our concern unless a story explicitly touches them.
+---
+
+## [2026-05-07] - US-002 - Add PropertyStatus enum to Prisma schema and migration
+- Context discovered at the top of the story: `PropertyStatus` enum and `Property.status PropertyStatus @default(AVAILABLE)` were already present (shipped in 20260414200145_init_whatsapp_tables). The only gap vs the PRD contract was the middle value — schema had `IN_NEGOTIATION`, the frontend and PRD expect `NEGOTIATING`.
+- Chose rename-in-place over drop-and-recreate because (a) existing rows in the remote Supabase DB would otherwise need a data migration, and (b) `ALTER TYPE ... RENAME VALUE` is a catalog-only rewrite: all rows carrying the old label transparently adopt the new one with no table rewrite and no downtime.
+- Prisma generate re-emits `@prisma/client` with the new union, so `z.nativeEnum(PropertyStatus)` in `src/utils/propertyValidation.ts` picked up the change automatically (no Zod edit needed).
+- Files changed:
+  - prisma/schema.prisma (enum value: IN_NEGOTIATION → NEGOTIATING)
+  - prisma/migrations/20260507151907_add_property_status/migration.sql (new — ALTER TYPE ... RENAME VALUE)
+  - src/services/proposalService.ts (status literal + Portuguese-adjacent comment)
+  - src/config/swagger.ts (Property component enum)
+  - src/routes/propertyRoutes.ts (2 JSDoc enum lines on POST body schemas — application/json and multipart)
+  - documentation/owner_listing_guide.md (user-facing status label)
+  - documentation/app_guide.md (user-facing status label)
+- Verification:
+  - `npx prisma validate` → schema valid
+  - `npx prisma generate` → client regenerated (v6.4.1)
+  - `npx tsc --noEmit` → exit 0
+  - `npx vitest run tests/propertyPhotoUpload.test.ts tests/seed.test.ts tests/generators.test.ts tests/demoIds.test.ts tests/seedUuidRegression.test.ts` → 55/55 pass
+  - Full suite: 218 pass / 15 fail — same baseline as end of US-001 (auth.test.ts + userSync.test.ts + ingestKnowledge.test.ts Auth0→Firebase gaps). One flaky isolation failure in visitService.test.ts when run in parallel; passes clean when run alone (17/17). No regression introduced.
+  - DB-level verification (`prisma migrate reset --force && prisma db seed`) NOT executed — DATABASE_URL in `.env` is the live Supabase pooler, reviewer must run on a disposable dev DB before closing.
+- **Learnings for future iterations:**
+  - When the schema already satisfies part of a story's contract (as here — enum + default field were already on `Property`), keep the delta minimal; don't re-emit unchanged DDL. The migration name `add_property_status` is kept for PRD trace even though in-repo it's actually a rename.
+  - `src/utils/propertyValidation.ts` uses `z.nativeEnum(PropertyStatus)` rather than a hard-coded list — this is the preferred pattern for enum validation and means Zod-side edits are free when the Prisma enum changes.
+  - Swagger lives in two places that both need edits on enum changes: `src/config/swagger.ts` (central component schemas) and per-route JSDoc blocks in `src/routes/*.ts` (request/response shapes). `propertyRoutes.ts:90` and `:153` both had the enum duplicated for the JSON and multipart branches of POST.
+  - The live Supabase DB is reachable from `.env` — do NOT run `prisma migrate dev` here (it would apply to the pooler-backed prod DB). Hand-author the SQL and rely on `prisma validate` + `prisma generate` locally; real apply is the reviewer's step on a throwaway dev DB.
 ---

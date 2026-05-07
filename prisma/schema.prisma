@@ -20,7 +20,7 @@ enum Role {
 
 enum PropertyStatus {
   AVAILABLE
-  IN_NEGOTIATION
+  NEGOTIATING
   RENTED
 }
 
