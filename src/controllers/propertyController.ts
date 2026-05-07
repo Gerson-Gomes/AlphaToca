@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { propertyService, PropertyError } from '../services/propertyService';
 import { profileViewService } from '../services/profileViewService';
+import { propertyViewService } from '../services/propertyViewService';
 import { analyticsService } from '../services/analyticsService';
 import {
   createPropertySchema,
@@ -108,6 +109,12 @@ export const propertyController = {
       if (req.query.inspectLandlord === 'true') {
         void profileViewService.record(property.landlordId, req.localUser?.id ?? null);
       }
+
+      // LL-006: evento por abertura da ficha para alimentar a série diária do
+      // endpoint de analytics por imóvel (LL-008). Também incrementa
+      // Property.views (contador agregado all-time preservado — FR-12).
+      // Fire-and-forget: nunca bloqueia a resposta.
+      void propertyViewService.record(property.id, req.localUser?.id ?? null);
 
       return res.status(200).json(property);
     } catch (error) {

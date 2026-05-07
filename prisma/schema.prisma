@@ -188,6 +188,7 @@ model Property {
   rentalPayments  RentalPayment[]
   conversations   Conversation[]
   chatSessions    ChatSession[]
+  viewEvents      PropertyViewEvent[] @relation("PropertyViewEvents")
 
   @@index([moderationStatus], name: "properties_moderation_status_idx")
   @@map("properties")
@@ -592,4 +593,23 @@ model ProfileView {
 
   @@index([landlordId, viewedAt], name: "profile_views_landlord_time_idx")
   @@map("profile_views")
+}
+
+// Evento por abertura da ficha de um Property. Alimenta a série diária do
+// endpoint de analytics por imóvel (LL-008 GET /api/properties/:id/analytics) —
+// `views` em Property.views (contador agregado all-time) continua sendo
+// incrementado em paralelo para preservar o ordering `orderBy=views` no
+// search existente. `viewerId` é nulo para visitantes anônimos; quando
+// não nulo, o service aplica dedup de 1h (LL-006) — mais curto que o dedup
+// de ProfileView (24h) porque a granularidade do gráfico é diária.
+model PropertyViewEvent {
+  id         String   @id @default(uuid())
+  propertyId String   @map("property_id")
+  viewerId   String?  @map("viewer_id")
+  viewedAt   DateTime @default(now()) @map("viewed_at")
+
+  property Property @relation("PropertyViewEvents", fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@index([propertyId, viewedAt], name: "property_view_events_property_time_idx")
+  @@map("property_view_events")
 }

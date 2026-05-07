@@ -18,6 +18,7 @@ Started: Thu May  7 04:25:36 PM -03 2026
 - Per-route role gating on `propertyRoutes` (mounted without authStack at `app.use('/api', propertyRoutes)`) uses a local `landlordAuthStack = [checkJwt, authSyncMiddleware, requireRole(Role.LANDLORD)]` spread on the route, mirroring the existing `adminAuthStack` pattern. Don't move `propertyRoutes` under the global `authStack` mount — too many routes in that file are intentionally public (getById, search, list).
 - Route-specific paths MUST be registered before the `:id` param route in the router file. Express path-matching rejects `/properties/:id` for `/properties/analytics/monthly` by segment count (3 vs 2), BUT keeping specific routes above `:id` avoids surprises when anyone later adds a `:id/subroute`. Place new specific GETs right after `/properties/search`.
 - HTTP tests for controllers that delegate to a service module: mock the service, not `prisma`. Example for LL-005: `vi.mock('../src/services/analyticsService', () => ({ analyticsService: { monthlySeries: mockMonthlySeries } }))`. Then assert the service was called with the controller-parsed args (e.g. Date objects, landlordId from req.localUser).
+- Fire-and-forget tracking services (profileView/propertyView) all follow the same shape: try/catch wrapping a conditional dedup findFirst + create, with errors swallowed via `logger.error`. When a tracking call also mutates a sibling table (e.g. `Property.views` counter in LL-006), keep BOTH writes inside the same try block so a failure in either surfaces only in logs — the controller stays unaware.
 
 ## 2026-05-07 - LL-001 — Profile view tracking table + increment hook
 - Added `ProfileView` Prisma model (landlordId, viewerId?, viewedAt) + inverse relation on `User` + `@@index([landlordId, viewedAt])` + onDelete Cascade.
@@ -108,4 +109,24 @@ Started: Thu May  7 04:25:36 PM -03 2026
   - When a controller delegates to a service, mock the service layer in the HTTP test (not `prisma`). It isolates behavior to the handler contract (parsed args in → response out), and keeps the test robust to service-internal refactors like LL-004's three-query-raw chain.
   - Zod's `superRefine` runs AFTER individual field regex checks — so when both bounds are malformed, the refine body is skipped entirely (both fields already yielded issues). This is why the "from > to" test uses valid ISO strings: the refine branch only runs when both pass the regex.
   - Next migration timestamp ceiling is still `>= 20260507210001` (this story added no migrations; LL-006 onward will need fresh timestamps).
+---
+
+## 2026-05-07 - LL-006 — PropertyViewEvent table + increment hook
+- Added `PropertyViewEvent` Prisma model (`propertyId`, `viewerId?`, `viewedAt`) + inverse relation `viewEvents` on `Property` + `@@index([propertyId, viewedAt])` + `onDelete: Cascade` on property FK.
+- Hand-authored `prisma/migrations/20260507220000_add_property_view_event/migration.sql` — verified byte-for-byte against `prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script` (CREATE TABLE + CREATE INDEX + FK all match exactly).
+- `npx prisma validate` + `npx prisma generate` both succeed.
+- Created `src/services/propertyViewService.ts::record(propertyId, viewerId?)` — fire-and-forget:
+  - 1h dedup for authenticated viewers via `findFirst { propertyId, viewerId, viewedAt: { gte: now-1h } }`. Anonymous (`viewerId=null`) always inserts.
+  - On insert, ALSO increments the pre-existing `Property.views` aggregate counter via `prisma.property.update({ data: { views: { increment: 1 } } })` — preserves FR-12 so `orderBy=views` in the search endpoint still works. Deduped requests do NOT double-count the counter.
+  - Errors in either write swallowed via `logger.error` so tracking failures never surface to callers.
+- Wired into `propertyController.getById` with `void propertyViewService.record(property.id, req.localUser?.id ?? null)` — placed AFTER the 404 guard, AFTER the LL-001 profileView hook, ALWAYS runs (no query-param gate — every property detail open counts). Non-blocking.
+- Files changed: `prisma/schema.prisma`, `prisma/migrations/20260507220000_add_property_view_event/migration.sql`, `src/services/propertyViewService.ts` (new), `src/controllers/propertyController.ts` (import + hook), `tests/propertyViewService.test.ts` (new).
+- Tests: 7/7 new service tests pass — authenticated insert + counter increment, 1h dedup skip (no counter bump), anonymous always inserts + increments, default viewerId=null, DB error swallowed (create throws), DB error swallowed (property.update throws), 1h window math.
+- `npx tsc --noEmit` clean. Full suite: 445/466 pass — the 21 failures are exactly the same pre-existing set (auth/userSync/ingestKnowledge/rag*/visitValidation); net delta is +7 new passing, zero regressions.
+- **Learnings for future iterations:**
+  - `Property.views` has existed as a schema field for ages but nothing in the repo was actually incrementing it prior to this story (grepped `views: { increment` and `views\s*:\s*\{\s*increment` — zero hits). The AC wording "still incremented" read aspirationally — this story is effectively wiring the counter for the first time. The service doing it preserves the `orderBy=views` search path instead of deprecating it.
+  - When a property detail read both triggers a profileView (conditional on `?inspectLandlord=true`) and a propertyView (unconditional), the controller should call both fire-and-forget in parallel. Keep them as separate `void service.record(...)` calls rather than collapsing into one — each has different dedup windows (24h vs 1h) and different target tables.
+  - The 1h dedup window (vs 24h for ProfileView) is intentional: daily-granularity analytics should treat "returned to the listing after an hour" as a new data point; a single F5 on the same minute shouldn't. Shorter window = more events per day per user = denser daily series.
+  - Test mock shape for `prisma as default export` with nested models needs BOTH paths when the service touches two models — `{ default: { propertyViewEvent: {...}, property: {...} } }`. Missing the `property.update` mock silently swallows the error via try/catch and the test passes for the wrong reason (no TypeError). Always include a `mockPropertyUpdate.mockResolvedValue(...)` alongside `mockCreate.mockResolvedValue(...)` in positive-path tests.
+  - Next migration timestamp ceiling is now `>= 20260507220001`. LL-007 needs a fresh stamp (add_contact_click_event).
 ---
