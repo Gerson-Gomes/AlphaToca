@@ -673,6 +673,98 @@ router.put(
 
 /**
  * @swagger
+ * /properties/{propertyId}/payments:
+ *   get:
+ *     summary: Histórico multi-mês de pagamentos de aluguel para um inquilino
+ *     description: |
+ *       Retorna o histórico (lista) de `RentalPayment` para o par
+ *       (`propertyId`, `tenantId`). Apenas meses DENTRO da janela de algum
+ *       contrato (qualquer status) entre o imóvel e o inquilino são
+ *       incluídos — pagamentos registrados quando o imóvel estava alugado
+ *       por outro inquilino são excluídos.
+ *
+ *       Apenas o locador dono do imóvel pode ler — outros usuários
+ *       autenticados recebem 403; anônimos recebem 401. Imóveis
+ *       inexistentes retornam 404 ANTES do 403 para não diferenciar
+ *       "inexistente" de "alheio".
+ *
+ *       `paidAt` é derivado de `updatedAt` APENAS quando `status=PAID`;
+ *       nos demais status volta `null`. `amount` é o valor gravado no
+ *       snapshot do mês (0 para linhas anteriores ao backfill LL-003).
+ *       Ordem: `period DESC`.
+ *     tags: [Propriedades, Pagamentos]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: propertyId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *       - in: query
+ *         name: tenantId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       200:
+ *         description: Histórico de pagamentos (lista, possivelmente vazia).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 required: [period, amount, status, paidAt]
+ *                 properties:
+ *                   period:
+ *                     type: string
+ *                     pattern: '^\d{4}-(0[1-9]|1[0-2])$'
+ *                   amount:
+ *                     type: number
+ *                     format: float
+ *                   status:
+ *                     type: string
+ *                     enum: [AWAITING, PAID, LATE]
+ *                   paidAt:
+ *                     type: string
+ *                     format: date-time
+ *                     nullable: true
+ *       400:
+ *         description: `propertyId` (path) ou `tenantId` (query) inválidos/ausentes.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Token ausente ou inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: Usuário autenticado não é o dono do imóvel.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Propriedade não encontrada.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get(
+  '/properties/:propertyId/payments',
+  ...authStack,
+  rentalPaymentController.listByTenant,
+);
+
+/**
+ * @swagger
  * /properties/{id}/contact-click:
  *   post:
  *     summary: Registrar um clique em "Contatar" na ficha do imóvel

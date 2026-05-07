@@ -1,7 +1,11 @@
 import { Request, Response, NextFunction } from 'express';
 import { propertyService } from '../services/propertyService';
 import { rentalPaymentService } from '../services/rentalPaymentService';
-import { updateCurrentPaymentSchema } from '../utils/rentalPaymentValidation';
+import {
+  listPaymentsParamsSchema,
+  listPaymentsQuerySchema,
+  updateCurrentPaymentSchema,
+} from '../utils/rentalPaymentValidation';
 
 export const rentalPaymentController = {
   /**
@@ -94,6 +98,58 @@ export const rentalPaymentController = {
       const { status } = updateCurrentPaymentSchema.parse(req.body);
       const payment = await rentalPaymentService.upsertCurrent(id, status, localUser.id);
       return res.status(200).json(payment);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/properties/:propertyId/payments?tenantId=<uuid>
+   *
+   * Histórico multi-mês de pagamentos para o par (propertyId, tenantId). O
+   * service restringe os meses àqueles dentro da janela de algum contrato do
+   * inquilino com o imóvel — pagamentos registrados durante inquilinos
+   * anteriores não aparecem.
+   *
+   * Guards (ordem load-bearing):
+   *   401 — sem auth
+   *   400 — params/query inválidos (UUIDs)
+   *   404 — imóvel inexistente (antes do 403 pra não criar oráculo de existência)
+   *   403 — imóvel existe mas o caller !== landlordId
+   *   200 — lista (possivelmente vazia) em period DESC
+   */
+  async listByTenant(req: Request, res: Response, next: NextFunction) {
+    try {
+      const localUser = req.localUser;
+      if (!localUser) {
+        return res.status(401).json({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          messages: [{ message: 'Authentication required.' }],
+        });
+      }
+
+      const { propertyId } = listPaymentsParamsSchema.parse(req.params);
+      const { tenantId } = listPaymentsQuerySchema.parse(req.query);
+
+      const property = await propertyService.getPropertyById(propertyId);
+      if (!property) {
+        return res.status(404).json({
+          status: 404,
+          code: 'NOT_FOUND',
+          messages: [{ message: 'Property not found' }],
+        });
+      }
+      if (property.landlordId !== localUser.id) {
+        return res.status(403).json({
+          status: 403,
+          code: 'FORBIDDEN',
+          messages: [{ message: 'Only the property owner can read rental payment history.' }],
+        });
+      }
+
+      const payments = await rentalPaymentService.listByTenant(propertyId, tenantId);
+      return res.status(200).json(payments);
     } catch (error) {
       next(error);
     }

@@ -18,6 +18,40 @@ export type RentalPaymentView = {
   updatedBy: string | null;
 };
 
+// LL-009: item do histórico de pagamentos listado por
+// GET /api/properties/:propertyId/payments?tenantId=. `amount` é number (não
+// nullable) — linhas anteriores ao backfill da coluna (LL-003) ficam com 0.
+// `paidAt` é preenchido a partir de `updatedAt` APENAS quando `status=PAID`;
+// nos demais status volta `null`.
+export type RentalPaymentHistoryItem = {
+  period: string;
+  amount: number;
+  status: RentalPaymentStatus;
+  paidAt: string | null;
+};
+
+// Enumera YYYY-MM (UTC) cobrindo todos os meses de [start, end], inclusive em
+// ambos. Mesma semântica usada em `analyticsService.monthlySeries`, mas local
+// aqui para evitar acoplamento entre os dois módulos.
+function enumerateMonthsUtcInclusive(start: Date, end: Date): string[] {
+  const startY = start.getUTCFullYear();
+  const startM = start.getUTCMonth();
+  const endY = end.getUTCFullYear();
+  const endM = end.getUTCMonth();
+  const months: string[] = [];
+  let y = startY;
+  let m = startM;
+  while (y < endY || (y === endY && m <= endM)) {
+    months.push(`${y}-${String(m + 1).padStart(2, '0')}`);
+    m += 1;
+    if (m > 11) {
+      m = 0;
+      y += 1;
+    }
+  }
+  return months;
+}
+
 // Retorna o monthly_rent do contrato ACTIVE para o imóvel, ou `null` quando
 // não há contrato ativo no momento. Leitura no write time — histórico de
 // mudanças de rent NÃO é preservado (ver PRD §8 Q2 e o header da migration
@@ -124,5 +158,70 @@ export const rentalPaymentService = {
       updatedAt: row.updatedAt.toISOString(),
       updatedBy: row.updatedBy,
     };
+  },
+
+  /**
+   * LL-009: histórico multi-mês de pagamentos para a dupla (propertyId, tenantId).
+   *
+   * Busca TODOS os contratos entre esse inquilino e esse imóvel (independente
+   * de `ContractStatus`, porque TERMINATED/COMPLETED ainda delimitam uma janela
+   * legítima de tenure que o landlord quer ver) e extrai os meses YYYY-MM que
+   * caem dentro de `startDate..endDate` — inclusivo em ambos. Só os
+   * `RentalPayment` desses meses entram no resultado; pagamentos fora da
+   * tenure do inquilino (ex.: mês registrado durante o ciclo do inquilino
+   * anterior) são excluídos.
+   *
+   * Ordem: `period DESC` (mais recente primeiro, como o UI da "histórico de
+   * pagamentos" espera).
+   *
+   * Retorno vazio quando não há nenhum contrato entre os dois ou quando nenhum
+   * `RentalPayment` casa com os meses da tenure — ambos são respostas 200 `[]`,
+   * nunca 404.
+   */
+  async listByTenant(
+    propertyId: string,
+    tenantId: string,
+  ): Promise<RentalPaymentHistoryItem[]> {
+    const contracts = await prisma.contract.findMany({
+      where: { propertyId, tenantId },
+      select: { startDate: true, endDate: true },
+    });
+
+    if (contracts.length === 0) {
+      return [];
+    }
+
+    const validPeriods = new Set<string>();
+    for (const c of contracts) {
+      for (const period of enumerateMonthsUtcInclusive(c.startDate, c.endDate)) {
+        validPeriods.add(period);
+      }
+    }
+
+    if (validPeriods.size === 0) {
+      return [];
+    }
+
+    const rows = await prisma.rentalPayment.findMany({
+      where: {
+        propertyId,
+        period: { in: Array.from(validPeriods) },
+      },
+      select: {
+        period: true,
+        amount: true,
+        status: true,
+        updatedAt: true,
+      },
+      orderBy: { period: 'desc' },
+    });
+
+    return rows.map((row) => ({
+      period: row.period,
+      amount: row.amount === null ? 0 : Number(row.amount),
+      status: row.status,
+      paidAt:
+        row.status === RentalPaymentStatus.PAID ? row.updatedAt.toISOString() : null,
+    }));
   },
 };
