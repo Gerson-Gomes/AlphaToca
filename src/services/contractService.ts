@@ -141,6 +141,26 @@ export async function getContractById(id: string) {
   });
 }
 
+// Subset do Contract projetado para o download do PDF (US-015). Carrega
+// apenas o necessário para autorização (landlordId/tenantId) + pdfUrl. Evita
+// puxar property/tenant/landlord completos e payments — o endpoint só
+// precisa saber "quem pode" e "onde está o arquivo".
+export type ContractDownloadContext = {
+  id: string;
+  landlordId: string;
+  tenantId: string;
+  pdfUrl: string | null;
+};
+
+export async function getContractDownloadContext(
+  id: string,
+): Promise<ContractDownloadContext | null> {
+  return prisma.contract.findUnique({
+    where: { id },
+    select: { id: true, landlordId: true, tenantId: true, pdfUrl: true },
+  });
+}
+
 // Forma do Contract exposta por GET /api/contracts?propertyId=&tenantId=
 // (US-014). É um subset deliberado do modelo: omite landlordId/dueDay/status/
 // createdAt/updatedAt para alinhar com o contrato PRD exato. `pdfUrl` e

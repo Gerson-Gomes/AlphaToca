@@ -128,6 +128,72 @@ router.get('/contracts/:id', contractController.getById);
 
 /**
  * @swagger
+ * /contracts/{id}/pdf:
+ *   get:
+ *     summary: Download do PDF do contrato (US-015)
+ *     description: |
+ *       Retorna o PDF associado ao contrato. Autorização: o caller deve ser
+ *       o landlord OU o tenant do contrato — qualquer outro usuário
+ *       autenticado recebe 403.
+ *
+ *       Estratégia de storage: quando `Contract.pdfUrl` é um path relativo
+ *       (ex.: `/uploads/contracts/<id>.pdf`) o endpoint faz **stream** do
+ *       arquivo com `Content-Type: application/pdf`. Quando `pdfUrl` é uma
+ *       URL absoluta (http/https — cenário futuro com S3/Firebase + signed
+ *       URLs), o endpoint responde **302** com o Location apontando pro
+ *       backend externo. O frontend deve tratar ambos os caminhos (seguir
+ *       redirect automaticamente ou consumir o stream direto).
+ *
+ *       Erros esperados:
+ *       - `404 NOT_FOUND` — o contrato não existe.
+ *       - `404 CONTRACT_PDF_NOT_AVAILABLE` — `pdfUrl` é `null` OU o arquivo
+ *         sumiu do disco. O frontend pode usar o mesmo texto pros dois.
+ *       - `403 FORBIDDEN` — caller não é parte do contrato.
+ *     tags: [Contratos]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: 'string', format: 'uuid' }
+ *     responses:
+ *       200:
+ *         description: Bytes do PDF.
+ *         content:
+ *           application/pdf:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       302:
+ *         description: Signed URL de storage externo (Location header aponta pro PDF).
+ *         headers:
+ *           Location:
+ *             description: URL assinada de curta duração do storage backend.
+ *             schema: { type: 'string', format: 'uri' }
+ *       401:
+ *         description: Token ausente ou inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: Caller não é landlord nem tenant do contrato.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Contrato não existe (`NOT_FOUND`) OU não há PDF anexado / arquivo sumiu (`CONTRACT_PDF_NOT_AVAILABLE`).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get('/contracts/:id/pdf', contractController.getPdf);
+
+/**
+ * @swagger
  * /contracts/{id}/status:
  *   patch:
  *     summary: Atualiza o status do contrato (ACTIVE | TERMINATED | COMPLETED)

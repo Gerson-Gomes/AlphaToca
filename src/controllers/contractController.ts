@@ -1,8 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
+import path from 'path';
 import {
   createContract,
   getContractById,
   getActiveContractByPropertyAndTenant,
+  getContractDownloadContext,
   listLandlordTenants,
   listTenantContracts,
   updateContractStatus,
@@ -16,6 +18,9 @@ import {
   updatePaymentStatusSchema
 } from '../utils/contractValidation';
 import { propertyService } from '../services/propertyService';
+import { logger } from '../config/logger';
+
+const UPLOADS_ROOT = path.resolve(__dirname, '../../uploads');
 
 function handleContractError(err: unknown, res: Response, next: NextFunction): boolean {
   if (err instanceof ContractError) {
@@ -172,6 +177,134 @@ export const contractController = {
       if (err instanceof ContractError) {
         return handleContractError(err, res, next);
       }
+      next(err);
+    }
+  },
+
+  /**
+   * GET /api/contracts/:id/pdf (US-015)
+   *
+   * Download do PDF do contrato. Autorização: o caller precisa ser o
+   * landlord OU o tenant do contrato (qualquer outro usuário autenticado
+   * recebe 403).
+   *
+   * Storage strategy (documentado em progress.txt — US-015):
+   * o backend atual serve arquivos locais em `uploads/` via express.static
+   * e não tem signed-URL support. Então:
+   *   - `pdfUrl` relativo (ex.: `/uploads/contracts/<id>.pdf`) → o endpoint
+   *     faz stream do arquivo com Content-Type: application/pdf.
+   *   - `pdfUrl` absoluto (http:// ou https://) → 302 redirect pro Location,
+   *     deixando o storage backend externo servir os bytes. Esse branch é
+   *     forward-compatible com uma futura migração pra S3/Firebase com
+   *     signed URLs — não precisa mexer no controller.
+   *
+   * Guard order:
+   *   1. 401 UNAUTHORIZED
+   *   2. 404 NOT_FOUND quando o contrato não existe
+   *   3. 403 FORBIDDEN quando o caller não é landlord nem tenant
+   *   4. 404 CONTRACT_PDF_NOT_AVAILABLE quando `pdfUrl` é null OU o arquivo
+   *      sumiu do disco (ENOENT). Uma única code unifica "nunca existiu" e
+   *      "deletado pós-gravação" pra simplificar o frontend.
+   */
+  async getPdf(req: Request, res: Response, next: NextFunction) {
+    try {
+      const localUser = req.localUser;
+      if (!localUser) {
+        return res.status(401).json({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          messages: [{ message: 'Authentication required.' }],
+        });
+      }
+
+      const contract = await getContractDownloadContext(req.params.id);
+      if (!contract) {
+        return res.status(404).json({
+          status: 404,
+          code: 'NOT_FOUND',
+          messages: [{ message: 'Contract not found' }],
+        });
+      }
+
+      const isParty =
+        localUser.id === contract.landlordId || localUser.id === contract.tenantId;
+      if (!isParty) {
+        return res.status(403).json({
+          status: 403,
+          code: 'FORBIDDEN',
+          messages: [
+            { message: 'Only the contract landlord or tenant can download the PDF.' },
+          ],
+        });
+      }
+
+      const { pdfUrl } = contract;
+      if (!pdfUrl) {
+        return res.status(404).json({
+          status: 404,
+          code: 'CONTRACT_PDF_NOT_AVAILABLE',
+          messages: [{ message: 'No PDF document is attached to this contract.' }],
+        });
+      }
+
+      // Signed-URL / external storage path — let the backend serve bytes.
+      if (/^https?:\/\//i.test(pdfUrl)) {
+        res.setHeader('Cache-Control', 'private, no-store');
+        return res.redirect(302, pdfUrl);
+      }
+
+      // Local filesystem path (`/uploads/<...>/<file>.pdf`). Strip the
+      // leading slash so path.resolve treats it as relative to the repo
+      // root — otherwise path.resolve would honor the absolute leading `/`
+      // and escape the repo. Defense-in-depth: reject anything that, after
+      // normalization, lands outside UPLOADS_ROOT (blocks `..` traversal).
+      const relative = pdfUrl.replace(/^\/+/, '');
+      const absolutePath = path.resolve(__dirname, '../../', relative);
+      if (
+        absolutePath !== UPLOADS_ROOT &&
+        !absolutePath.startsWith(UPLOADS_ROOT + path.sep)
+      ) {
+        logger.warn(
+          { pdfUrl, absolutePath },
+          '[contract.getPdf] refusing to serve path outside uploads root',
+        );
+        return res.status(404).json({
+          status: 404,
+          code: 'CONTRACT_PDF_NOT_AVAILABLE',
+          messages: [{ message: 'Contract PDF file is missing from storage.' }],
+        });
+      }
+
+      // Let sendFile derive Content-Type from the `.pdf` extension via its
+      // internal mime lookup (resolves to `application/pdf`). Setting it
+      // explicitly BEFORE sendFile would win against res.json() on the
+      // ENOENT error branch — res.json only sets Content-Type when the
+      // response has none yet — and the error envelope would end up
+      // served as application/pdf (binary) to the client.
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.sendFile(absolutePath, (err?: NodeJS.ErrnoException) => {
+        if (!err) return;
+        // sendFile stats the file first, so ENOENT fires BEFORE any bytes
+        // have been written — we can still respond with a clean 404 JSON.
+        if (err.code === 'ENOENT') {
+          if (!res.headersSent) {
+            return res.status(404).json({
+              status: 404,
+              code: 'CONTRACT_PDF_NOT_AVAILABLE',
+              messages: [{ message: 'Contract PDF file is missing from storage.' }],
+            });
+          }
+          return;
+        }
+        if (!res.headersSent) {
+          return next(err);
+        }
+        logger.error(
+          { err, contractId: req.params.id },
+          '[contract.getPdf] sendFile failed mid-stream',
+        );
+      });
+    } catch (err) {
       next(err);
     }
   }

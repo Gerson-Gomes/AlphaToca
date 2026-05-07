@@ -4,13 +4,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // (US-014). Mocks the prisma client directly so the service's where/select
 // shape and Decimal→number + Date→ISO transforms can be asserted without a DB.
 
-const { prismaContractFindFirst } = vi.hoisted(() => ({
+const { prismaContractFindFirst, prismaContractFindUnique } = vi.hoisted(() => ({
   prismaContractFindFirst: vi.fn(),
+  prismaContractFindUnique: vi.fn(),
 }));
 
 vi.mock('../src/config/db', () => ({
   default: {
-    contract: { findFirst: prismaContractFindFirst },
+    contract: {
+      findFirst: prismaContractFindFirst,
+      findUnique: prismaContractFindUnique,
+    },
   },
 }));
 
@@ -119,5 +123,69 @@ describe('contractService.getActiveContractByPropertyAndTenant — US-014', () =
     expect(prismaContractFindFirst).toHaveBeenCalledWith(
       expect.objectContaining({ orderBy: { createdAt: 'desc' } }),
     );
+  });
+});
+
+describe('contractService.getContractDownloadContext — US-015', () => {
+  beforeEach(() => {
+    prismaContractFindUnique.mockReset();
+  });
+
+  it('selects only {id, landlordId, tenantId, pdfUrl} (no property/tenant/payments blowup)', async () => {
+    prismaContractFindUnique.mockResolvedValue({
+      id: '55555555-5555-5555-5555-555555555555',
+      landlordId: '22222222-2222-2222-2222-222222222222',
+      tenantId: '33333333-3333-3333-3333-333333333333',
+      pdfUrl: '/uploads/contracts/55555555.pdf',
+    });
+
+    const { getContractDownloadContext } = await import(
+      '../src/services/contractService'
+    );
+    const result = await getContractDownloadContext(
+      '55555555-5555-5555-5555-555555555555',
+    );
+
+    expect(prismaContractFindUnique).toHaveBeenCalledWith({
+      where: { id: '55555555-5555-5555-5555-555555555555' },
+      select: { id: true, landlordId: true, tenantId: true, pdfUrl: true },
+    });
+    expect(result).toEqual({
+      id: '55555555-5555-5555-5555-555555555555',
+      landlordId: '22222222-2222-2222-2222-222222222222',
+      tenantId: '33333333-3333-3333-3333-333333333333',
+      pdfUrl: '/uploads/contracts/55555555.pdf',
+    });
+  });
+
+  it('returns null when the contract id does not exist', async () => {
+    prismaContractFindUnique.mockResolvedValue(null);
+
+    const { getContractDownloadContext } = await import(
+      '../src/services/contractService'
+    );
+    const result = await getContractDownloadContext(
+      '55555555-5555-5555-5555-555555555555',
+    );
+
+    expect(result).toBeNull();
+  });
+
+  it('passes through a null pdfUrl so the controller can 404 CONTRACT_PDF_NOT_AVAILABLE', async () => {
+    prismaContractFindUnique.mockResolvedValue({
+      id: '55555555-5555-5555-5555-555555555555',
+      landlordId: '22222222-2222-2222-2222-222222222222',
+      tenantId: '33333333-3333-3333-3333-333333333333',
+      pdfUrl: null,
+    });
+
+    const { getContractDownloadContext } = await import(
+      '../src/services/contractService'
+    );
+    const result = await getContractDownloadContext(
+      '55555555-5555-5555-5555-555555555555',
+    );
+
+    expect(result!.pdfUrl).toBeNull();
   });
 });
