@@ -48,8 +48,8 @@
         "Typecheck passes: npx tsc --noEmit"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Ran `npm run seed` against the local Docker DB (`alphatoca_db` on 127.0.0.1:5433, user admin/admin_pwd, database `alphatoca`) via inline DATABASE_URL override. The existing deleteMany+createMany chain in prisma/seed.ts was left unchanged. After the re-seed, the verification one-liner (`npx tsx -e \"...Promise.all([prisma.user.findMany(), prisma.property.findMany()])...strict v4 regex...\"`) printed `OK users: 51 properties: 5` and exited 0. Spot-check via psql confirmed demo landlord id `11111111-1111-4111-8111-111111111111` and all five property ids (`a0000001-...`, `b0000001-...` through `b0000004-...`) match the DEMO_* constants. README.md gained a 'Re-seeding after the UUID migration' section with the drop+re-seed commands (both `prisma migrate reset --force` and the lighter `npm run seed`-only path) plus the warning to never run migrate against the Supabase DATABASE_URL. Typecheck clean; full suite still 16 pre-existing failures / 206 passed. Caveat: `prisma migrate reset --force` currently aborts on migration `20260505153136_add_rental_process_status_flow` because it is an exact byte-for-byte duplicate of `20260504204911_add_contract_logic` (both `CREATE TYPE \"ProposalStatus\"`), a pre-existing issue on main introduced in 45f7d1e — documented both commands in the README so devs whose schema is already up to date can skip the migrate step."
     },
     {
       "id": "US-004",
