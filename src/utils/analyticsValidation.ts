@@ -48,3 +48,16 @@ export const monthlyAnalyticsQuerySchema = z
   });
 
 export type MonthlyAnalyticsQueryInput = z.infer<typeof monthlyAnalyticsQuerySchema>;
+
+// Janelas aceitas pelo endpoint LL-008 GET /api/properties/:id/analytics.
+// Valores espelham as abas "30 dias", "90 dias", "1 ano" na UI do landlord.
+// Default ('30d') aplicado no controller quando a query é omitida.
+export const propertyAnalyticsQuerySchema = z.object({
+  window: z.enum(['30d', '90d', '1y']).optional(),
+});
+
+export type PropertyAnalyticsQueryInput = z.infer<typeof propertyAnalyticsQuerySchema>;
+
+export const propertyAnalyticsParamsSchema = z.object({
+  id: z.string().uuid(),
+});

@@ -5,13 +5,18 @@ import { profileViewService } from '../services/profileViewService';
 import { propertyViewService } from '../services/propertyViewService';
 import { contactClickEventService } from '../services/contactClickEventService';
 import { analyticsService } from '../services/analyticsService';
+import { propertyAnalyticsService } from '../services/propertyAnalyticsService';
 import {
   createPropertySchema,
   moderatePropertySchema,
   updatePropertySchema,
 } from '../utils/propertyValidation';
 import { propertySearchSchema } from '../utils/searchValidation';
-import { monthlyAnalyticsQuerySchema } from '../utils/analyticsValidation';
+import {
+  monthlyAnalyticsQuerySchema,
+  propertyAnalyticsParamsSchema,
+  propertyAnalyticsQuerySchema,
+} from '../utils/analyticsValidation';
 
 const contactClickParamsSchema = z.object({
   id: z.string().uuid(),
@@ -155,6 +160,51 @@ export const propertyController = {
 
       await contactClickEventService.record(id, req.localUser?.id ?? null);
       return res.status(201).json({});
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/properties/:id/analytics?window=30d|90d|1y
+   *
+   * Analytics por-imóvel para o dashboard do landlord. Default da janela é 30d
+   * quando o query param é omitido. Ordem dos guards: 401 (auth ausente) →
+   * 404 (imóvel inexistente, ANTES de 403 pra não vazar existência) → 403
+   * (autenticado mas não é o dono).
+   */
+  async getPropertyAnalytics(req: Request, res: Response, next: NextFunction) {
+    try {
+      const localUser = req.localUser;
+      if (!localUser) {
+        return res.status(401).json({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          messages: [{ message: 'Authentication required.' }],
+        });
+      }
+
+      const { id } = propertyAnalyticsParamsSchema.parse(req.params);
+      const { window } = propertyAnalyticsQuerySchema.parse(req.query);
+
+      const property = await propertyService.getPropertyById(id);
+      if (!property) {
+        return res.status(404).json({
+          status: 404,
+          code: 'NOT_FOUND',
+          messages: [{ message: 'Property not found' }],
+        });
+      }
+      if (property.landlordId !== localUser.id) {
+        return res.status(403).json({
+          status: 403,
+          code: 'FORBIDDEN',
+          messages: [{ message: 'Only the property owner can read analytics.' }],
+        });
+      }
+
+      const result = await propertyAnalyticsService.getAnalytics(id, window ?? '30d');
+      return res.status(200).json(result);
     } catch (error) {
       next(error);
     }

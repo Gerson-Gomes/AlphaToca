@@ -718,6 +718,111 @@ router.post('/properties/:id/contact-click', propertyController.recordContactCli
 
 /**
  * @swagger
+ * /properties/{id}/analytics:
+ *   get:
+ *     summary: Analytics por imóvel (somente o locador dono)
+ *     description: |
+ *       Retorna contadores e série diária de visualizações do imóvel, usadas
+ *       pelo dashboard do landlord. Apenas o dono lê — autenticados não-donos
+ *       recebem 403; anônimos recebem 401. Imóveis inexistentes retornam 404
+ *       ANTES do 403, para não diferenciar "inexistente" de "alheio".
+ *
+ *       `window` aceita `30d | 90d | 1y` (default `30d`). Contadores:
+ *       - `views`: PropertyViewEvent dentro da janela.
+ *       - `favorites`: Favorite do imóvel all-time.
+ *       - `proposalsTotal`: Proposal criadas dentro da janela.
+ *       - `proposalsOpen`: Proposal com status=PENDING all-time.
+ *       - `visitsScheduled`: Visit com status=SCHEDULED all-time.
+ *       - `contactClicks`: ContactClickEvent dentro da janela.
+ *       - `dailyViews`: série de buckets diários zero-filled cobrindo a janela.
+ *     tags: [Propriedades, Analytics]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *       - in: query
+ *         name: window
+ *         schema:
+ *           type: string
+ *           enum: [30d, 90d, 1y]
+ *           default: 30d
+ *     responses:
+ *       200:
+ *         description: Analytics do imóvel na janela solicitada.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required:
+ *                 - views
+ *                 - favorites
+ *                 - proposalsTotal
+ *                 - proposalsOpen
+ *                 - visitsScheduled
+ *                 - contactClicks
+ *                 - dailyViews
+ *               properties:
+ *                 views:
+ *                   type: integer
+ *                 favorites:
+ *                   type: integer
+ *                 proposalsTotal:
+ *                   type: integer
+ *                 proposalsOpen:
+ *                   type: integer
+ *                 visitsScheduled:
+ *                   type: integer
+ *                 contactClicks:
+ *                   type: integer
+ *                 dailyViews:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     required: [date, count]
+ *                     properties:
+ *                       date:
+ *                         type: string
+ *                         pattern: '^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
+ *                       count:
+ *                         type: integer
+ *       400:
+ *         description: Param inválido (UUID ou window fora do enum).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Token ausente ou inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: Usuário autenticado não é o dono do imóvel.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Propriedade não encontrada.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get(
+  '/properties/:id/analytics',
+  ...authStack,
+  propertyController.getPropertyAnalytics,
+);
+
+/**
+ * @swagger
  * /properties/{id}:
  *   get:
  *     summary: Recuperar uma propriedade pelo ID
