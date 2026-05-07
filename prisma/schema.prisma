@@ -69,6 +69,11 @@ enum VisitStatus {
   NO_SHOW
 }
 
+enum VisitSource {
+  MANUAL
+  AI
+}
+
 enum MessageStatus {
   failed
   sent
@@ -339,6 +344,7 @@ model Visit {
   scheduledAt     DateTime    @map("scheduled_at")
   durationMinutes Int         @default(45) @map("duration_minutes")
   status          VisitStatus @default(SCHEDULED)
+  source          VisitSource @default(MANUAL)
   notes           String?
   createdAt       DateTime    @default(now()) @map("created_at")
   updatedAt       DateTime    @updatedAt @map("updated_at")

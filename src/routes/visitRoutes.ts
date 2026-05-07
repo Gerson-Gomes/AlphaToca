@@ -22,6 +22,16 @@ const router = Router();
  *         scheduledAt: { type: string, format: date-time }
  *         durationMinutes: { type: integer, minimum: 15, maximum: 180 }
  *         status: { type: string, enum: [SCHEDULED, CANCELLED, COMPLETED, NO_SHOW] }
+ *         source:
+ *           type: string
+ *           enum: [MANUAL, AI]
+ *           default: MANUAL
+ *           description: >-
+ *             Origem da visita. `MANUAL` = agendada por humano (cliente normal).
+ *             `AI` é reservado para um fluxo interno de agente que ainda não tem
+ *             writer no backend (grep `leadExtractionService` callers — hoje só
+ *             detecta intent em conversas WhatsApp, não cria Visit). Clientes
+ *             humanos sempre gravam `MANUAL`.
  *         notes: { type: string, nullable: true }
  */
 
@@ -44,6 +54,14 @@ const router = Router();
  *               rentalProcessId: { type: string, format: uuid }
  *               scheduledAt: { type: string, format: date-time }
  *               durationMinutes: { type: integer, minimum: 15, maximum: 180, default: 45 }
+ *               source:
+ *                 type: string
+ *                 enum: [MANUAL, AI]
+ *                 default: MANUAL
+ *                 description: >-
+ *                   Opcional. Clientes humanos devem omitir ou enviar `MANUAL`;
+ *                   `AI` é reservado para um futuro fluxo interno de agente
+ *                   (ver `leadExtractionService` callers).
  *               notes: { type: string }
  *     responses:
  *       201:
