@@ -163,8 +163,8 @@
         "Tests pass (npx vitest run)"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Single-file controller change: `supportTicketController.create` now returns `{ id, code, title, description, createdAt, status }` — same shape as `SupportTicketUserView` from US-003, so the frontend /support screen can reuse the exact parser it already has for GET /api/support/tickets. Error contract (400 VALIDATION_ERROR, 401 UNAUTHORIZED, 500 CODE_GENERATION_FAILED) is byte-identical — controller only touches the 201 branch. No schema change, no migration, no service change. Test updates: (1) the existing happy-path test 'creates a ticket and returns 201 with { id, code, createdAt }' was renamed and its `toEqual` assertion extended to the new 6-field shape. (2) Added new test 'echoes title/description/status in the response body (US-009)' with `toMatchObject` + a set of `not.toHaveProperty('user'|'assignedTo'|'resolution'|'updatedAt'|'userRole')` assertions to lock in the boundary — admin triage fields must not leak into the opener's POST echo, matching the admin-vs-user view split from the Codebase Patterns. The other 12 tests in supportTicketCreate.test.ts (landlord/admin role paths, email side-effect, email failure tolerance, 401 missing header, 400 validation cases, client body-forging guard, CODE_GENERATION_FAILED mapping) didn't need updates — they assert on mockCreate call args and response headers, not the 201 body shape. Typecheck: `npx tsc --noEmit` clean. Full suite: **23 failed / 639 passed / 68 files** — same 6 pre-existing failing files (auth/rag/ingest/userSync/visitValidation), +1 new passing test vs US-008 baseline of 638. Zero regression."
     },
     {
       "id": "US-010",

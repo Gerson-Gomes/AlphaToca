@@ -386,3 +386,78 @@ Every AC item for US-008 is already delivered by LL-016 (migration stamp `202605
 - **US-009 (echo title/description in POST ticket response) is pure controller glue** — no schema, no migration, no service changes. Should be the fastest story in this batch. Before starting, `grep -n createTicket src/controllers/supportTicketController.ts` + `cat tests/supportTicketCreate.test.ts | head -80` to see the current response shape, then it's a ~5-line edit + test update.
 - **US-010→US-014 are the harder ones** — US-010 (landlord metrics) and US-011 (per-property analytics) need real queries across multiple models with 30d/90d/1y windows (remember the injectable `now` pattern from US-007). US-013 (Notification model) is a fresh migration + new model + persist-on-broadcast side effect. US-015 needs `ALTER TYPE ADD VALUE` migrations which CANNOT run in a transaction block (per the AC's explicit callout — `migration.sql` must not wrap them in BEGIN/COMMIT).
 ---
+
+## 2026-05-07 - US-009
+
+### What was implemented
+
+Expanded the `POST /api/support/tickets` response body from the narrow
+`{ id, code, createdAt }` shape to the full `{ id, code, title,
+description, createdAt, status }` shape. The new shape matches
+`SupportTicketUserView` exactly — the same type returned by
+`GET /api/support/tickets` (US-003) — so the frontend can reuse the
+existing listForUser parser instead of maintaining two slightly
+different deserializers for the create-vs-list flows.
+
+No schema change, no migration, no service change. Single-file
+controller edit + two test updates.
+
+### Files changed
+
+- `src/controllers/supportTicketController.ts` — `create` method's
+  `res.status(201).json(...)` now includes `title`, `description`, and
+  `status`. The pre-US-009 shape dropped these fields, forcing the
+  frontend to echo its own request body into local cache to assemble a
+  ticket card. Everything else in the handler (401 guard, Zod parse,
+  service call, email side-effect, SupportTicketError mapping) is
+  untouched.
+- `tests/supportTicketCreate.test.ts` — (a) renamed the happy-path test
+  and updated its `toEqual` to the 6-field shape. (b) Added a new test
+  `echoes title/description/status in the response body (US-009)` that
+  uses `toMatchObject` + `not.toHaveProperty('user'|'assignedTo'|
+  'resolution'|'updatedAt'|'userRole')` to lock in the boundary between
+  the opener echo (user view) and the admin triage view.
+- `scripts/ralph/prd.json` — flipped US-009 `passes: true` with full
+  rationale in `notes`.
+
+### Verification
+
+- `npx tsc --noEmit` — clean.
+- `npx vitest run tests/supportTicketCreate.test.ts tests/supportTicketsList.test.ts tests/supportTicketService.test.ts` — 46/46 pass.
+- Full suite `npx vitest run` — **23 failed / 639 passed / 68 files**.
+  Same 6 pre-existing failing files from the baseline
+  (auth/rag/ingest/userSync/visitValidation). +1 new passing test vs
+  US-008's 638 baseline. Zero regression.
+
+### Learnings for future iterations
+
+- **When expanding a response shape, align with the existing view type
+  in the same service**. `SupportTicketUserView` (US-003) already
+  defined exactly the 6 fields the frontend wants here — the POST echo
+  should be shape-identical to the list item, not a bespoke subset.
+  Same pattern likely applies to other POST-then-list flows in this
+  codebase (proposals, visits, messages) when an AC asks to "echo back
+  more fields".
+- **Negative assertions beat exact-equality for response-shape tests
+  when there's an admin view in the same type family**. Using
+  `toMatchObject` for the positive shape + a set of
+  `not.toHaveProperty('user'|'assignedTo'|'resolution'|'updatedAt')`
+  assertions makes the boundary between the user view and admin view
+  explicit at the test layer — a future refactor that accidentally
+  pipes `updatedAt` from the service row into the 201 body will fail
+  loudly with a named property assertion, not a cryptic deep-equal
+  diff. Apply this pattern when US-010→US-014 add endpoints that have
+  both a "self" view and an "admin" view (notifications, metrics).
+- **`res.status` in Prisma models comes back as the SupportTicketStatus
+  enum literal (`'OPEN'`, `'PENDING'`, `'RESOLVED'`)**, which is
+  already JSON-serializable — no mapping/stringify needed in the
+  controller. Same will apply to `Notification.category` (US-013),
+  `ContractDocumentStatus` (US-008), `VisitSource` (US-012), etc.
+- **Not every test in a 13-test file needs updating when the response
+  shape changes** — most of `supportTicketCreate.test.ts`'s tests
+  assert on mockCreate call args, response status, or `res.body.code`
+  (a field that still exists), not the full body shape. Only the one
+  test that did `toEqual(exactShape)` needed to change. Worth checking
+  `grep -l 'toEqual' tests/` before blindly editing a whole file.
+
+---

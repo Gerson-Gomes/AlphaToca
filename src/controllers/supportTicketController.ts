@@ -81,10 +81,18 @@ export const supportTicketController = {
         );
       });
 
+      // Echo title/description/status back to the client so the frontend
+      // /support screen can display the ticket immediately without having
+      // to preserve the request body (US-009). Shape matches
+      // SupportTicketUserView — same contract the US-003 listForUser
+      // endpoint returns, so the frontend can reuse the same parser.
       return res.status(201).json({
         id: ticket.id,
         code: ticket.code,
+        title: ticket.title,
+        description: ticket.description,
         createdAt: ticket.createdAt.toISOString(),
+        status: ticket.status,
       });
     } catch (error) {
       if (error instanceof SupportTicketError) {

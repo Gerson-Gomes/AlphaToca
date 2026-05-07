@@ -110,7 +110,7 @@ beforeEach(() => {
 });
 
 describe('POST /api/support/tickets — US-018', () => {
-  it('creates a ticket and returns 201 with { id, code, createdAt }', async () => {
+  it('creates a ticket and returns 201 with { id, code, title, description, createdAt, status }', async () => {
     const ticket = seedTicket();
     mockCreate.mockResolvedValue(ticket);
 
@@ -126,7 +126,10 @@ describe('POST /api/support/tickets — US-018', () => {
     expect(res.body).toEqual({
       id: ticket.id,
       code: ticket.code,
+      title: ticket.title,
+      description: ticket.description,
       createdAt: ticket.createdAt.toISOString(),
+      status: ticket.status,
     });
     expect(res.body.code).toMatch(/^SUP-\d{6}-[A-Z0-9]{4}$/);
     // userId/userName/userRole vêm do JWT, não do body
@@ -171,6 +174,41 @@ describe('POST /api/support/tickets — US-018', () => {
       expect.objectContaining({ id: ADMIN_ID, role: 'ADMIN' }),
       expect.any(Object),
     );
+  });
+
+  it('echoes title/description/status in the response body (US-009)', async () => {
+    // Regression guard for US-009: the POST response must carry enough
+    // fields that the frontend /support screen can reconstitute the ticket
+    // card without having to preserve the request body in local cache.
+    // Matches the SupportTicketUserView shape returned by GET /support/tickets.
+    const ticket = seedTicket({
+      title: 'Específico para o echo',
+      description: 'Corpo longo com detalhes que o cache local precisa exibir.',
+      status: 'OPEN',
+    });
+    mockCreate.mockResolvedValue(ticket);
+
+    const res = await request(app)
+      .post('/api/support/tickets')
+      .set('Authorization', 'Bearer the-tenant')
+      .send({ title: ticket.title, description: ticket.description });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      id: ticket.id,
+      code: ticket.code,
+      title: ticket.title,
+      description: ticket.description,
+      createdAt: ticket.createdAt.toISOString(),
+      status: 'OPEN',
+    });
+    // Admin-only fields must NOT leak into the POST echo — same boundary as
+    // the SupportTicketUserView returned by listForUser.
+    expect(res.body).not.toHaveProperty('user');
+    expect(res.body).not.toHaveProperty('assignedTo');
+    expect(res.body).not.toHaveProperty('resolution');
+    expect(res.body).not.toHaveProperty('updatedAt');
+    expect(res.body).not.toHaveProperty('userRole');
   });
 
   it('calls supportEmailService.sendTicketCreated after the DB insert', async () => {
