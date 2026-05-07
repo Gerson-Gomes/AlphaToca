@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { SupportUserRole } from '@prisma/client';
+import { SupportTicketStatus, SupportUserRole } from '@prisma/client';
 
 // Mock de `../src/config/db` deve vir antes de importar o serviço, caso
 // contrário o módulo real do Prisma é puxado e tenta conectar no banco.
@@ -7,6 +7,8 @@ vi.mock('../src/config/db', () => ({
   default: {
     supportTicket: {
       create: vi.fn(),
+      count: vi.fn(),
+      findMany: vi.fn(),
     },
   },
 }));
@@ -171,5 +173,173 @@ describe('supportTicketService.create()', () => {
     expect(err.httpStatus).toBe(500);
     expect(err.code).toBe('X');
     expect(err.message).toBe('msg');
+  });
+});
+
+describe('supportTicketService.list() — US-019', () => {
+  const sampleRow = {
+    id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa01',
+    code: 'SUP-260507-A001',
+    title: 'App trava',
+    description: 'Descrição',
+    userId: author.id,
+    userName: author.name,
+    userRole: SupportUserRole.TENANT,
+    status: SupportTicketStatus.OPEN,
+    resolution: null,
+    assignedToId: null,
+    createdAt: new Date('2026-05-07T12:00:00Z'),
+    updatedAt: new Date('2026-05-07T12:00:00Z'),
+    user: {
+      id: author.id,
+      name: author.name,
+      email: 'maria@demo.com',
+      role: 'TENANT',
+    },
+    assignedTo: null,
+  };
+
+  it('returns the envelope { data, page, pageSize, total } with ISO-serialized dates', async () => {
+    (prisma.supportTicket.count as any).mockResolvedValueOnce(1);
+    (prisma.supportTicket.findMany as any).mockResolvedValueOnce([sampleRow]);
+
+    const result = await supportTicketService.list({ page: 1, pageSize: 50 });
+
+    expect(result).toEqual({
+      data: [
+        {
+          id: sampleRow.id,
+          code: sampleRow.code,
+          title: sampleRow.title,
+          description: sampleRow.description,
+          user: {
+            id: author.id,
+            name: author.name,
+            email: 'maria@demo.com',
+            role: 'TENANT',
+          },
+          status: SupportTicketStatus.OPEN,
+          createdAt: sampleRow.createdAt.toISOString(),
+          updatedAt: sampleRow.updatedAt.toISOString(),
+          assignedTo: null,
+          resolution: null,
+        },
+      ],
+      page: 1,
+      pageSize: 50,
+      total: 1,
+    });
+  });
+
+  it('orders by createdAt DESC and applies skip/take from page/pageSize', async () => {
+    (prisma.supportTicket.count as any).mockResolvedValueOnce(0);
+    (prisma.supportTicket.findMany as any).mockResolvedValueOnce([]);
+
+    await supportTicketService.list({ page: 3, pageSize: 20 });
+
+    const arg = (prisma.supportTicket.findMany as any).mock.calls[0][0];
+    expect(arg.orderBy).toEqual({ createdAt: 'desc' });
+    expect(arg.skip).toBe(40); // (3-1)*20
+    expect(arg.take).toBe(20);
+  });
+
+  it('includes user {id,name,email,role} and assignedTo {id,name} via Prisma include (no N+1)', async () => {
+    (prisma.supportTicket.count as any).mockResolvedValueOnce(0);
+    (prisma.supportTicket.findMany as any).mockResolvedValueOnce([]);
+
+    await supportTicketService.list({ page: 1, pageSize: 50 });
+
+    const arg = (prisma.supportTicket.findMany as any).mock.calls[0][0];
+    expect(arg.include).toEqual({
+      user: { select: { id: true, name: true, email: true, role: true } },
+      assignedTo: { select: { id: true, name: true } },
+    });
+    // count + findMany == 2 queries; no N+1 com pageSize.
+    expect(prisma.supportTicket.count).toHaveBeenCalledTimes(1);
+    expect(prisma.supportTicket.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('builds where clause with combined status/role/from/to filters', async () => {
+    (prisma.supportTicket.count as any).mockResolvedValueOnce(0);
+    (prisma.supportTicket.findMany as any).mockResolvedValueOnce([]);
+
+    const from = new Date('2026-05-01T00:00:00Z');
+    const to = new Date('2026-05-31T23:59:59Z');
+    await supportTicketService.list({
+      status: SupportTicketStatus.RESOLVED,
+      role: SupportUserRole.LANDLORD,
+      from,
+      to,
+      page: 1,
+      pageSize: 50,
+    });
+
+    const arg = (prisma.supportTicket.findMany as any).mock.calls[0][0];
+    expect(arg.where).toEqual({
+      status: SupportTicketStatus.RESOLVED,
+      userRole: SupportUserRole.LANDLORD,
+      createdAt: { gte: from, lte: to },
+    });
+    // count usa o MESMO where — total reflete os filtros.
+    const countArg = (prisma.supportTicket.count as any).mock.calls[0][0];
+    expect(countArg.where).toEqual(arg.where);
+  });
+
+  it('omits where entries that are not set (zero filters returns all)', async () => {
+    (prisma.supportTicket.count as any).mockResolvedValueOnce(0);
+    (prisma.supportTicket.findMany as any).mockResolvedValueOnce([]);
+
+    await supportTicketService.list({ page: 1, pageSize: 50 });
+
+    const arg = (prisma.supportTicket.findMany as any).mock.calls[0][0];
+    expect(arg.where).toEqual({}); // sem filtros
+  });
+
+  it('only sets createdAt.gte when only `from` is provided', async () => {
+    (prisma.supportTicket.count as any).mockResolvedValueOnce(0);
+    (prisma.supportTicket.findMany as any).mockResolvedValueOnce([]);
+
+    const from = new Date('2026-05-01T00:00:00Z');
+    await supportTicketService.list({ from, page: 1, pageSize: 50 });
+
+    const arg = (prisma.supportTicket.findMany as any).mock.calls[0][0];
+    expect(arg.where).toEqual({ createdAt: { gte: from } });
+  });
+
+  it('projects assignedTo correctly when present', async () => {
+    (prisma.supportTicket.count as any).mockResolvedValueOnce(1);
+    (prisma.supportTicket.findMany as any).mockResolvedValueOnce([
+      {
+        ...sampleRow,
+        status: SupportTicketStatus.RESOLVED,
+        resolution: 'Resolvido',
+        assignedTo: { id: 'admin-id', name: 'Ana Admin' },
+      },
+    ]);
+
+    const result = await supportTicketService.list({ page: 1, pageSize: 50 });
+
+    expect(result.data[0].assignedTo).toEqual({ id: 'admin-id', name: 'Ana Admin' });
+    expect(result.data[0].resolution).toBe('Resolvido');
+    expect(result.data[0].status).toBe(SupportTicketStatus.RESOLVED);
+  });
+
+  it('handles null email in user projection (User.email is optional in schema)', async () => {
+    (prisma.supportTicket.count as any).mockResolvedValueOnce(1);
+    (prisma.supportTicket.findMany as any).mockResolvedValueOnce([
+      {
+        ...sampleRow,
+        user: { id: author.id, name: author.name, email: null, role: 'TENANT' },
+      },
+    ]);
+
+    const result = await supportTicketService.list({ page: 1, pageSize: 50 });
+
+    expect(result.data[0].user).toEqual({
+      id: author.id,
+      name: author.name,
+      email: null,
+      role: 'TENANT',
+    });
   });
 });

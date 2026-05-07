@@ -1,5 +1,10 @@
 import prisma from '../config/db';
-import type { SupportTicket, SupportUserRole } from '@prisma/client';
+import type {
+  Prisma,
+  SupportTicket,
+  SupportTicketStatus,
+  SupportUserRole,
+} from '@prisma/client';
 
 // Classe de erro comercial exportada para o controller mapear em 5xx/4xx no
 // padrão { status, code, messages } (mesmo formato de PropertyError/ContractError).
@@ -109,4 +114,96 @@ export const supportTicketService = {
       `Failed to generate a unique ticket code after ${CODE_MAX_RETRIES} attempts.`,
     );
   },
+
+  /**
+   * Admin-only list with filters + pagination. Ordem padrão `createdAt DESC`
+   * (triage — mais recente primeiro). Retorna o envelope `{ data, page,
+   * pageSize, total }` consumido diretamente pelo admin panel.
+   *
+   * Campos `user` (id/name/email/role) e `assignedTo` (id/name) vêm via
+   * `include` Prisma — UM único JOIN por consulta. Evita N+1 mesmo com
+   * pageSize=200.
+   */
+  async list(params: ListSupportTicketsParams): Promise<ListSupportTicketsResult> {
+    const { status, role, from, to, page, pageSize } = params;
+    const where: Prisma.SupportTicketWhereInput = {};
+    if (status) where.status = status;
+    if (role) where.userRole = role;
+    if (from || to) {
+      where.createdAt = {};
+      if (from) where.createdAt.gte = from;
+      if (to) where.createdAt.lte = to;
+    }
+
+    const [total, rows] = await Promise.all([
+      prisma.supportTicket.count({ where }),
+      prisma.supportTicket.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        include: {
+          user: { select: { id: true, name: true, email: true, role: true } },
+          assignedTo: { select: { id: true, name: true } },
+        },
+      }),
+    ]);
+
+    const data: SupportTicketAdminView[] = rows.map((r) => ({
+      id: r.id,
+      code: r.code,
+      title: r.title,
+      description: r.description,
+      user: r.user
+        ? { id: r.user.id, name: r.user.name, email: r.user.email, role: r.user.role }
+        : null,
+      status: r.status,
+      createdAt: r.createdAt.toISOString(),
+      updatedAt: r.updatedAt.toISOString(),
+      assignedTo: r.assignedTo ? { id: r.assignedTo.id, name: r.assignedTo.name } : null,
+      resolution: r.resolution,
+    }));
+
+    return { data, page, pageSize, total };
+  },
+};
+
+// Filtros aceitos pelo admin list. `from`/`to` já convertidos para Date no
+// controller — service não faz parsing de string aqui, fica agnóstico de
+// formato da entrada (ISO, timestamp, etc).
+export type ListSupportTicketsParams = {
+  status?: SupportTicketStatus;
+  role?: SupportUserRole;
+  from?: Date;
+  to?: Date;
+  page: number;
+  pageSize: number;
+};
+
+export type SupportTicketAdminView = {
+  id: string;
+  code: string;
+  title: string;
+  description: string;
+  // `user` é null quando o autor do ticket foi deletado (onDelete: Cascade
+  // derruba o ticket junto, mas ainda assim o tipo segue o shape do Prisma
+  // include para consistência). `email` pode ser null — User.email é opcional.
+  user: {
+    id: string;
+    name: string;
+    email: string | null;
+    role: string;
+  } | null;
+  status: SupportTicketStatus;
+  createdAt: string;
+  updatedAt: string;
+  assignedTo: { id: string; name: string } | null;
+  resolution: string | null;
+};
+
+export type ListSupportTicketsResult = {
+  data: SupportTicketAdminView[];
+  page: number;
+  pageSize: number;
+  total: number;
 };

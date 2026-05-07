@@ -2,7 +2,10 @@ import { Request, Response, NextFunction } from 'express';
 import { SupportUserRole } from '@prisma/client';
 import { supportTicketService, SupportTicketError } from '../services/supportTicketService';
 import { supportEmailService } from '../services/supportEmailService';
-import { createSupportTicketSchema } from '../utils/supportTicketValidation';
+import {
+  createSupportTicketSchema,
+  listSupportTicketsQuerySchema,
+} from '../utils/supportTicketValidation';
 import { logger } from '../config/logger';
 
 // Mapeia o Role global (TENANT|LANDLORD|ADMIN) para o SupportUserRole, que
@@ -89,6 +92,37 @@ export const supportTicketController = {
           messages: [{ message: error.message }],
         });
       }
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/admin/support/tickets
+   *
+   * Lista tickets de suporte para triage do admin. Requer role ADMIN — o
+   * `requireRole` middleware no router já garantiu 401 (token ausente/inválido)
+   * e 403 (role não-admin) antes de chegar aqui.
+   *
+   * Query params opcionais: status, role, from, to, page, pageSize. Todos
+   * validados via Zod — erros caem no errorHandler global como 400
+   * VALIDATION_ERROR.
+   *
+   * Response envelope: `{ data, page, pageSize, total }` ordenado por
+   * createdAt DESC.
+   */
+  async listForAdmin(req: Request, res: Response, next: NextFunction) {
+    try {
+      const parsed = listSupportTicketsQuerySchema.parse(req.query);
+      const result = await supportTicketService.list({
+        status: parsed.status,
+        role: parsed.role,
+        from: parsed.from ? new Date(parsed.from) : undefined,
+        to: parsed.to ? new Date(parsed.to) : undefined,
+        page: parsed.page,
+        pageSize: parsed.pageSize,
+      });
+      return res.status(200).json(result);
+    } catch (error) {
       next(error);
     }
   },
