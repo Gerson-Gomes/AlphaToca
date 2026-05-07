@@ -1,12 +1,14 @@
 import { Request, Response, NextFunction } from 'express';
 import { propertyService, PropertyError } from '../services/propertyService';
 import { profileViewService } from '../services/profileViewService';
+import { analyticsService } from '../services/analyticsService';
 import {
   createPropertySchema,
   moderatePropertySchema,
   updatePropertySchema,
 } from '../utils/propertyValidation';
 import { propertySearchSchema } from '../utils/searchValidation';
+import { monthlyAnalyticsQuerySchema } from '../utils/analyticsValidation';
 
 export const propertyController = {
   async create(req: Request, res: Response, next: NextFunction) {
@@ -34,6 +36,52 @@ export const propertyController = {
       const validatedParams = propertySearchSchema.parse(req.query);
       const result = await propertyService.searchProperties(validatedParams);
       return res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/properties/analytics/monthly?from=YYYY-MM-01&to=YYYY-MM-01
+   *
+   * Série mensal do landlord para o gráfico "Análise de Performance". Zod
+   * valida o formato YYYY-MM-01 + `from ≤ to` + span máximo de 24 meses. Se
+   * nenhuma janela for informada (ou qualquer extremo ausente), o default é
+   * os últimos 6 meses terminando no mês corrente (UTC, mesmo cálculo de
+   * `rentalPaymentService.currentPeriod`).
+   *
+   * Auth stack (authStack + requireRole(LANDLORD)) é aplicado inline no mount
+   * do router — por aqui, `req.localUser` é sempre o locador autenticado.
+   */
+  async getMonthlyAnalytics(req: Request, res: Response, next: NextFunction) {
+    try {
+      const localUser = req.localUser;
+      if (!localUser) {
+        return res.status(401).json({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          messages: [{ message: 'Authentication required.' }],
+        });
+      }
+
+      const parsed = monthlyAnalyticsQuerySchema.parse(req.query);
+
+      let from: Date;
+      let to: Date;
+      if (parsed.from && parsed.to) {
+        from = new Date(`${parsed.from}T00:00:00.000Z`);
+        to = new Date(`${parsed.to}T00:00:00.000Z`);
+      } else {
+        // Default: últimos 6 meses terminando no mês corrente. O mês corrente
+        // é o primeiro dia do mês atual em UTC (alinhado com `currentPeriod`
+        // do rentalPaymentService).
+        const now = new Date();
+        to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+        from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 5, 1));
+      }
+
+      const series = await analyticsService.monthlySeries(localUser.id, from, to);
+      return res.status(200).json(series);
     } catch (error) {
       next(error);
     }

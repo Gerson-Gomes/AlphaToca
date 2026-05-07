@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { Role } from '@prisma/client';
 import { propertyController } from '../controllers/propertyController';
 import { rentalPaymentController } from '../controllers/rentalPaymentController';
 import {
@@ -15,6 +16,7 @@ const router = Router();
 
 const adminAuthStack = [checkJwt, authSyncMiddleware, requireRole('ADMIN')];
 const authStack = [checkJwt, authSyncMiddleware];
+const landlordAuthStack = [checkJwt, authSyncMiddleware, requireRole(Role.LANDLORD)];
 
 /**
  * @swagger
@@ -336,6 +338,107 @@ router.get('/properties', propertyController.list);
  *         description: Erro interno do servidor
  */
 router.get('/properties/search', propertyController.search);
+
+/**
+ * @swagger
+ * /properties/analytics/monthly:
+ *   get:
+ *     summary: Série mensal de aluguéis, novos inquilinos e receita do landlord
+ *     description: |
+ *       Retorna quatro arrays paralelos (`months`, `rentals`, `newTenants`,
+ *       `monthlyRevenue`) para o gráfico "Análise de Performance" do dashboard
+ *       do locador. Todos os buckets sem atividade entram como 0 (zero-fill) —
+ *       o UI pode iterar por índice sem checar existência.
+ *
+ *       A janela padrão é os últimos 6 meses terminando no mês corrente em UTC
+ *       (mesmo cálculo de `rentalPaymentService.currentPeriod`). Quando `from`
+ *       e `to` são informados, ambos devem ser o primeiro dia do mês (`YYYY-MM-01`),
+ *       `from` ≤ `to`, e o span inclusivo não pode exceder 24 meses — caso
+ *       contrário, retorna 400 `VALIDATION_ERROR`. Se só um dos dois for
+ *       informado, o default completo (últimos 6 meses) também é aplicado.
+ *
+ *       Apenas o locador autenticado lê — outros usuários autenticados recebem
+ *       403; anônimos recebem 401. A consulta é escopada ao `req.localUser.id`
+ *       via `$queryRaw` parametrizado (nunca interpolado).
+ *     tags: [Propriedades, Analytics]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         description: Primeiro mês da janela, formato YYYY-MM-01 (UTC).
+ *         schema:
+ *           type: string
+ *           pattern: '^\d{4}-(0[1-9]|1[0-2])-01$'
+ *           example: '2025-12-01'
+ *       - in: query
+ *         name: to
+ *         description: Último mês da janela (inclusivo), formato YYYY-MM-01 (UTC).
+ *         schema:
+ *           type: string
+ *           pattern: '^\d{4}-(0[1-9]|1[0-2])-01$'
+ *           example: '2026-05-01'
+ *     responses:
+ *       200:
+ *         description: Quatro arrays paralelos (zero-fill aplicado).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [months, rentals, newTenants, monthlyRevenue]
+ *               properties:
+ *                 months:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                     pattern: '^\d{4}-(0[1-9]|1[0-2])$'
+ *                   example: ['2025-12', '2026-01', '2026-02', '2026-03', '2026-04', '2026-05']
+ *                 rentals:
+ *                   type: array
+ *                   description: Número de contratos iniciados no mês.
+ *                   items:
+ *                     type: integer
+ *                   example: [1, 0, 2, 1, 0, 3]
+ *                 newTenants:
+ *                   type: array
+ *                   description: |
+ *                     Número de inquilinos cujo PRIMEIRO contrato com este locador
+ *                     começou no mês (MIN(startDate) agrupado por tenantId).
+ *                   items:
+ *                     type: integer
+ *                   example: [1, 0, 2, 1, 0, 2]
+ *                 monthlyRevenue:
+ *                   type: array
+ *                   description: Soma de RentalPayment.amount de pagamentos PAID no período (BRL).
+ *                   items:
+ *                     type: number
+ *                   example: [3200, 0, 6400, 3200, 0, 9600]
+ *       400:
+ *         description: |
+ *           Formato inválido (`from`/`to` não casam YYYY-MM-01), `from > to`,
+ *           ou span excede 24 meses. Corpo usa `ErrorResponse` com `code=VALIDATION_ERROR`.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Token ausente ou inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: Usuário autenticado não é LANDLORD.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get(
+  '/properties/analytics/monthly',
+  ...landlordAuthStack,
+  propertyController.getMonthlyAnalytics,
+);
 
 /**
  * @swagger
