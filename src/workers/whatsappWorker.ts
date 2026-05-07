@@ -12,6 +12,7 @@ import { propertyService } from '../services/propertyService';
 import type { PropertySearchInput } from '../utils/searchValidation';
 import { logger, type Logger } from '../config/logger';
 import { checkPhoneRateLimit, type PhoneRateLimitResult } from '../utils/phoneRateLimiter';
+import { whatsappRegistration } from '../services/whatsappRegistrationService';
 
 export const RAG_ERROR_FALLBACK =
     'Desculpe, tive um problema técnico para responder agora. Um de nossos atendentes humanos vai continuar esse atendimento em instantes.';
@@ -72,7 +73,7 @@ export function createConcurrencyLimiter(max: number): ConcurrencyLimiter {
 
 const defaultLeadExtractionLimiter = createConcurrencyLimiter(LEAD_EXTRACTION_CONCURRENCY);
 
-type PrismaWorkerClient = Pick<PrismaClient, 'user' | 'chatSession' | 'message'>;
+type PrismaWorkerClient = Pick<PrismaClient, 'user' | 'chatSession' | 'message' | 'property'>;
 
 type SendMessageFn = (to: string, text: string) => Promise<SendMessageResponse>;
 
@@ -194,7 +195,9 @@ export async function handleWhatsappMessage(
     });
 
     const expired = isSessionExpired(previousSession);
-    const isNewOrResetSession = !previousSession || previousSession.status !== 'ACTIVE_BOT' || expired;
+    // Bot só morre quando a sessão é RESOLVED ou expirou (7 dias).
+    // WAITING_HUMAN mantém o bot ativo — o humano complementa, não substitui.
+    const isNewOrResetSession = !previousSession || previousSession.status === 'RESOLVED' || expired;
 
     if (isNewOrResetSession && previousSession) {
         log.info(
@@ -241,14 +244,45 @@ export async function handleWhatsappMessage(
         },
     });
 
+    // Cadastro rápido via WhatsApp: se usuário não tem email e mandou
+    // um email, registra e confirma. Se for novo e sem email, pede no welcome.
+    const needsEmail = !user.email;
+    const extractedEmail = needsEmail ? whatsappRegistration.isEmail(messageText) : null;
+    if (extractedEmail) {
+        try {
+            const regResult = await whatsappRegistration.register({
+                phoneNumber,
+                name: contactName,
+                email: extractedEmail,
+            });
+            await deps.sendMessage(phoneNumber, regResult.message);
+            await deps.prisma.message.create({
+                data: {
+                    sessionId: chatSession.id,
+                    senderType: 'BOT',
+                    content: regResult.message,
+                },
+            });
+            if (regResult.success) {
+                log.info({ phoneNumber, email: regResult.email }, '[worker] whatsapp registration done');
+            }
+        } catch (err) {
+            log.error({ err }, '[worker] whatsapp registration failed');
+        }
+        return { success: true };
+    }
+
     if (isNewOrResetSession && GREETING_REGEX.test(messageText.trim())) {
         try {
-            await deps.sendMessage(phoneNumber, WELCOME_MESSAGE);
+            const welcomeText = needsEmail
+                ? WELCOME_MESSAGE + "\n\n\u{1F4E7} Pra finalizar seu cadastro rapidinho, qual seu melhor e-mail?"
+                : WELCOME_MESSAGE;
+            await deps.sendMessage(phoneNumber, welcomeText);
             const welcomeMsg = await deps.prisma.message.create({
                 data: {
                     sessionId: chatSession.id,
                     senderType: 'BOT',
-                    content: WELCOME_MESSAGE,
+                    content: welcomeText,
                 },
             });
 
@@ -259,7 +293,7 @@ export async function handleWhatsappMessage(
                     id: welcomeMsg.id,
                     sessionId: chatSession.id,
                     senderType: 'BOT',
-                    content: WELCOME_MESSAGE,
+                    content: welcomeText,
                     status: 'sent',
                     timestamp: welcomeMsg.timestamp,
                     wamid: null,
@@ -273,6 +307,15 @@ export async function handleWhatsappMessage(
     }
 
     let useStructuredSearch = false;
+
+    // Roda extração de busca estruturada E RAG em paralelo.
+    // Se a extração achar city+state+maxPrice, usa busca estruturada e
+    // descarta o RAG. Se falhar, o RAG já está pronto (embedding+retrieval
+    // já concluídos), economizando 1-3s de latência.
+    const ragPromise = deps.generateAnswer({
+        sessionId: chatSession.id,
+        userMessage: messageText,
+    });
 
     try {
         const filters = await deps.extractSearchFilters(messageText);
@@ -304,9 +347,20 @@ export async function handleWhatsappMessage(
                 },
             });
 
+            // Vincula o primeiro imóvel encontrado à sessão
+            const topProperty = result.data?.[0];
+            if (topProperty) {
+                await deps.prisma.chatSession.update({
+                    where: { id: chatSession.id },
+                    data: { propertyId: topProperty.id },
+                });
+            }
+
             await deps.emitEvent?.('new_message', {
                 tenantId: user.id,
                 sessionId: chatSession.id,
+                propertyId: topProperty?.id ?? null,
+                landlordId: topProperty?.landlordId ?? null,
                 message: {
                     id: searchMsg.id,
                     sessionId: chatSession.id,
@@ -323,25 +377,19 @@ export async function handleWhatsappMessage(
                 '[worker] structured search response sent; skipping RAG',
             );
 
-            useStructuredSearch = true;
+            return { success: true };
         }
     } catch (extractionErr) {
         log.warn({ err: extractionErr }, '[worker] search extraction failed; falling back to RAG');
     }
 
-    if (useStructuredSearch) {
-        return { success: true };
-    }
-
+    // RAG já estava rodando em paralelo — espera o resultado
     let answer: string;
     let handoff: boolean;
     let ragError = false;
 
     try {
-        const result = await deps.generateAnswer({
-            sessionId: chatSession.id,
-            userMessage: messageText,
-        });
+        const result = await ragPromise;
         answer = result.answer;
         handoff = result.handoff;
     } catch (err) {
@@ -440,11 +488,12 @@ const socketEmitter = new Emitter(connection);
 export const whatsappWorker = new Worker<WhatsAppWebhookPayload>(
     'whatsapp-messages',
     async (job: Job<WhatsAppWebhookPayload>) => {
+        const startedAt = Date.now();
         const wamid = (job.data as any)?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.id;
-        const jobLog = logger.child({ jobId: job.id, wamid });
+        const jobLog = logger.child({ jobId: job.id, wamid, attempt: job.attemptsMade + 1 });
         jobLog.info('[worker] processing job');
         try {
-            return await handleWhatsappMessage(job.data, {
+            const result = await handleWhatsappMessage(job.data, {
                 prisma,
                 sendMessage: defaultSendMessage,
                 generateAnswer: defaultGenerateAnswer,
@@ -459,19 +508,46 @@ export const whatsappWorker = new Worker<WhatsAppWebhookPayload>(
                         windowSeconds: PHONE_RATE_WINDOW_SECONDS,
                     }),
                 emitEvent: async (event: string, data: any) => {
-                    socketEmitter.emit(event, data);
+                    const tenantId = data?.tenantId;
+                    const landlordId = data?.landlordId;
+                    const senderType = data?.message?.senderType;
+                    try {
+                        if (tenantId) {
+                            socketEmitter.to(`user:${tenantId}`).emit(event, data);
+                            jobLog.info({ event, tenantId, sessionId: data?.sessionId }, '[worker] socket event sent to tenant room');
+                        }
+                        // Notificar landlord específico (se identificado)
+                        if (landlordId) {
+                            socketEmitter.to(`landlord:${landlordId}`).emit('new_lead', data);
+                            jobLog.info({ event, landlordId }, '[worker] new_lead sent to landlord');
+                        } else if (senderType === 'TENANT' || event === 'session_updated') {
+                            socketEmitter.to('provider:all').emit(event, data);
+                            jobLog.info({ event }, '[worker] socket event sent to provider room');
+                        }
+                    } catch (emitErr) {
+                        jobLog.error({ err: emitErr, event }, '[worker] socket emit failed');
+                    }
                 },
             });
+            const elapsed = Date.now() - startedAt;
+            jobLog.info({ elapsedMs: elapsed, handoff: result.handoff, ragError: result.ragError }, '[worker] job completed');
+            return result;
         } catch (dbError: any) {
+            const elapsed = Date.now() - startedAt;
             if (dbError?.code === 'P2002' && dbError?.meta?.target?.includes('wamid')) {
-                jobLog.info('[worker] duplicate wamid unique constraint; skipping');
+                jobLog.info({ elapsedMs: elapsed }, '[worker] duplicate wamid unique constraint; skipping');
                 return { success: true, reason: 'duplicate_wamid_db' };
             }
-            jobLog.error({ err: dbError }, '[worker] job failed');
+            jobLog.error({ err: dbError, elapsedMs: elapsed }, '[worker] job failed');
             throw dbError;
         }
     },
-    { connection, lockDuration: 60000 }
+    {
+        connection,
+        lockDuration: 60000,
+        removeOnComplete: { age: 3600 },
+        removeOnFail: { age: 7 * 24 * 3600 },
+    }
 );
 
 whatsappWorker.on('completed', (job: Job) => {

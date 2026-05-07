@@ -6,7 +6,7 @@ import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import type { PrismaClient } from "@prisma/client";
 
 import prisma from "../config/db";
-import { createGeminiEmbedder } from "../config/geminiEmbedder";
+import { createOpenRouterEmbedder } from "../config/openrouterEmbedder";
 import { CHUNK_OVERLAP, CHUNK_SIZE } from "../config/rag";
 
 export interface ChunkRecord {
@@ -219,7 +219,7 @@ async function main(): Promise<void> {
     chunkOverlap: CHUNK_OVERLAP,
   });
 
-  const embedder = createGeminiEmbedder();
+  const embedder = createOpenRouterEmbedder();
 
   const summary = await runIngestion({
     prisma,

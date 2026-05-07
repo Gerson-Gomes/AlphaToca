@@ -83,9 +83,37 @@ export function createGeminiEmbedder(): GeminiEmbedderAdapter {
   }
 
   async function embedDocumentsBatch(texts: string[]): Promise<number[][]> {
-    const out: number[][] = new Array(texts.length);
-    for (let i = 0; i < texts.length; i++) {
-      out[i] = await embedOne(texts[i], "RETRIEVAL_DOCUMENT");
+    const out: number[][] = [];
+    // Gemini aceita array de strings para batch embedding — 1 API call
+    // para N textos, respeitando o rate limit de 100 RPM do free tier.
+    for (let start = 0; start < texts.length; start += 100) {
+      const batch = texts.slice(start, start + 100);
+      const res = await client.models.embedContent({
+        model: EMBEDDING_MODEL,
+        contents: batch,
+        config: {
+          outputDimensionality: EMBEDDING_DIMS,
+          taskType: "RETRIEVAL_DOCUMENT",
+        },
+      });
+      const batchEmbeddings = res.embeddings;
+      if (!batchEmbeddings || batchEmbeddings.length !== batch.length) {
+        throw new Error(
+          `[geminiEmbedder] batch embedding mismatch: expected ${batch.length}, got ${batchEmbeddings?.length ?? 0}`,
+        );
+      }
+      for (const emb of batchEmbeddings) {
+        const values = emb.values;
+        if (!values || values.length === 0) {
+          throw new Error("[geminiEmbedder] empty embedding in batch");
+        }
+        if (values.length !== EMBEDDING_DIMS) {
+          throw new Error(
+            `[geminiEmbedder] expected ${EMBEDDING_DIMS} dims, got ${values.length}`,
+          );
+        }
+        out.push(l2Normalize(values));
+      }
     }
     return out;
   }

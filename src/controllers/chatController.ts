@@ -5,7 +5,6 @@ import {
   listSessions,
   getSessionById,
   saveMessage,
-  updateSessionStatus,
 } from '../services/chatService';
 import {
   sendMessageSchema,
@@ -15,6 +14,7 @@ import {
 import { sendMessage as sendWhatsAppMessage } from '../services/whatsappService';
 import { chatSocketService } from '../services/chatSocketService';
 import { logger } from '../config/logger';
+import prisma from '../config/db';
 
 export const chatController = {
   async getOrCreateSession(req: Request, res: Response, next: NextFunction) {
@@ -31,7 +31,8 @@ export const chatController = {
     try {
       const tenantId = req.query.tenantId as string | undefined;
       const status = req.query.status as ChatStatus | undefined;
-      const sessions = await listSessions({ tenantId, status });
+      const landlordId = req.query.landlordId as string | undefined;
+      const sessions = await listSessions({ tenantId, status, landlordId });
       return res.status(200).json(sessions);
     } catch (err) {
       next(err);
@@ -81,8 +82,8 @@ export const chatController = {
         }
       }
 
-      // Emitir evento de nova mensagem para o tenant
       const session = await getSessionById(data.sessionId);
+
       if (session) {
         chatSocketService.emitNewMessage(session.tenantId, {
           sessionId: data.sessionId,
@@ -108,13 +109,17 @@ export const chatController = {
   async updateStatus(req: Request, res: Response, next: NextFunction) {
     try {
       const { status } = updateSessionStatusSchema.parse(req.body);
-      const session = await updateSessionStatus(req.params.id, status);
+      const session = await prisma.chatSession.update({
+        where: { id: req.params.id },
+        data: { status },
+        include: { property: { select: { landlordId: true } } },
+      });
 
       if (session) {
         chatSocketService.emitSessionUpdated(session.tenantId, {
           sessionId: session.id,
           status: session.status,
-        });
+        }, session.property?.landlordId ?? null);
       }
 
       return res.status(200).json(session);

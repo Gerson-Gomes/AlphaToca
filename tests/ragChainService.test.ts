@@ -12,6 +12,7 @@ import {
   buildSystemPrompt,
   historyToMessages,
   LANDLORD_MESSAGE_PREFIX,
+  FALLBACK_ANSWER,
   type ChainDeps,
 } from "../src/services/ragChainService";
 import { SIMILARITY_THRESHOLD } from "../src/config/rag";
@@ -426,7 +427,7 @@ describe("generateAnswer", () => {
     await resultPromise;
   });
 
-  it("times out the LLM invoke and propagates the error (caught by worker fallback)", async () => {
+  it("falls back gracefully after LLM timeout (retry attempts exhausted)", async () => {
     const highScore = SIMILARITY_THRESHOLD + 0.1;
     const deps = makeDeps({
       chunks: [{ id: "c1", title: "T", content: "b", score: highScore }],
@@ -437,9 +438,10 @@ describe("generateAnswer", () => {
     const prev = process.env.RAG_LLM_TIMEOUT_MS;
     process.env.RAG_LLM_TIMEOUT_MS = "20";
     try {
-      await expect(
-        generateAnswer({ sessionId: "s1", userMessage: "q" }, deps),
-      ).rejects.toThrow(/LLM invoke timeout after 20ms/);
+      const result = await generateAnswer({ sessionId: "s1", userMessage: "q" }, deps);
+      expect(result.handoff).toBe(true);
+      expect(result.answer).toBe(FALLBACK_ANSWER);
+      expect(result.topScore).toBe(highScore);
     } finally {
       if (prev === undefined) delete process.env.RAG_LLM_TIMEOUT_MS;
       else process.env.RAG_LLM_TIMEOUT_MS = prev;

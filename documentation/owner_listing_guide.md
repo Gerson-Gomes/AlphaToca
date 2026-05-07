@@ -7,6 +7,16 @@
 ## 1. Criar Conta de Proprietário
 
 ### Como se cadastrar como proprietário
+Você pode se cadastrar de duas formas:
+
+**Pelo WhatsApp (mais rápido):**
+- Envie "oi" para nosso número no WhatsApp
+- O assistente virtual vai pedir seu e-mail
+- Digite seu e-mail e o cadastro será feito na hora
+- Você receberá um link no e-mail para definir sua senha
+- Depois, acesse o app e altere seu perfil para proprietário
+
+**Pelo aplicativo ou site:**
 Ao criar sua conta no I-Moveis, marque a opção "Sou proprietário" (isOwner). Isso define automaticamente seu perfil como LANDLORD no sistema, dando acesso às funcionalidades de gestão de imóveis.
 
 Você precisará fornecer:

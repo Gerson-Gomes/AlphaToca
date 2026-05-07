@@ -32,14 +32,18 @@ export async function getOrCreateSession(tenantId: string) {
   return session;
 }
 
-export async function listSessions(filters: { tenantId?: string; status?: ChatStatus }) {
+export async function listSessions(filters: { tenantId?: string; status?: ChatStatus; landlordId?: string }) {
   const where: any = {};
   if (filters.tenantId) where.tenantId = filters.tenantId;
   if (filters.status) where.status = filters.status;
+  if (filters.landlordId) {
+    where.property = { landlordId: filters.landlordId };
+  }
   return prisma.chatSession.findMany({
     where,
     include: {
       tenant: { select: { id: true, name: true, phoneNumber: true } },
+      property: { select: { id: true, title: true, landlordId: true } },
       _count: { select: { messages: true } },
       messages: {
         orderBy: { timestamp: 'desc' },

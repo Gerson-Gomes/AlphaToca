@@ -186,6 +186,7 @@ model Property {
   maintenanceLogs MaintenanceLog[]
   rentalPayments  RentalPayment[]
   conversations   Conversation[]
+  chatSessions    ChatSession[]
 
   @@index([moderationStatus], name: "properties_moderation_status_idx")
   @@map("properties")
@@ -206,19 +207,22 @@ model PropertyImage {
 }
 
 model ChatSession {
-  id        String     @id @default(uuid())
-  tenantId  String     @map("tenant_id")
-  status    ChatStatus @default(ACTIVE_BOT)
-  startedAt DateTime   @default(now()) @map("started_at")
+  id         String     @id @default(uuid())
+  tenantId   String     @map("tenant_id")
+  propertyId String?    @map("property_id")
+  status     ChatStatus @default(ACTIVE_BOT)
+  startedAt  DateTime   @default(now()) @map("started_at")
   // TTL da sessão. Após este instante, o worker cria uma nova sessão ACTIVE_BOT
   // em vez de reutilizar esta (evita arrastar histórico obsoleto de semanas atrás).
-  expiresAt DateTime   @default(dbgenerated("(now() + interval '7 days')")) @map("expires_at")
+  expiresAt  DateTime   @default(dbgenerated("(now() + interval '7 days')")) @map("expires_at")
 
   // Relacionamentos
   tenant   User      @relation("TenantChats", fields: [tenantId], references: [id])
+  property Property? @relation(fields: [propertyId], references: [id])
   messages Message[]
 
   @@index([expiresAt], name: "chat_sessions_expires_at_idx")
+  @@index([propertyId], name: "chat_sessions_property_id_idx")
   @@map("chat_sessions")
 }
 

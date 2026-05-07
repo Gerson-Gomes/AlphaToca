@@ -7,7 +7,16 @@
 ## 1. Criar Conta e Login
 
 ### Como criar uma conta
-Para usar o I-Moveis, você precisa criar uma conta. O cadastro pode ser feito pelo aplicativo ou pelo site, fornecendo:
+Para usar o I-Moveis, você pode criar sua conta de duas formas:
+
+**Pelo WhatsApp (mais rápido):**
+- Envie "oi" para nosso número
+- O assistente virtual vai pedir seu e-mail
+- Digite seu e-mail e o cadastro será feito na hora
+- Você receberá um link no e-mail para definir sua senha e acessar o app
+
+**Pelo aplicativo ou site:**
+- Forneça os seguintes dados:
 - Nome completo
 - E-mail
 - Senha (escolha uma senha segura)

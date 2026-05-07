@@ -10,7 +10,7 @@ export const favoriteController = {
   async add(req: Request, res: Response, next: NextFunction) {
     try {
       const { propertyId } = favoriteSchema.parse(req.body);
-      const userId = (req as any).user.id; // From authMiddleware
+      const userId = (req as any).localUser.id; // From authMiddleware
       const favorite = await addFavorite(userId, propertyId);
       return res.status(201).json(favorite);
     } catch (err) {
@@ -21,7 +21,7 @@ export const favoriteController = {
   async remove(req: Request, res: Response, next: NextFunction) {
     try {
       const propertyId = req.params.propertyId;
-      const userId = (req as any).user.id;
+      const userId = (req as any).localUser.id;
       await removeFavorite(userId, propertyId);
       return res.status(204).send();
     } catch (err) {
@@ -31,7 +31,7 @@ export const favoriteController = {
 
   async list(req: Request, res: Response, next: NextFunction) {
     try {
-      const userId = (req as any).user.id;
+      const userId = (req as any).localUser.id;
       const favorites = await listUserFavorites(userId);
       return res.status(200).json(favorites);
     } catch (err) {
@@ -42,7 +42,7 @@ export const favoriteController = {
   async check(req: Request, res: Response, next: NextFunction) {
     try {
       const propertyId = req.params.propertyId;
-      const userId = (req as any).user.id;
+      const userId = (req as any).localUser.id;
       const favorited = await isPropertyFavorited(userId, propertyId);
       return res.status(200).json({ favorited });
     } catch (err) {

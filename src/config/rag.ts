@@ -5,16 +5,12 @@ export const EMBEDDING_MODEL = "gemini-embedding-001" as const;
 export const EMBEDDING_DIMS = 1536 as const;
 export const CHUNK_SIZE = 800 as const;
 export const CHUNK_OVERLAP = 120 as const;
-// RETRIEVER_K = 4: reduzido de 6 → 4 (2026-04-30) após análise do benchmark
-// t055 — os chunks 5-6 raramente influenciam a resposta (top-score médio 0.687,
-// cauda já encosta no threshold 0.55). Corta ~30% do prompt input, reduz TTFT
-// e baixa o custo por conversa sem regressão de qualidade mensurada.
-export const RETRIEVER_K = 4 as const;
-// Threshold calibrado empiricamente para Gemini embeddings em PT-BR.
-// Sem task type: scores observados 0.52-0.64 (média 0.594).
-// Com task type (RETRIEVAL_DOCUMENT/QUERY): scores 0.62-0.78 (média 0.687).
-// 0.55 deixa margem segura acima do ruído e abaixo do menor relevante medido.
-const DEFAULT_SIMILARITY_THRESHOLD = 0.55;
+// RETRIEVER_K = 6: cobertura ampla para perguntas genéricas.
+export const RETRIEVER_K = 6 as const;
+// Threshold relaxado de 0.55 → 0.45 (2026-05-07) para permitir mais
+// correspondências fuzzy e evitar transferências desnecessárias para humano.
+// O system prompt anti-alucinação impede que o LLM invente informações.
+const DEFAULT_SIMILARITY_THRESHOLD = 0.45;
 function resolveSimilarityThreshold(): number {
   const raw = process.env.EVAL_SIMILARITY_THRESHOLD;
   if (!raw || raw.trim() === "") return DEFAULT_SIMILARITY_THRESHOLD;

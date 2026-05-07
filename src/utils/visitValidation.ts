@@ -17,9 +17,9 @@ const durationMinutesField = z
   .max(MAX_VISIT_DURATION_MINUTES, `durationMinutes must be at most ${MAX_VISIT_DURATION_MINUTES}`);
 
 export const createVisitSchema = z.object({
-  propertyId: z.string().uuid({ message: 'Invalid propertyId format' }),
-  tenantId: z.string().uuid({ message: 'Invalid tenantId format' }),
-  rentalProcessId: z.string().uuid({ message: 'Invalid rentalProcessId format' }).optional(),
+  propertyId: z.string().min(1, { message: 'propertyId is required' }),
+  tenantId: z.string().min(1, { message: 'tenantId is required' }),
+  rentalProcessId: z.string().optional(),
   scheduledAt: scheduledAtField,
   durationMinutes: durationMinutesField.optional().default(DEFAULT_VISIT_DURATION_MINUTES),
   notes: z.string().max(2000).optional(),
@@ -37,16 +37,16 @@ export const updateVisitSchema = z
   });
 
 export const listVisitsQuerySchema = z.object({
-  propertyId: z.string().uuid().optional(),
-  tenantId: z.string().uuid().optional(),
-  landlordId: z.string().uuid().optional(),
+  propertyId: z.string().optional(),
+  tenantId: z.string().optional(),
+  landlordId: z.string().optional(),
   status: z.nativeEnum(VisitStatus).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
 });
 
 export const availabilityQuerySchema = z.object({
-  propertyId: z.string().uuid({ message: 'propertyId is required' }),
+  propertyId: z.string().min(1, { message: 'propertyId is required' }),
   from: z.coerce.date(),
   to: z.coerce.date(),
   slotMinutes: z.coerce
