@@ -35,9 +35,8 @@ export const propertySearchSchema = z.object({
   city: z.string().optional(),
   state: z.string().length(2).toUpperCase().optional(),
 
-  // Filtros de proprietário/inquilino — desbloqueiam a tela "Meus Imóveis" (§1 BACKEND_GAPS)
-  landlordId: z.string().uuid().optional(),
-  tenantId: z.string().uuid().optional(),
+  landlordId: z.string().optional().transform(val => (val && val.trim() !== '' ? val : undefined)).pipe(z.string().uuid().optional()),
+  tenantId: z.string().optional().transform(val => (val && val.trim() !== '' ? val : undefined)).pipe(z.string().uuid().optional()),
 
   lat: stringToNumber,
   lng: stringToNumber,

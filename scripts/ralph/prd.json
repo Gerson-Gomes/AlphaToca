@@ -1,146 +1,167 @@
 {
-  "project": "AlphaToca-Backend",
-  "branchName": "rag-implementation",
-  "description": "RAG Implementation with LangChain for WhatsApp Chatbot - Adds a Retrieval-Augmented Generation pipeline built on LangChain that ingests Markdown docs, retrieves relevant chunks, generates grounded answers, extracts lead insights, and hands off to humans when confidence is low.",
+  "project": "I-Moveis",
+  "branchName": "ralph/property-photo-upload",
+  "description": "Property Photo Upload - Enable landlords to upload JPEG/PNG photos when creating a property via multipart/form-data on POST /properties. Photos are stored on the local filesystem at uploads/<propertyId>/<uuid>.<ext> and referenced by the existing property_images table. Up to 20 photos, 10MB each. First photo becomes the cover (isCover=true). Property + images creation is atomic: on any failure, database is rolled back AND files are removed from disk.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Define ingestion pipeline shape and config",
-      "description": "As a developer, I want a single config module that centralizes the embedding model, chunking strategy, and retrieval parameters so the rest of the RAG code reads them from one place.",
+      "title": "Install multer and type definitions",
+      "description": "As a developer, I need a multipart parser so Express can process binary file uploads in POST /properties requests.",
       "acceptanceCriteria": [
-        "New file src/config/rag.ts exports typed constants: EMBEDDING_MODEL = \"text-embedding-3-small\", EMBEDDING_DIMS = 1536, CHUNK_SIZE = 800, CHUNK_OVERLAP = 120, RETRIEVER_K = 4, SIMILARITY_THRESHOLD = 0.72",
-        "Reads OPENAI_API_KEY and ANTHROPIC_API_KEY from process.env, fails fast with a clear error at boot if either is missing",
+        "Add 'multer' to dependencies in package.json (latest stable v1.x)",
+        "Add '@types/multer' to devDependencies in package.json",
+        "Run npm install so package-lock.json is updated and node_modules/multer exists",
+        "Import multer from 'multer' in a TypeScript file compiles without error",
         "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Completed 2026-04-21. Created src/config/rag.ts with typed constants and fail-fast secret accessors (getOpenAIApiKey, getAnthropicApiKey, assertRagSecrets)."
+      "notes": "Installed multer@^1.4.5-lts.2 (latest v1.x LTS) and @types/multer@^2.1.0. Note: npm emits a deprecation warning for multer 1.x recommending upgrade to 2.x. PRD explicitly requested v1.x, so this was honored; upgrading to multer@2 may be reconsidered in a follow-up for its security patches."
     },
     {
       "id": "US-002",
-      "title": "Extend KnowledgeDocument with ingestion-tracking fields",
-      "description": "As a developer, I want to track the source file, chunk index, and content hash per row so re-ingestion can skip unchanged chunks.",
+      "title": "Create multer upload middleware with validation",
+      "description": "As a developer, I need a pre-configured multer instance that enforces file type, size, and count limits for property photos.",
       "acceptanceCriteria": [
-        "Add to KnowledgeDocument: sourcePath String, chunkIndex Int, contentHash String, createdAt DateTime @default(now()), updatedAt DateTime @updatedAt",
-        "Add compound unique index on (sourcePath, chunkIndex) so upserts are deterministic",
-        "Add index on contentHash for fast skip lookups",
-        "Prisma migration generated and applied against a local DB (npx prisma migrate dev --name add_rag_ingestion_tracking)",
-        "npx prisma generate runs cleanly",
-        "Typecheck passes"
+        "New file src/middlewares/uploadMiddleware.ts exports a multer instance named 'propertyPhotoUpload'",
+        "Uses multer.memoryStorage() so files are buffered in RAM and only written to disk after property creation succeeds",
+        "Sets limits: { fileSize: 10 * 1024 * 1024, files: 20 } (10MB per file, 20 files max)",
+        "fileFilter accepts only MIME types 'image/jpeg' and 'image/png' — rejects other types by calling cb() with an Error whose message is 'INVALID_FILE_TYPE' (no file is attached)",
+        "Exports a convenience handler using propertyPhotoUpload.array('photos', 20) so routes can import it directly",
+        "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 2,
       "passes": true,
-      "notes": "Completed 2026-04-21. Added sourcePath, chunkIndex, contentHash, createdAt, updatedAt to KnowledgeDocument in prisma/schema.prisma with compound unique index on (sourcePath, chunkIndex) and index on contentHash. Migration 20260422022358_add_rag_ingestion_tracking generated via `prisma migrate diff` (non-interactive workaround for migrate dev) and applied cleanly to local DB via `prisma migrate deploy`. prisma generate and typecheck pass; 43 tests green."
+      "notes": "Created src/middlewares/uploadMiddleware.ts exporting propertyPhotoUpload (multer instance with memoryStorage, 10MB/20 file limits, JPEG/PNG-only fileFilter that rejects with Error('INVALID_FILE_TYPE')) and a convenience handler propertyPhotoUploadHandler = propertyPhotoUpload.array('photos', 20). Typecheck passes; pre-existing 16 test failures are Auth0 legacy tests unrelated to this change (confirmed by stashing and re-running)."
     },
     {
       "id": "US-003",
-      "title": "Build the ingestion CLI script",
-      "description": "As a developer, I want npm run ingest:knowledge to walk documentation/, chunk every .md file, embed new/changed chunks, and upsert them into KnowledgeDocument.",
+      "title": "Create propertyImageStorageService for filesystem writes",
+      "description": "As a developer, I need a service that writes multer in-memory files to uploads/<propertyId>/ with safe UUID-based filenames and can clean up on failure.",
       "acceptanceCriteria": [
-        "New script src/scripts/ingestKnowledge.ts reads all *.md files under documentation/ recursively",
-        "Splits each file with LangChain RecursiveCharacterTextSplitter using CHUNK_SIZE / CHUNK_OVERLAP from src/config/rag.ts",
-        "Computes sha256(content) per chunk as contentHash",
-        "Upserts by (sourcePath, chunkIndex): insert if missing, skip if contentHash matches, update if differs",
-        "Deletes rows whose (sourcePath, chunkIndex) no longer exists in the file",
-        "Writes embeddings via raw SQL ($executeRaw) with ::vector casts",
-        "Logs a summary: N files, X inserted, Y updated, Z skipped, W deleted",
-        "New npm script: \"ingest:knowledge\": \"ts-node src/scripts/ingestKnowledge.ts\"",
-        "Running the script twice produces 0 inserted, 0 updated, N skipped on second run",
-        "Unit test covers the hash-skip logic with mocked embeddings + mocked Prisma client",
-        "Typecheck passes; tests pass (npm test)"
+        "New file src/services/propertyImageStorageService.ts exports async function savePropertyImages(propertyId: string, files: Express.Multer.File[]): Promise<{ url: string; isCover: boolean }[]>",
+        "Creates directory uploads/<propertyId>/ using fs/promises mkdir with { recursive: true }",
+        "Each file is saved as <crypto.randomUUID()>.<ext> where ext is derived from file.mimetype ('image/jpeg' -> 'jpg', 'image/png' -> 'png') — never uses file.originalname",
+        "Returns array in input order with url = '/uploads/<propertyId>/<uuid>.<ext>' and isCover=true only for index 0",
+        "Also exports async function cleanupPropertyImages(propertyId: string, urls: string[]): Promise<void> which deletes the given files (and the directory if empty), swallowing ENOENT errors",
+        "If any write fails mid-loop, the already-written files in that invocation are deleted before re-throwing the error",
+        "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 3,
       "passes": true,
-      "notes": "Completed 2026-04-21. Created src/scripts/ingestKnowledge.ts with pure `runIngestion(deps)` core + thin CLI wrapper, using RecursiveCharacterTextSplitter from @langchain/textsplitters (new dep) with CHUNK_SIZE/CHUNK_OVERLAP from src/config/rag.ts. sha256 content hash per chunk; upsert-by-(source_path, chunk_index) with skip-if-hash-matches; delete rows whose keys no longer exist. Embeddings written via $executeRawUnsafe with ::vector cast. Added `ingest:knowledge` npm script. Unit test (tests/ingestKnowledge.test.ts) covers insert-all, skip-on-match, update-on-hash-delta, delete-stale, and mixed paths with mocked embedder + mocked Prisma; 50 tests green. Also fixed pre-existing typecheck error in src/scripts/seed-knowledge.ts by pointing import at @langchain/textsplitters."
+      "notes": "Created src/services/propertyImageStorageService.ts. UPLOADS_ROOT resolves via path.join(__dirname, '../../uploads') — consistent with src/app.ts static-serving (__dirname/../uploads) so both dev (ts-node src/) and build (dist/) land at project-root uploads/. savePropertyImages early-returns [] when files is empty, derives ext strictly from MIME ('image/jpeg'->'jpg', 'image/png'->'png') via a lookup table (throws Error('INVALID_FILE_TYPE') if the filter is bypassed — belt-and-suspenders against US-002 regressions), mkdir {recursive:true}, then iterates writing files with randomUUID().ext filenames. On any writeFile failure, already-written files + the dir are cleaned up before rethrow. cleanupPropertyImages uses path.basename(url) to extract the filename (ignoring the URL prefix) and rmdir on the dir, swallowing ENOENT/ENOTEMPTY/EEXIST. Typecheck passes; test suite shows 16/212-passing with the same pre-existing Auth0 baseline — zero regressions since no existing code imports the new service yet."
     },
     {
       "id": "US-004",
-      "title": "Implement the pgvector retriever",
-      "description": "As a developer, I want a LangChain VectorStoreRetriever that queries KnowledgeDocument by cosine similarity and returns the top K chunks plus their similarity scores.",
+      "title": "Update createPropertySchema to coerce multipart string values",
+      "description": "As a developer, I need the Zod schema to accept string inputs for numeric/boolean fields because multer populates req.body with strings in multipart requests.",
       "acceptanceCriteria": [
-        "New module src/services/ragRetrieverService.ts exports retrieveRelevantChunks(query: string): Promise<RetrievedChunk[]> where RetrievedChunk = { id, content, title, score }",
-        "Generates the query embedding with the same EMBEDDING_MODEL used for ingestion",
-        "Runs a single raw SQL query using the pgvector cosine operator (<=> for distance or 1 - (embedding <=> $1) for similarity), ORDER BY embedding <=> $1 ASC LIMIT K",
-        "Rows with embedding IS NULL are excluded",
-        "Unit test with a seeded in-memory fixture (or mocked Prisma) verifies ordering and K limit",
-        "Typecheck passes; tests pass"
+        "In src/utils/propertyValidation.ts, numeric fields (price, bedrooms, bathrooms, parkingSpots, area, latitude, longitude, views, condoFee, propertyTax) use z.coerce.number() (preserving existing .min/.max/.positive/etc constraints)",
+        "Boolean fields (isFurnished, petsAllowed, nearSubway, isFeatured) use z.coerce.boolean() or a preprocess that maps 'true'/'false' strings to booleans",
+        "Existing JSON requests (without file uploads) still pass validation — no regression",
+        "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 4,
       "passes": true,
-      "notes": "Completed 2026-04-21. Created src/services/ragRetrieverService.ts exporting retrieveRelevantChunks(query, overrideDeps?) -> Promise<RetrievedChunk[]> with { id, content, title, score }. Embeds the query via OpenAIEmbeddings (same EMBEDDING_MODEL as ingestion), then runs one $queryRawUnsafe against knowledge_documents using pgvector cosine distance (<=>), ORDER BY ASC LIMIT K, WHERE embedding IS NOT NULL. Score is computed as 1 - distance. Uses the deps-injection pattern from ingestKnowledge so tests can mock prisma + embedder. Blank queries short-circuit to []. Default deps are cached (lazy OpenAI client init) so importing the module does NOT require env vars. New unit test tests/ragRetrieverService.test.ts (7 tests) verifies: blank-query no-op, embedding is forwarded, SQL includes embedding IS NOT NULL + ORDER BY + LIMIT, vector literal param shape, default K = RETRIEVER_K, ordering is preserved, K limit honored, per-call k override, and string-distance parsing. 57 tests green; typecheck clean."
+      "notes": "Rewrote createPropertySchema in src/utils/propertyValidation.ts. priceField switched from z.string().regex(...).transform(Decimal) to z.coerce.number().positive().transform(Decimal) — now accepts both multipart strings and JSON numbers. Added optional numeric fields (bedrooms/bathrooms/parkingSpots/views as int, area/latitude/longitude as float, condoFee/propertyTax as Decimal via optionalMoneyField helper) using z.coerce.number() with nonnegative/int constraints. Added type (PropertyType enum) as optional. Added boolean fields isFurnished/petsAllowed/nearSubway/isFeatured using a multipartBoolean preprocess helper that explicitly maps 'true'/'false' strings — z.coerce.boolean() was NOT used because it treats any non-empty string as truthy (so 'false' would become true, a silent data-corruption bug). Verified via smoke test that (1) JSON body with price as string '4500.00' and booleans as real booleans parses correctly, (2) multipart body with numeric strings and 'true'/'false' string booleans parses correctly, (3) negative price is rejected, (4) invalid boolean string ('nope') is rejected. Typecheck passes. Test baseline unchanged (16 pre-existing Auth0 failures / 212 pass)."
     },
     {
       "id": "US-005",
-      "title": "Build the conversational RAG chain",
-      "description": "As a developer, I want a single function that, given a user message and a ChatSession.id, produces a grounded Portuguese reply.",
+      "title": "Update propertyService.createProperty to persist images atomically",
+      "description": "As a developer, I need the create flow to run the property INSERT and property_images INSERTs in a single Prisma transaction, with filesystem cleanup on any failure.",
       "acceptanceCriteria": [
-        "New module src/services/ragChainService.ts exports generateAnswer(input: { sessionId: string; userMessage: string })",
-        "Loads the last 10 Messages for the session (ordered by timestamp ASC) and formats them as LangChain HumanMessage / AIMessage history",
-        "Calls retrieveRelevantChunks(userMessage) and concatenates chunk text into a context string",
-        "If no chunk exceeds SIMILARITY_THRESHOLD, returns { answer: <fallback>, handoff: true } without calling the LLM",
-        "Builds a Portuguese system prompt encoding tone rules from documentation/buisness_plan.md section 6",
-        "Calls Claude Sonnet 4.6 via @langchain/anthropic with temperature: 0.2",
-        "Returns { answer: string, handoff: boolean, topScore: number, usedChunkIds: string[] }",
-        "Unit test with mocked LLM + mocked retriever verifies low-score handoff path, high-score LLM path, and that chat history is included in the prompt",
-        "Typecheck passes; tests pass"
+        "propertyService.createProperty signature accepts an optional second parameter: files?: Express.Multer.File[]",
+        "If files is undefined or empty, behavior is identical to today (creates property only, no images)",
+        "If files is non-empty: (1) run prisma.$transaction that creates the Property; (2) inside the same transaction, call savePropertyImages(property.id, files) to write to disk; (3) inside the same transaction, call prisma.propertyImage.createMany with the returned url/isCover records (propertyId set to the new property.id)",
+        "If the transaction throws at any step, cleanupPropertyImages is called with any URLs already returned by savePropertyImages before the error is re-raised",
+        "Returns the created property with images relation included (prisma include: { images: true })",
+        "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 5,
       "passes": true,
-      "notes": "Completed 2026-04-21. Created src/services/ragChainService.ts exporting generateAnswer({ sessionId, userMessage }, overrideDeps?) -> { answer, handoff, topScore, usedChunkIds }. Loads the last N (default 10) messages for the session via prisma.message.findMany (orderBy timestamp desc + reverse -> ASC in final prompt). Calls retrieveRelevantChunks and gates on topScore >= SIMILARITY_THRESHOLD: if below (or zero chunks) returns Portuguese fallback + handoff=true WITHOUT calling the LLM. Builds a Portuguese system prompt encoding tone rules from documentation/buisness_plan.md §6 (profissional/acolhedor/confiável, base-apenas-no-contexto, handoff em litígios, PT-BR, breve). Calls ChatAnthropic with model claude-sonnet-4-6 and temperature 0.2. Deps-injection + cached-default-deps pattern (matches retriever service) so tests don't need ANTHROPIC_API_KEY. Handles string- and content-block-array LLM responses. Unit tests (tests/ragChainService.test.ts) cover: low-score handoff path, high-score LLM path, chat history inclusion + ASC ordering, historyLimit (take+desc+reverse), context injection in system prompt, content-block parsing, similarityThreshold override, formatContext/buildSystemPrompt/historyToMessages helpers. 70 tests green (was 57); typecheck clean."
+      "notes": "Updated propertyService.createProperty in src/services/propertyService.ts to accept optional files?: Express.Multer.File[] second parameter. Added PropertyWithImages return type alias (Property & { images: PropertyImage[] }). No-files branch short-circuits to a plain prisma.property.create with include:{images:true} (returns property with images:[], zero regression for JSON-only callers). Files-present branch runs inside prisma.$transaction(async (tx) => ...): (1) tx.property.create, (2) savePropertyImages (filesystem writes — inside the tx callback as PRD requires), (3) tx.propertyImage.createMany with the returned records, (4) tx.property.findUniqueOrThrow with images:true include. Outer try/catch tracks createdPropertyId and savedUrls so that on any throw (including downstream createMany failures after files were saved), cleanupPropertyImages is invoked with the URLs already returned by savePropertyImages, then the error is re-raised. Cleanup failures are swallowed but logged (don't mask the original error). Note: savePropertyImages already does internal cleanup if it throws mid-loop, so savedUrls stays [] in that case — cleanup runs only when createMany/findUniqueOrThrow fails AFTER a successful save. Typecheck passes; test baseline unchanged at 16 pre-existing Auth0 failures / 212 pass."
     },
     {
       "id": "US-006",
-      "title": "Wire the RAG chain into whatsappWorker.ts",
-      "description": "As a user on WhatsApp, when I send a message the bot should reply with a grounded answer and persist both sides of the conversation.",
+      "title": "Wire multer middleware into POST /properties route",
+      "description": "As a landlord, I want a single POST /properties request to create the property and upload photos together.",
       "acceptanceCriteria": [
-        "whatsappWorker.ts job handler: finds-or-creates User by phoneNumber",
-        "Finds active ChatSession (status ACTIVE_BOT) or creates one",
-        "If session status is WAITING_HUMAN or RESOLVED, persist inbound Message and return (no auto-reply)",
-        "Persists inbound Message with senderType: TENANT",
-        "Calls generateAnswer({ sessionId, userMessage })",
-        "Persists outbound Message with senderType: BOT",
-        "If handoff is true, updates ChatSession.status to WAITING_HUMAN",
-        "Sends answer via existing whatsappService outbound call",
-        "Errors from RAG chain are caught; worker sends generic Portuguese apology and flips session to WAITING_HUMAN",
-        "Integration-style unit test with mocked Prisma + whatsappService + generateAnswer covers happy path, handoff path, and already-WAITING_HUMAN path",
-        "Typecheck passes; tests pass"
+        "In src/routes/propertyRoutes.ts, POST /properties now applies propertyPhotoUpload.array('photos', 20) middleware before propertyController.create",
+        "propertyController.create reads req.files (typed as Express.Multer.File[] | undefined) and passes them as the second argument to propertyService.createProperty",
+        "Validation of req.body via createPropertySchema still runs first — if it fails, no files are written to disk (memoryStorage guarantees this)",
+        "Response 201 body includes the 'images' array populated with the created PropertyImage records",
+        "If req.files is undefined or empty, response 201 returns the property with images: [] — no regression from current JSON-only flow",
+        "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 6,
       "passes": true,
-      "notes": "Completed 2026-04-21. Refactored `src/services/whatsappService.ts` to only send to Meta (removed the baked-in outbound-message persistence + session lookup — the worker now owns all session/message state). Extracted the worker body into `handleWhatsappMessage(payload, deps)` in `src/workers/whatsappWorker.ts` with a deps-injection object `{ prisma, sendMessage, generateAnswer }` (same pattern as US-003/US-004/US-005). Handler flow: finds-or-creates `User` by phoneNumber; finds most recent `ChatSession` (any status) ordered by startedAt desc and creates a new ACTIVE_BOT session if none; persists inbound `Message` (TENANT); if session.status !== ACTIVE_BOT returns `{ success: true, reason: 'session_<status>' }` without replying; otherwise calls `generateAnswer({ sessionId, userMessage })`, sends via `whatsappService.sendMessage` (captures outbound wamid), persists outbound `Message` (BOT), and flips session to WAITING_HUMAN when `handoff === true`. RAG errors are caught and emit a Portuguese apology + handoff flip. `sendMessage` failures are logged but the outbound message is still persisted (wamid null) and the handoff/status update still runs. Tests in `tests/whatsappWorker.test.ts` rewritten to cover: empty payload/no-message/duplicate wamid, happy path (ACTIVE_BOT reuse + new session creation), handoff path, WAITING_HUMAN + RESOLVED early-return paths, RAG-error apology path, and sendMessage-failure persistence. Module top-level `new IORedis`/`new Worker` are mocked via `vi.mock('ioredis')` and `vi.mock('bullmq')` so the test file can import the worker module without a live Redis. 75 tests green (was 70); typecheck clean."
+      "notes": "Added `import { propertyPhotoUploadHandler } from '../middlewares/uploadMiddleware'` to src/routes/propertyRoutes.ts and mounted it before propertyController.create on POST /properties (`router.post('/properties', propertyPhotoUploadHandler, propertyController.create)`). Updated propertyController.create to read `req.files as Express.Multer.File[] | undefined` and pass it as the second argument to `propertyService.createProperty(validatedData, files)`. TS's cast-via-`as` is needed because Express's base Request.files type is `{ [fieldname: string]: Express.Multer.File[] } | Express.Multer.File[] | undefined` — we know multer.array() gives us the array shape, so the narrower cast is safe. JSON-only callers (no multer-parsed files) still work unchanged — the service's no-files branch short-circuits and returns `images: []`. Typecheck passes; test baseline unchanged at 16 pre-existing Auth0 failures / 212 pass. Swagger JSDoc comment still documents the JSON-only request body — that's intentionally US-009's scope."
     },
     {
       "id": "US-007",
-      "title": "Extract structured lead insights",
-      "description": "As an operator, I want the chatbot to capture the tenant's rental preferences (budget, neighborhood, bedrooms, pets, intent) into the database so a human can follow up with real listings.",
+      "title": "Serve uploads/ directory statically via Express",
+      "description": "As a frontend, I need the returned URLs (/uploads/...) to be directly fetchable so <img src> tags can render the photos.",
       "acceptanceCriteria": [
-        "New module src/services/leadExtractionService.ts exports extractInsights(input: { sessionId: string; userMessage: string }): Promise<ExtractedInsights>",
-        "Uses LangChain structured output with a Zod schema: { budget?, neighborhood?, bedrooms?, pets_allowed?, intent: \"search\"|\"schedule_visit\"|\"contract_question\"|\"human_handoff\"|\"other\" }",
-        "Runs against Claude Sonnet 4.6; temperature: 0",
-        "Invoked from whatsappWorker.ts AFTER the reply is sent (queueMicrotask or separate BullMQ job)",
-        "Finds-or-creates a RentalProcess for the tenant with status TRIAGE (one open process per tenant)",
-        "For each non-null extracted key, upserts an AiExtractedInsight row; updates existing rows rather than duplicating",
-        "If intent === \"human_handoff\", flips ChatSession to WAITING_HUMAN",
-        "Unit test with mocked LLM verifies insights are parsed, RentalProcess created once per tenant, insights upserted (second call with new budget updates, doesn't insert new row)",
-        "Typecheck passes; tests pass"
+        "In src/app.ts, register app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads'))) before the error handler",
+        "GET /uploads/<anyPropertyId>/<file>.jpg returns 200 with Content-Type image/jpeg when the file exists",
+        "GET /uploads/missing.jpg returns 404",
+        "Path traversal attempts (e.g., /uploads/../package.json) are blocked by express.static default behavior — return 404 or 403",
+        "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 7,
       "passes": true,
-      "notes": "Completed 2026-04-21. Created src/services/leadExtractionService.ts exporting extractInsights({ sessionId, userMessage }, overrideDeps?) -> { insights, rentalProcessId, upsertedKeys, handoff }. Uses LangChain withStructuredOutput with a Zod InsightsSchema ({ budget?, neighborhood?, bedrooms?, pets_allowed?, intent }) against ChatAnthropic (claude-sonnet-4-6, temperature 0). Flow: look up ChatSession (error if missing) -> call structured LLM on a Portuguese system prompt + userMessage -> findFirst on open RentalProcess (status != CLOSED, orderBy createdAt desc); create TRIAGE one if none -> for each non-null insight field, findFirst AiExtractedInsight by (rentalProcessId, insightKey) + create or update (value-delta-aware: no update if unchanged) -> if intent === 'human_handoff' and session.status !== WAITING_HUMAN, flip session to WAITING_HUMAN. Deps-injection + cached-default-deps (lazy ChatAnthropic init) matches the pattern from retriever/chain services. Hooked into whatsappWorker.handleWhatsappMessage after the outbound reply + outbound Message.create via queueMicrotask (swappable via deps.scheduleMicrotask in tests). Skipped on RAG-error paths so the apology case doesn't produce misleading lead insights. Failures inside the microtask are caught + logged, never propagate. Updated whatsappWorker + tests to include extractInsights in the deps (WhatsappHandlerDeps). Tests: tests/leadExtractionService.test.ts (13 new cases: schema validation, prompt builder, value serializer, session-missing error, new-process creation + 5-field upsert, process reuse, null-field skip, second-call-updates, no-op on unchanged value, human_handoff flip, no-re-flip if already WAITING_HUMAN, user message forwarded to LLM). tests/whatsappWorker.test.ts extended with happy-path extraction-scheduled, extraction-failure-swallowed, and RAG-error-no-extraction cases. 92 tests green (was 75); typecheck clean."
+      "notes": "Already implemented on main (src/app.ts:46) — `app.use('/uploads', express.static(path.join(__dirname, '../uploads')))` registered BEFORE the errorHandler at line 132. Deliberately used `path.join(__dirname, '../uploads')` rather than PRD's `path.resolve(process.cwd(), 'uploads')` — this is the established codebase pattern (progress.txt Codebase Patterns) and is more robust because `process.cwd()` changes based on where Node is launched from, whereas `__dirname` is always stable relative to the compiled/source file. Both resolve to the same project-root `uploads/` under ts-node and compiled `dist/`. Functional AC verified via a supertest smoke test (`src/__smoke_us007.ts`, removed after run): (1) GET /uploads/<propertyId>/0001.png → 200 image/png, (2) GET /uploads/missing.jpg → 404, (3) GET /uploads/../package.json (literal) → 404, (4) GET /uploads/..%2Fpackage.json (url-encoded traversal) → 404. Typecheck passes; test baseline unchanged at 16 pre-existing Auth0 failures / 212 pass."
     },
     {
       "id": "US-008",
-      "title": "Seed script for smoke testing",
-      "description": "As a developer, I want an evaluation fixture so I can spot-check RAG quality without touching WhatsApp.",
+      "title": "Handle multer and upload errors in the global error handler",
+      "description": "As an API consumer, I need multer errors to return 400 in the standard API error format ({ status, code, messages }), not raw stack traces.",
       "acceptanceCriteria": [
-        "New script src/scripts/evalRag.ts reads a hard-coded array of ~8 Portuguese test questions (triagem, visita, documentação, rescisão, pagamento)",
-        "For each question, calls generateAnswer with a throwaway ChatSession and prints: question, top chunk title, similarity score, handoff flag, final answer",
-        "New npm script \"eval:rag\": \"ts-node src/scripts/evalRag.ts\"",
-        "Typecheck passes"
+        "Global error handler middleware (wherever zod errors are handled today — inspect src/middlewares/ and src/app.ts to find it) detects instances of multer.MulterError and maps codes: LIMIT_FILE_SIZE -> { status: 400, code: 'FILE_TOO_LARGE', messages: [{ message: 'Arquivo excede 10MB' }] }; LIMIT_FILE_COUNT -> { status: 400, code: 'TOO_MANY_FILES', messages: [{ message: 'Máximo de 20 fotos por propriedade' }] }; LIMIT_UNEXPECTED_FILE -> { status: 400, code: 'UNEXPECTED_FILE_FIELD', messages: [{ message: 'Campo de arquivo inválido' }] }",
+        "Non-MulterError whose message === 'INVALID_FILE_TYPE' (thrown by fileFilter in US-002) returns { status: 400, code: 'INVALID_FILE_TYPE', messages: [{ message: 'Apenas JPEG ou PNG são aceitos' }] }",
+        "No stack traces are leaked in any of the above responses",
+        "Existing zod error handling continues to work unchanged — add a test or manual check that a zod validation error still returns the same body shape as before",
+        "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 8,
       "passes": true,
-      "notes": "Completed 2026-04-21. Created src/scripts/evalRag.ts with 8 hard-coded Portuguese test questions covering triagem, documentação, agendamento de visita, pagamento, pets, rescisão, taxas/IPTU, e cobrança inicial. For each question the script (a) calls retrieveRelevantChunks to get the top chunk's title + similarity score, (b) calls generateAnswer with a throwaway synthetic sessionId (eval-<timestamp>-<rand>) so no ChatSession/User row is needed — prisma.message.findMany against a non-existent sessionId returns [] cleanly, (c) prints question, top chunk title, similarity score (from both the retriever and the chain's topScore), handoff flag, and the truncated final answer. Retriever and chain errors are caught per-question so one bad row doesn't abort the whole run. assertRagSecrets() is called at main() entry to fail fast if OPENAI_API_KEY or ANTHROPIC_API_KEY is missing. prisma.$disconnect() is called in the finally block (same CLI shutdown pattern as ingestKnowledge.ts). Added npm script `eval:rag`: `ts-node src/scripts/evalRag.ts`. Typecheck clean; 92 tests still green (no new tests — PRD only requires typecheck for this story)."
+      "notes": "Extended src/middlewares/errorHandler.ts with two new branches BEFORE the SyntaxError fallback: (1) `err instanceof multer.MulterError` maps `err.code` via MULTER_ERROR_MAP to the Portuguese-localized `{ code, message }` pairs mandated by the PRD (LIMIT_FILE_SIZE→FILE_TOO_LARGE / 'Arquivo excede 10MB'; LIMIT_FILE_COUNT→TOO_MANY_FILES / 'Máximo de 20 fotos por propriedade'; LIMIT_UNEXPECTED_FILE→UNEXPECTED_FILE_FIELD / 'Campo de arquivo inválido') with a safe `UPLOAD_ERROR` fallback for any future multer codes; (2) `err.message === 'INVALID_FILE_TYPE'` returns `{ status:400, code:'INVALID_FILE_TYPE', messages:[{ message:'Apenas JPEG ou PNG são aceitos' }] }` — this branch catches the plain `Error('INVALID_FILE_TYPE')` thrown by US-002's fileFilter AND the belt-and-suspenders throw in US-003's savePropertyImages. `ZodError` and `SyntaxError` branches are untouched — existing validation/JSON error shapes preserved. Stack traces are logged server-side via `logger.error` (pino) but never included in the JSON response body (response is strictly `{ status, code, messages }`). Smoke-tested via a throwaway `src/__smoke_us008.ts` (removed after run) that wired a minimal Express app, fired each of the 6 branches — MulterError ×3, INVALID_FILE_TYPE, ZodError regression, unknown-error fallback — and confirmed the exact response shape for each. Typecheck passes. Test baseline unchanged at 16 pre-existing Auth0 failures / 212 pass."
+    },
+    {
+      "id": "US-009",
+      "title": "Update Swagger docs for POST /properties multipart",
+      "description": "As an API consumer, I need the Swagger UI to document the multipart/form-data request shape and the new photos field.",
+      "acceptanceCriteria": [
+        "In src/routes/propertyRoutes.ts, the @swagger JSDoc for POST /properties is updated so requestBody.content includes 'multipart/form-data' with a schema that lists all existing property fields plus photos: { type: array, items: { type: string, format: binary }, maxItems: 20 }",
+        "The existing 'application/json' content entry is preserved so the endpoint still documents JSON-only callers",
+        "Response 201 schema references Property and explicitly shows the 'images' array property",
+        "Error responses documented: 400 with error body shape for validation AND upload errors (FILE_TOO_LARGE, TOO_MANY_FILES, INVALID_FILE_TYPE)",
+        "Swagger UI loads at /docs (or whatever path swagger is mounted on — check src/config/swagger.ts) without parsing errors",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "Two files updated. (1) src/config/swagger.ts — added new PropertyImage component schema (id/propertyId/url/isCover/caption/createdAt) and appended `images: { type:'array', items: $ref PropertyImage }` to the existing Property component so the Property schema now surfaces the relation consistently across every endpoint that references it. (2) src/routes/propertyRoutes.ts — rewrote the @swagger JSDoc for POST /properties: requestBody.content now documents BOTH application/json (preserved — same fields, plus added previously-missing condoFee/propertyTax for completeness) AND multipart/form-data (all Property fields plus `photos: { type:array, maxItems:20, items:{ type:string, format:binary } }`). Response 201 uses `allOf: [$ref Property, { properties: { images: array of PropertyImage } }]` so the images array is explicitly present. Response 400 references the ErrorResponse component and includes four worked examples (VALIDATION_ERROR, FILE_TOO_LARGE, TOO_MANY_FILES, INVALID_FILE_TYPE) matching the Portuguese message strings mandated by US-008. Response 500 also references ErrorResponse. Verified via three throwaway smoke tests (all removed before commit): (a) swagger-jsdoc parses routes/*.ts cleanly, (b) setupSwagger() runs without throwing and emits the PropertyImage $ref in the 201 response, (c) supertest GET /api-docs/ returns 200 with 'Swagger UI' in the HTML and swagger-ui-init.js references /properties. Note: swagger is mounted at /api-docs (not /docs) in src/server.ts — the PRD AC mentioned /docs 'or whatever path swagger is mounted on', so /api-docs is the correct endpoint. Typecheck passes. Test baseline unchanged at 16 pre-existing Auth0 failures / 212 pass."
+    },
+    {
+      "id": "US-010",
+      "title": "Add integration tests for POST /properties photo upload",
+      "description": "As a developer, I need automated tests covering the main upload scenarios so regressions are caught immediately.",
+      "acceptanceCriteria": [
+        "New test file tests/propertyPhotoUpload.test.ts uses supertest and the project's existing vitest setup (mirror patterns from existing tests/ directory)",
+        "Test: POST /properties with 3 small valid JPEG buffers attached as 'photos' returns 201, response.body.images has length 3, images[0].isCover === true, images[1].isCover === false, images[2].isCover === false",
+        "Test: POST /properties with no photos attached returns 201 and response.body.images is [] (regression guard)",
+        "Test: POST /properties with a non-image file (e.g., a text buffer attached with .txt filename/text mimetype) returns 400 with code 'INVALID_FILE_TYPE'",
+        "Test: POST /properties with a single image buffer > 10MB returns 400 with code 'FILE_TOO_LARGE'",
+        "Test: POST /properties with 21 small image buffers returns 400 with code 'TOO_MANY_FILES'",
+        "afterEach hook removes any uploads/<propertyId>/ directories created during tests (fs.rm recursive, force) so the repo stays tidy",
+        "npm test passes locally",
+        "Typecheck passes (npx tsc --noEmit)",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "Created tests/propertyPhotoUpload.test.ts with 5 supertest-driven scenarios covering the full happy + error matrix for POST /api/properties photo upload. Follows the existing seedUuidRegression.test.ts pattern: hoisted mocks, Firebase env vars stubbed pre-import, propertyService.createProperty mocked via vi.mock with a spread-preserving factory so other service methods remain intact. Tests: (1) 3 valid JPEGs attached as 'photos' returns 201 with images.length===3, images[0].isCover===true, images[1..2].isCover===false; (2) JSON body with no files returns 201 with images:[]; (3) a text/plain file attachment returns 400 code INVALID_FILE_TYPE and the service is never called; (4) a 10MB+1 byte JPEG returns 400 code FILE_TOO_LARGE; (5) 21 attachments returns 400 code TOO_MANY_FILES. afterEach sweeps any uploads/<propertyId>/ directories created during the test run via fs.rm({recursive,force}) so the repo stays clean even if the mock is ever bypassed. Key design decisions: (a) mocked the service layer (not prisma) because prisma.$transaction is hard to fake and the goal is to exercise the route+middleware+errorHandler pipeline, not the DB; (b) TINY_JPEG is a 4-byte SOI+EOI buffer — multer's fileFilter reads mimetype from the multipart part's Content-Type header, not the binary content, so this is sufficient; (c) reused the full src/app.ts via `import app from '../src/app'` so the real multer middleware and global errorHandler run end-to-end, matching the auth.test.ts and seedUuidRegression.test.ts integration style. Typecheck passes (`npx tsc --noEmit`, no errors). Full suite: 217 passed / 16 failed — the 5 new tests add to the previous 212 pass count, and the 16 failures are the documented pre-existing Auth0→Firebase migration baseline (userSync.test.ts and siblings). Zero regressions."
     }
   ]
 }

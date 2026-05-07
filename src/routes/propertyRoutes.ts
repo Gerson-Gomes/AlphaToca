@@ -5,6 +5,7 @@ import {
   checkJwt,
   requireRole,
 } from '../middlewares/authMiddleware';
+import { propertyPhotoUploadHandler } from '../middlewares/uploadMiddleware';
 
 const router = Router();
 
@@ -14,7 +15,12 @@ const adminAuthStack = [checkJwt, authSyncMiddleware, requireRole('ADMIN')];
  * @swagger
  * /properties:
  *   post:
- *     summary: Criar uma nova propriedade
+ *     summary: Criar uma nova propriedade (com upload opcional de fotos)
+ *     description: |
+ *       Aceita dois formatos de request:
+ *       - `application/json` — cria a propriedade sem fotos (`images: []` na resposta).
+ *       - `multipart/form-data` — cria a propriedade e envia até 20 fotos (JPEG ou PNG, 10MB cada) no campo `photos`.
+ *         A primeira foto enviada é automaticamente marcada como capa (`isCover=true`).
  *     tags: [Propriedades]
  *     requestBody:
  *       required: true
@@ -73,22 +79,134 @@ const adminAuthStack = [checkJwt, authSyncMiddleware, requireRole('ADMIN')];
  *               views:
  *                 type: integer
  *                 example: 150
+ *               condoFee:
+ *                 type: number
+ *                 example: 500.00
+ *               propertyTax:
+ *                 type: number
+ *                 example: 150.00
  *               status:
  *                 type: string
  *                 enum: [AVAILABLE, IN_NEGOTIATION, RENTED]
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [landlordId, title, description, price, address]
+ *             properties:
+ *               landlordId:
+ *                 type: string
+ *                 format: uuid
+ *               title:
+ *                 type: string
+ *               description:
+ *                 type: string
+ *               price:
+ *                 type: number
+ *               address:
+ *                 type: string
+ *                 minLength: 5
+ *                 example: Rua das Flores, 123, São Paulo - SP
+ *               type:
+ *                 type: string
+ *                 enum: [APARTMENT, HOUSE, STUDIO, CONDO_HOUSE]
+ *               bedrooms:
+ *                 type: integer
+ *                 example: 2
+ *               bathrooms:
+ *                 type: integer
+ *                 example: 1
+ *               parkingSpots:
+ *                 type: integer
+ *                 example: 1
+ *               area:
+ *                 type: number
+ *                 example: 65.5
+ *               isFurnished:
+ *                 type: boolean
+ *                 example: false
+ *               petsAllowed:
+ *                 type: boolean
+ *                 example: true
+ *               latitude:
+ *                 type: number
+ *                 example: -23.5489
+ *               longitude:
+ *                 type: number
+ *                 example: -46.6388
+ *               nearSubway:
+ *                 type: boolean
+ *                 example: false
+ *               isFeatured:
+ *                 type: boolean
+ *                 example: false
+ *               views:
+ *                 type: integer
+ *                 example: 150
+ *               condoFee:
+ *                 type: number
+ *                 example: 500.00
+ *               propertyTax:
+ *                 type: number
+ *                 example: 150.00
+ *               status:
+ *                 type: string
+ *                 enum: [AVAILABLE, IN_NEGOTIATION, RENTED]
+ *               photos:
+ *                 type: array
+ *                 maxItems: 20
+ *                 description: |
+ *                   Arquivos de imagem (JPEG ou PNG). Máximo 20 arquivos, 10MB cada.
+ *                   A primeira foto enviada será marcada como capa (`isCover=true`).
+ *                 items:
+ *                   type: string
+ *                   format: binary
  *     responses:
  *       201:
- *         description: Propriedade criada com sucesso
+ *         description: Propriedade criada com sucesso. Quando enviada via multipart/form-data, `images` contém o array de fotos persistidas (com `isCover=true` na primeira). Quando enviada via application/json sem fotos, `images` é `[]`.
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/Property'
+ *               allOf:
+ *                 - $ref: '#/components/schemas/Property'
+ *                 - type: object
+ *                   properties:
+ *                     images:
+ *                       type: array
+ *                       items:
+ *                         $ref: '#/components/schemas/PropertyImage'
  *       400:
- *         description: Erro de validação nos dados enviados
+ *         description: |
+ *           Erro de validação ou de upload. O corpo usa o formato padrão `ErrorResponse` (`{ status, code, messages }`). Códigos possíveis:
+ *           - `VALIDATION_ERROR` — campos do formulário inválidos (Zod).
+ *           - `FILE_TOO_LARGE` — algum arquivo excede 10MB.
+ *           - `TOO_MANY_FILES` — mais de 20 fotos enviadas.
+ *           - `INVALID_FILE_TYPE` — tipo MIME não é image/jpeg nem image/png.
+ *           - `UNEXPECTED_FILE_FIELD` — campo de arquivo diferente de `photos`.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *             examples:
+ *               validation:
+ *                 summary: Campos inválidos
+ *                 value: { status: 400, code: 'VALIDATION_ERROR', messages: [{ path: 'price', message: 'Expected number, received string' }] }
+ *               fileTooLarge:
+ *                 summary: Arquivo maior que 10MB
+ *                 value: { status: 400, code: 'FILE_TOO_LARGE', messages: [{ message: 'Arquivo excede 10MB' }] }
+ *               tooManyFiles:
+ *                 summary: Mais de 20 fotos
+ *                 value: { status: 400, code: 'TOO_MANY_FILES', messages: [{ message: 'Máximo de 20 fotos por propriedade' }] }
+ *               invalidFileType:
+ *                 summary: Tipo de arquivo não suportado
+ *                 value: { status: 400, code: 'INVALID_FILE_TYPE', messages: [{ message: 'Apenas JPEG ou PNG são aceitos' }] }
  *       500:
  *         description: Erro interno do servidor
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post('/properties', propertyController.create);
+router.post('/properties', propertyPhotoUploadHandler, propertyController.create);
 
 router.get('/properties', propertyController.list);
 

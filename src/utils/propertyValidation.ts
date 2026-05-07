@@ -1,9 +1,24 @@
 import { z } from 'zod';
-import { ModerationStatus, PropertyStatus, Prisma } from '@prisma/client';
+import { ModerationStatus, PropertyStatus, PropertyType, Prisma } from '@prisma/client';
 
-const priceField = z.string()
-  .regex(/^\d+(\.\d{1,2})?$/, "Price must be a positive number with at most 2 decimal places")
+const priceField = z.coerce.number()
+  .positive({ message: "Price must be a positive number" })
   .transform((val) => new Prisma.Decimal(val));
+
+// Multer populates req.body with strings for every non-file field, so
+// `z.coerce.boolean()` is unsafe — it treats any non-empty string as truthy,
+// turning "false" into true. Map the two multipart strings explicitly and
+// pass actual booleans (JSON clients) through untouched.
+const multipartBoolean = z.preprocess((val) => {
+  if (val === 'true') return true;
+  if (val === 'false') return false;
+  return val;
+}, z.boolean());
+
+const optionalMoneyField = z.coerce.number()
+  .nonnegative({ message: "Must be a non-negative number" })
+  .transform((val) => new Prisma.Decimal(val))
+  .optional();
 
 export const createPropertySchema = z.object({
   landlordId: z.string().uuid({ message: "Invalid landlord ID format" }),
@@ -15,6 +30,22 @@ export const createPropertySchema = z.object({
   city: z.string().optional(),
   state: z.string().length(2).toUpperCase().optional(),
   zipCode: z.string().optional(),
+
+  type: z.nativeEnum(PropertyType).optional(),
+  bedrooms: z.coerce.number().int().nonnegative().optional(),
+  bathrooms: z.coerce.number().int().nonnegative().optional(),
+  parkingSpots: z.coerce.number().int().nonnegative().optional(),
+  area: z.coerce.number().nonnegative().optional(),
+  latitude: z.coerce.number().optional(),
+  longitude: z.coerce.number().optional(),
+  views: z.coerce.number().int().nonnegative().optional(),
+  condoFee: optionalMoneyField,
+  propertyTax: optionalMoneyField,
+
+  isFurnished: multipartBoolean.optional(),
+  petsAllowed: multipartBoolean.optional(),
+  nearSubway: multipartBoolean.optional(),
+  isFeatured: multipartBoolean.optional(),
 });
 
 export const updatePropertySchema = z.object({

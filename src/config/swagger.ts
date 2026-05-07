@@ -15,6 +15,10 @@ const options: swaggerJsdoc.Options = {
     },
     servers: [
       {
+        url: 'https://lab.alphaedtech.org.br/server01',
+        description: 'Servidor de Produção (Lab)',
+      },
+      {
         url: 'http://localhost:3000/api',
         description: 'Servidor de Desenvolvimento',
       },
@@ -28,13 +32,24 @@ const options: swaggerJsdoc.Options = {
             id: { type: 'string', format: 'uuid', example: '550e8400-e29b-41d4-a716-446655440000' },
             name: { type: 'string', minLength: 2, example: 'João Silva' },
             email: { type: 'string', format: 'email', example: 'joao.silva@example.com' },
-            phoneNumber: { 
-              type: 'string', 
-              pattern: '^\\+?[1-9]\\d{1,14}$', 
+            phoneNumber: {
+              type: 'string',
+              pattern: '^\\+?[1-9]\\d{1,14}$',
               example: '+5511999999999',
               description: 'Número de telefone no formato E.164'
             },
             role: { type: 'string', enum: ['TENANT', 'LANDLORD', 'ADMIN'], default: 'TENANT' },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+        },
+        PropertyImage: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', format: 'uuid' },
+            propertyId: { type: 'string', format: 'uuid' },
+            url: { type: 'string', example: '/uploads/550e8400-e29b-41d4-a716-446655440000/3fa85f64-5717-4562-b3fc-2c963f66afa6.jpg' },
+            isCover: { type: 'boolean', default: false },
+            caption: { type: 'string', nullable: true, example: 'Sala de Estar' },
             createdAt: { type: 'string', format: 'date-time' },
           },
         },
@@ -64,6 +79,11 @@ const options: swaggerJsdoc.Options = {
             condoFee: { type: 'number', example: 500.00 },
             propertyTax: { type: 'number', example: 150.00 },
             createdAt: { type: 'string', format: 'date-time' },
+            images: {
+              type: 'array',
+              description: 'Fotos da propriedade. A primeira foto enviada é marcada como capa (isCover=true).',
+              items: { $ref: '#/components/schemas/PropertyImage' },
+            },
           },
         },
         WhatsAppPayload: {
@@ -165,6 +185,22 @@ const options: swaggerJsdoc.Options = {
 const specs = swaggerJsdoc(options);
 
 export const setupSwagger = (app: Express) => {
-  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(specs));
-  console.log('[swagger]: Documentação disponível em http://localhost:3000/api-docs');
+  // Montamos em '/docs/' (com a barra final) para evitar que o swagger-ui-express
+  // emita um redirect 301 absoluto de '/docs' -> '/docs/' que quebra por trás de
+  // um reverse proxy com prefixo (ex: Nginx /server01/).
+  // Com a barra final o Express não faz o redirect e o Swagger já carrega direto.
+  app.use(
+    '/docs',
+    swaggerUi.serve,
+    swaggerUi.setup(specs, {
+      // Força os assets (CSS/JS do Swagger UI) a usarem caminhos relativos,
+      // necessário quando a app está servida sob um subpath via proxy.
+      customJs: undefined,
+      swaggerOptions: {
+        persistAuthorization: true,
+      },
+    }),
+  );
+  console.log('[swagger]: Documentação disponível em /docs');
 };
+

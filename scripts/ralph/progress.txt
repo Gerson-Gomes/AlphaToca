@@ -1,197 +1,226 @@
 # Ralph Progress Log
-Started: Tue Apr 21 11:19:46 PM -03 2026
+Started: Wed May  6 10:16:09 PM -03 2026
 ---
 
 ## Codebase Patterns
-- Prisma client singleton lives in `src/config/db.ts` (reuse via `import prisma from "../config/db"`) — do NOT instantiate a second `PrismaClient`.
-- Tests use `vitest` (config at `vitest.config.ts`). Test files live in `tests/` at repo root, not colocated.
-- `npx tsc --noEmit` should be clean end-to-end (no known noise). If a new error appears, it came from your changes — do NOT treat it as pre-existing. (Prior `seed-knowledge.ts` error was fixed in US-003 by switching to `@langchain/textsplitters`.)
-- `KnowledgeDocument.embedding` is `Unsupported("vector(1536)")` in Prisma — writes/reads must use `$executeRawUnsafe` / `$queryRawUnsafe` with `::vector` casts. Never interpolate user input.
-- `langchain@^1.3.3` is the v1 API — use LCEL `RunnableSequence` / `ChatPromptTemplate`, NOT the deprecated `ConversationalRetrievalChain`.
-- Project uses `dotenv` for secrets; fail-fast on missing keys at boot rather than returning `undefined` deep in a call chain.
-- `.env` `DATABASE_URL` points to Supabase (production) — NEVER run `prisma migrate dev` with default env. Use local Docker DB (`alphatoca_db` on :5433, creds `admin`/`admin_pwd`) via inline env overrides.
-- `prisma migrate dev` refuses to run non-interactively in this harness. Use this two-step workaround: (1) `prisma migrate diff --from-migrations ./prisma/migrations --to-schema-datamodel ./prisma/schema.prisma --shadow-database-url <local_shadow> --script` to emit SQL; (2) write it to `prisma/migrations/<TS>_<name>/migration.sql`; (3) `prisma migrate deploy` with local env overrides to apply.
-- Shadow DB (`alphatoca_shadow`) exists on the local Docker postgres for migration diffs; pgvector extension already enabled on both local DBs.
-- `KnowledgeDocument` now has ingestion-tracking fields: `sourcePath`, `chunkIndex`, `contentHash`, `createdAt`, `updatedAt`. Compound unique index on `(sourcePath, chunkIndex)` — use this for upserts. Index on `contentHash` for hash-skip lookups.
-- The existing `prisma/seed.ts` + `prisma/generators.ts` insert `KnowledgeDocument` rows via `$executeRawUnsafe` without the new NOT NULL columns — they will fail at runtime post-migration. US-003 did NOT fix this (the real RAG ingestion path is `npm run ingest:knowledge`); the generator path is still broken. If anyone runs `npm run seed`, update `prisma/generators.ts::generateKnowledgeDocuments` to supply `source_path` / `chunk_index` / `content_hash` / `updated_at`, then match in `prisma/seed.ts`.
-- Text splitting is served by `@langchain/textsplitters` (separate package, added as a dep in US-003). `langchain@^1.3.3` no longer re-exports `RecursiveCharacterTextSplitter` from `langchain/text_splitter`. Import from `"@langchain/textsplitters"` everywhere.
-- Ingestion script pattern: keep a pure `runIngestion(deps)` function (deps object with `{ prisma, embedder, splitter, listMarkdownFiles, readFile }`) + a thin CLI wrapper that constructs real `OpenAIEmbeddings` / `RecursiveCharacterTextSplitter` / prisma singleton. Makes the hash-skip / insert / update / delete logic trivial to unit-test with mocked deps, and mirrors how US-004+ retriever/chain services should be structured.
-- Vector literals for pgvector go in as a string of the form `"[v1,v2,...]"` passed to `$executeRawUnsafe` with `$N::vector` cast — never interpolate the array directly into the SQL string.
-- Retrieval uses `$queryRawUnsafe` with the cosine-distance operator `embedding <=> $1::vector`. Compute similarity as `1 - distance` (pgvector returns distance, NOT similarity). `score >= SIMILARITY_THRESHOLD` is the gate for "trust the LLM answer" vs. "hand off to a human".
-- Services that need LLM/embedding clients should cache the constructed client in a module-level `let defaultDepsCache = null` + `getDefaultDeps()` helper. That way the module can be imported in tests without requiring `OPENAI_API_KEY`, but production callers still get a warm singleton.
-- Prisma raw returns of numeric columns (e.g. pgvector distance) can come back as JS `number` OR as `string` depending on the driver — always coerce with `typeof x === "string" ? parseFloat(x) : x` at the boundary.
-- To load the "last N" messages ordered ASC in a single call: use `orderBy: { timestamp: "desc" }, take: N` then `.slice().reverse()` in JS. `orderBy: asc, take: N` loads the FIRST N (oldest), not the most recent.
-- `@langchain/core` message classes (`HumanMessage`, `AIMessage`, `SystemMessage`) have a `.content` field that can be `string` OR an array of content blocks (e.g. `[{ type: "text", text: "..." }, ...]`) — always normalize LLM output through a helper that handles both shapes before returning user-facing strings.
-- Business-plan tone rules live in `documentation/buisness_plan.md` §6 — any chatbot-facing prompt should encode: profissional/acolhedor/confiável, base-apenas-no-contexto, handoff em litígios/exceções, PT-BR, respostas breves para WhatsApp.
-- `whatsappService.sendMessage(to, text)` now ONLY sends to Meta and returns the raw response (`SendMessageResponse` with `messages[0].id`). It no longer persists the outbound Message or looks up user/session. All persistence is owned by the worker (`handleWhatsappMessage`). If you add a new caller, you must persist the outbound yourself.
-- `whatsappWorker.ts` exports a pure `handleWhatsappMessage(payload, deps)` function (deps = `{ prisma, sendMessage, generateAnswer }`) plus the BullMQ `Worker` wrapper. Test the handler directly with mocked deps; tests must also `vi.mock('ioredis')` and `vi.mock('bullmq')` because the module constructs `new IORedis` + `new Worker` at import time for the production path.
-- Session lookup order in the worker: find the *latest* `ChatSession` for the tenant regardless of status (`orderBy: startedAt desc`). If none, create ACTIVE_BOT. Always persist the inbound Message. If the session's status is not ACTIVE_BOT (i.e. WAITING_HUMAN or RESOLVED), return early without calling the RAG chain or sending anything. This is how the human-handoff mode keeps working even after the bot flipped the flag.
-- LangChain v1 structured output: call `new ChatAnthropic({...}).withStructuredOutput(zodSchema, { name: "..." })` — returns a `Runnable<BaseLanguageModelInput, z.infer<typeof schema>>`. Invoke with a `BaseMessage[]` (SystemMessage + HumanMessage). Zod is already installed at repo root. This replaces the old "ask for JSON in prompt then JSON.parse" pattern.
-- `AiExtractedInsight` has no `@@unique` on `(rentalProcessId, insightKey)` — cannot use prisma `.upsert({ where: ... })` on it. Pattern: `findFirst({ where: { rentalProcessId, insightKey } })` -> `update({ where: { id } })` if found, `create(...)` otherwise. Skip the update when `existing.insightValue === newValue` so you don't bump `extractedAt` unnecessarily.
-- "Open RentalProcess for tenant" = `findFirst({ where: { tenantId, status: { not: "CLOSED" } }, orderBy: { createdAt: "desc" } })`. Only create a new TRIAGE process if this returns null — don't filter to just TRIAGE, since a tenant mid-VISIT_SCHEDULED should still have their insights attached to the same process, not a fresh TRIAGE one.
-- Worker-side fire-and-forget hook pattern: accept a `scheduleMicrotask?: (task: () => void) => void` in the deps object; default to the global `queueMicrotask`. Tests replace it with a queue they can drain manually (`scheduledMicrotasks.push; runScheduledMicrotasks()`). Avoid hooking via a real `queueMicrotask` in tests — timing races make assertions flaky.
-- When wiring a post-reply task like lead extraction, gate on `!ragError` so apologies don't feed garbage into the extractor. The handoff case (low score, valid user message) DOES still extract — only actual chain errors skip.
-- For one-shot CLI eval/smoke-test scripts (no unit tests), you can call `generateAnswer` with a synthetic sessionId like `eval-${Date.now()}-${rand}`. `prisma.message.findMany` with a non-existent sessionId returns `[]` — no need to create a throwaway ChatSession row. Don't forget `await prisma.$disconnect()` in `.finally()` or the node process hangs.
+- Project uses npm (package-lock.json); run `npx tsc --noEmit` for typecheck and `npm test` (vitest) for tests.
+- Source lives under `src/` with subdirs `middlewares/`, `services/`, `routes/`, `controllers/`, `utils/`, `config/`; tests in `tests/`.
+- Prisma is the ORM (`@prisma/client` 6.4.1). Use `prisma.$transaction` for atomic multi-table writes.
+- Validation uses Zod; schemas live in `src/utils/` (e.g., `propertyValidation.ts`).
+- `npm install <pkg>` defaults to the absolute latest tag — pin to a version range (e.g. `@^1.4.5-lts.2`) when the PRD asks for a specific major line.
+- `npm install <pkg>` without `--save-dev` puts the package in `dependencies`, even for `@types/*`. Always pass `--save-dev` for type packages.
+- Test suite has 16 pre-existing failures from Auth0 → Firebase migration (tests reference removed `userService.upsertUserFromAuth0`). Not caused by recent stories; verify regressions by running `git stash -u && npm test` vs. current.
+- API error response shape across the codebase: `{ status: number, code: string, messages: [{ message: string }] }` (see `src/middlewares/authMiddleware.ts`). Stay consistent when adding new error branches.
+- Uploads directory lives at project root. `src/app.ts` uses `path.join(__dirname, '../uploads')`; services under `src/services/` should use `path.join(__dirname, '../../uploads')` so both ts-node (from `src/`) and compiled (from `dist/`) resolve to the same project-root `uploads/`.
+- `z.coerce.boolean()` is UNSAFE for multipart request bodies — it treats any non-empty string as truthy, so `"false"` becomes `true`. Always use a `z.preprocess` helper that explicitly maps `'true'`→true and `'false'`→false (pattern already in `src/utils/searchValidation.ts`).
+- `z.coerce.number()` is the right way to accept both multipart strings and JSON numbers in the same schema. Compose with `.int()`, `.nonnegative()`, `.positive()` as needed — those run AFTER coercion.
+- For Prisma `Decimal(10,2)` columns validated via Zod, pattern is `z.coerce.number().<constraint>.transform((v) => new Prisma.Decimal(v))`. Passing `Prisma.Decimal` to `prisma.property.create` works — Prisma also accepts number/string but Decimal avoids floating-point drift.
+- When a Zod schema uses `.parse(req.body)`, Zod's default object mode is "strip" — unknown keys are silently dropped from the output. Adding new OPTIONAL fields to an existing schema never breaks existing callers.
+- `prisma.$transaction(async (tx) => ...)` does NOT roll back non-DB side-effects (filesystem writes, external API calls). Wrap the call in an outer try/catch, track what state was created, and compensate in the catch. Inside the callback, use `tx`, never `prisma` — mixing them bypasses the transaction.
+- `express.static` auto-blocks path traversal (both literal `..` and URL-encoded forms) — returns 404 for anything resolving outside the static root. No extra guards needed when serving a fixed project-root directory.
+- Before implementing a PRD story, grep current code first — an AC may already be satisfied by an earlier unrelated PR. If so, verify behavior, document the deviation (if any), mark `passes:true` — DON'T regress existing code to match the PRD's literal wording.
+- Global error handler lives at `src/middlewares/errorHandler.ts` and is the ONLY place to add new error-class-to-API-shape mappings. It's registered LAST in `src/app.ts` via `app.use(errorHandler)`. When adding a new branch, place it BEFORE the `SyntaxError` catch-all (which is itself before the generic fallback) so more-specific matches win. Stack traces must be logged via `logger.error` (pino) but NEVER included in the JSON response body.
+- `multer.MulterError` has a `.code` string field — branch on `err instanceof multer.MulterError` then switch/lookup `err.code`. Known codes: `LIMIT_FILE_SIZE`, `LIMIT_FILE_COUNT`, `LIMIT_UNEXPECTED_FILE`, `LIMIT_PART_COUNT`, `LIMIT_FIELD_KEY`, `LIMIT_FIELD_VALUE`, `LIMIT_FIELD_COUNT`. Always include a safe fallback (e.g. `UPLOAD_ERROR`) for unmapped codes so future multer versions don't 500.
+- Swagger is configured in `src/config/swagger.ts` (components + swagger-jsdoc options) and mounted at `/api-docs` from `src/server.ts` via `setupSwagger(app)` — NOT from `src/app.ts`. If you add a new reusable component schema, add it under `components.schemas` in swagger.ts; JSDoc `@swagger` blocks inside `src/routes/*.ts` can then `$ref` it. Use `allOf: [$ref Base, { properties: { extraField: ... } }]` when you need to extend a referenced schema for a specific response (e.g., response shape = Property + populated `images` array).
+- `swagger-jsdoc` is permissive — an invalid JSDoc block fails SILENTLY (drops the path from the spec) rather than throwing. After editing a `@swagger` block, verify by running a throwaway smoke: `swaggerJsdoc({ apis: ['./src/routes/*.ts'] })` and asserting your path/method survived. Better: supertest GET `/api-docs/swagger-ui-init.js` and grep for the path — confirms swagger-ui-express successfully loaded the spec.
+- When integration-testing a route that depends on the full app pipeline (middleware + errorHandler + validation), import `../src/app` and drive it with `supertest(app)`. Stub Firebase env vars BEFORE the import (see `tests/seedUuidRegression.test.ts`) since `src/config/firebase.ts` runs at module load. Mock the service layer (not Prisma) via `vi.mock('../src/services/...', async (importOriginal) => { const actual = await importOriginal(); return { ...actual, service: { ...actual.service, method: mockFn } }; })` — that preserves untouched methods while letting tests control the one under exercise. For multer upload tests specifically, `.attach(field, buffer, { filename, contentType })` on supertest is what lets you set the multipart part's MIME type — multer's fileFilter reads that header, NOT the binary content, so a 4-byte SOI+EOI buffer is a valid JPEG for filter purposes.
 
 ---
 
-## 2026-04-21 - US-001
-- Implemented `src/config/rag.ts` with typed constants: `EMBEDDING_MODEL`, `EMBEDDING_DIMS`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `RETRIEVER_K`, `SIMILARITY_THRESHOLD`.
-- Added `getOpenAIApiKey()`, `getAnthropicApiKey()`, and `assertRagSecrets()` — each throws with a clear message if the env var is missing/empty.
-- Files changed: `src/config/rag.ts` (new), `scripts/ralph/prd.json` (new), `scripts/ralph/progress.txt` (this file).
+## 2026-05-06 - US-001
+- Installed `multer@^1.4.5-lts.2` (latest stable v1.x LTS line) as a runtime dependency.
+- Installed `@types/multer@^2.1.0` as a devDependency.
+- Verified `import multer from 'multer'` compiles cleanly via a temporary smoke file inside `src/` (removed after verification); project-wide `npx tsc --noEmit` passes.
+- Files changed: `package.json`, `package-lock.json`.
 - **Learnings for future iterations:**
-  - The repo already has `@langchain/openai`, `@langchain/anthropic`, `@langchain/core`, and `langchain` v1.3.3 installed — no need to add deps for US-003 through US-008.
-  - `src/config/` currently holds `db.ts` (Prisma singleton) and `swagger.ts`. Adding `rag.ts` there follows the existing pattern.
-  - Constants are exported as `as const` literal types so downstream consumers get narrow types (e.g., the exact embedding model string).
-  - Fail-fast secret accessors are functions (not module-level throws) so importing `src/config/rag.ts` in a test file does NOT require the env vars to be set. Call `assertRagSecrets()` at worker boot / script entry only.
-  - Full test suite (43 tests across 7 files) runs in ~3.4s via `npm test`.
+  - `npm install <pkg>` defaults to the latest tag. When PRD pins a major line (e.g. v1.x), install with an explicit range like `multer@^1.4.5-lts.2`.
+  - `npm install` without `--save-dev` adds the package to `dependencies`. `@types/*` packages should always use `--save-dev`.
+  - npm warns that multer 1.x has known vulnerabilities and recommends 2.x. The PRD explicitly requested v1.x; a future hardening pass may want to upgrade.
+  - To smoke-test an import compiles, drop a throwaway `.ts` file under `src/` (not `/tmp`) so project-level module resolution applies, then remove it after `tsc --noEmit` exits 0.
+  - Project typecheck invocation: `npx tsc --noEmit` (no package.json script shortcut for typecheck).
 ---
 
-## 2026-04-21 - US-002
-- Extended `KnowledgeDocument` in `prisma/schema.prisma` with `sourcePath`, `chunkIndex`, `contentHash`, `createdAt` (default now), `updatedAt` (@updatedAt). Added `@@unique([sourcePath, chunkIndex])` and `@@index([contentHash])`.
-- Generated migration `prisma/migrations/20260422022358_add_rag_ingestion_tracking/migration.sql` via `prisma migrate diff` (since `migrate dev` can't run non-interactively in this harness).
-- Applied migration via `prisma migrate deploy` against local Docker DB (`alphatoca_db` at :5433). Verified columns + indexes via `\d knowledge_documents`.
-- `npx prisma generate` produces clean client; `npx tsc --noEmit` has only the pre-existing `seed-knowledge.ts` error; all 43 tests still pass.
-- Files changed: `prisma/schema.prisma`, `prisma/migrations/20260422022358_add_rag_ingestion_tracking/migration.sql` (new), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+## 2026-05-06 - US-002
+- Created `src/middlewares/uploadMiddleware.ts` exporting:
+  - `propertyPhotoUpload` — a multer instance using `multer.memoryStorage()`, limits `{ fileSize: 10 * 1024 * 1024, files: 20 }`, and a `fileFilter` that accepts only `image/jpeg` / `image/png` and otherwise calls `cb(new Error('INVALID_FILE_TYPE'))` (no file attached, per PRD wording).
+  - `propertyPhotoUploadHandler` — convenience handler equal to `propertyPhotoUpload.array('photos', 20)` so routes can import and mount it directly in US-006.
+- Typecheck (`npx tsc --noEmit`) passes with no errors.
+- Full test run shows 16 failures, but all pre-exist on this branch (verified via `git stash -u && npm test`) — they come from leftover Auth0 tests in `tests/userSync.test.ts` and related files that still call `userService.upsertUserFromAuth0`, which was replaced by the Firebase flow. No regressions introduced by this story.
+- Files changed: `src/middlewares/uploadMiddleware.ts` (new).
 - **Learnings for future iterations:**
-  - `prisma migrate dev` fails with "non-interactive environment" error in this harness even with `--create-only`. Workaround: `prisma migrate diff --from-migrations ... --to-schema-datamodel ... --shadow-database-url <local_shadow> --script` → write SQL to a timestamped migration dir → `prisma migrate deploy`. Needed a pre-existing shadow DB (`alphatoca_shadow`) with pgvector enabled.
-  - The local Docker Postgres (`alphatoca_db` on :5433, creds `admin`/`admin_pwd`, DB `alphatoca`) starts empty — needed `CREATE EXTENSION IF NOT EXISTS vector;` before the init migration will apply.
-  - The Supabase `DATABASE_URL` in `.env` is production — always override to local via inline `DATABASE_URL=... DIRECT_URL=...` when running migration commands.
-  - `prisma migrate diff` emits a redundant `CREATE EXTENSION IF NOT EXISTS "vector";` at the top of cross-migration diffs; safe to drop from the final migration file since the init migration already creates it.
-  - The existing `prisma/seed.ts` / `prisma/generators.ts` path inserts knowledge docs via `$executeRawUnsafe` without the new NOT NULL columns — the seed will break at runtime until US-003 updates it (or supplies dummy values). No typecheck impact because the path uses raw SQL, not the typed Prisma client.
+  - `@types/multer@2.1.0` is compatible with `multer@1.4.5-lts.2` at our use level; `FileFilterCallback` is re-exported from the multer types entry. Importing it directly avoids having to hand-roll the callback signature.
+  - Per PRD, `fileFilter` rejects with `cb(new Error('INVALID_FILE_TYPE'))` — do NOT pass `false` as the second arg when rejecting, that would silently drop the file without surfacing the error to the global error handler (US-008 depends on this Error bubbling up).
+  - When adding a new middleware file, verify there are no regressions by running `git stash -u && npm test` before and after — the suite currently has 16 pre-existing Auth0-migration failures, so "16 failed" is the baseline, not a new regression.
+  - `propertyPhotoUpload.array('photos', 20)` in US-002 defines field name `photos` and max count 20 — US-006 and US-010 must reference the same field name or uploads will route to `LIMIT_UNEXPECTED_FILE`.
 ---
 
-## 2026-04-21 - US-003
-- Implemented `src/scripts/ingestKnowledge.ts`:
-  - Walks `documentation/` recursively, collects all `.md` files (sorted, deterministic order).
-  - Splits each file with `RecursiveCharacterTextSplitter` from `@langchain/textsplitters` (new dep) using `CHUNK_SIZE` / `CHUNK_OVERLAP` from `src/config/rag.ts`.
-  - Computes `sha256(content)` per chunk as `content_hash`.
-  - Upserts by `(source_path, chunk_index)`: insert if missing, skip if hash matches, update if hash differs. Deletes rows whose `(source_path, chunk_index)` key no longer appears.
-  - Embeddings written via `$executeRawUnsafe` with `$N::vector` cast (vector literal `[v1,v2,...]`).
-  - Exports a pure `runIngestion(deps)` + `hashContent` / `listMarkdownFiles` / `buildChunksForFile` so the CLI wrapper at the bottom is thin and the core logic is unit-testable.
-  - Logs summary line `files=X inserted=Y updated=Z skipped=W deleted=V`.
-- Added npm script: `"ingest:knowledge": "ts-node src/scripts/ingestKnowledge.ts"`.
-- New unit test `tests/ingestKnowledge.test.ts` covers: hash-skip when DB already matches, insert-all when DB empty, update-on-hash-delta, delete-stale, and a mixed insert/update/skip/delete run — all with mocked embedder + mocked Prisma (only `$queryRawUnsafe` and `$executeRawUnsafe` surfaces used). 50 tests green (was 43).
-- Fixed pre-existing typecheck error in `src/scripts/seed-knowledge.ts` by pointing the import at `@langchain/textsplitters` (the old `langchain/text_splitter` path was removed in langchain v1). `npx tsc --noEmit` is now clean.
-- Files changed: `src/scripts/ingestKnowledge.ts` (new), `src/scripts/seed-knowledge.ts` (import fix), `tests/ingestKnowledge.test.ts` (new), `package.json` (dep + script), `package-lock.json`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+## 2026-05-06 - US-003
+- Created `src/services/propertyImageStorageService.ts`.
+- Exports `savePropertyImages(propertyId, files)`:
+  - Early-returns `[]` when files is empty so callers can branch without guards.
+  - `mkdir(uploads/<propertyId>/, { recursive: true })`, then sequentially writes each file as `<randomUUID()>.<ext>` where `ext` is derived strictly from `file.mimetype` via a lookup table (`image/jpeg`→`jpg`, `image/png`→`png`) — unknown MIME throws `Error('INVALID_FILE_TYPE')` as a belt-and-suspenders defense if US-002's filter is ever bypassed.
+  - `file.originalname` is never used, so malicious/weird filenames can't poison the filesystem.
+  - Returns `{ url: '/uploads/<propertyId>/<uuid>.<ext>', isCover: i === 0 }[]`.
+  - On any writeFile failure mid-loop, `Promise.all`-deletes the already-written files, `rmdir`s the (now-empty) dir, and rethrows the original error.
+- Exports `cleanupPropertyImages(propertyId, urls)`:
+  - Uses `path.basename(url)` to extract the filename segment (ignoring the `/uploads/<propertyId>/` prefix), then `rm` per-file.
+  - ENOENT on individual file deletes is swallowed; all other errors rethrow.
+  - Finally attempts `rmdir` of the property dir; ENOENT/ENOTEMPTY/EEXIST are swallowed (matches PRD "deletes the directory if empty").
+- UPLOADS_ROOT resolution: `path.join(__dirname, '../../uploads')` — mirrors `src/app.ts`'s `path.join(__dirname, '../uploads')` pattern so it lands at project-root `uploads/` both under ts-node (src/services/) and compiled (dist/services/).
+- Typecheck (`npx tsc --noEmit`) passes. Test suite still 16 failed / 212 passed — same pre-existing Auth0-migration baseline (the new service is not imported anywhere yet, so zero regressions were possible).
+- Files changed: `src/services/propertyImageStorageService.ts` (new).
 - **Learnings for future iterations:**
-  - `langchain@^1.3.3` dropped the `langchain/text_splitter` module path. Text splitters live in the standalone `@langchain/textsplitters` package now — `RecursiveCharacterTextSplitter`, `MarkdownTextSplitter`, `CharacterTextSplitter`, etc. are all exported from its root.
-  - The OpenAIEmbeddings constructor in `@langchain/openai` v1 accepts `{ apiKey, model }` (old `openAIApiKey` / `modelName` are deprecated aliases but still work).
-  - For unit-testing ingestion/chain code, structure the module as a pure `runX(deps)` function with an explicit deps object instead of importing the singleton `prisma` + real LLM clients inside the logic. Then the CLI wrapper at module bottom builds the real deps and calls `runX`. Reuse this pattern for US-004 (retriever) and US-005 (chain).
-  - Vector-column writes via Prisma raw: pass the array as a string literal `"[v1,v2,...]"` and cast with `$N::vector` in the SQL. Do NOT use `$executeRaw` tagged-template with a `number[]` — it will not coerce correctly.
-  - When mocking `$queryRawUnsafe` in vitest, cast the `vi.fn` back to the Prisma method type (`as unknown as IngestDeps["prisma"]["$queryRawUnsafe"]`) so `strict: true` TS compilation passes despite the generic.
-  - The ingestion script is idempotent: second run on unchanged files yields `inserted=0 updated=0 skipped=N deleted=0` — verified by the `skips chunks whose contentHash matches` test. If US-008's eval script ever wants a "fresh" ingestion, have it delete by `source_path` first rather than relying on re-runs doing something.
+  - For fs-touching services under `src/services/`, use `path.join(__dirname, '../../uploads')`. `app.ts` uses `../uploads` because it lives one directory above services. Both resolve to the same project-root `uploads/` at dev (ts-node reads `src/`) and prod (compiled `dist/`) — this is the pattern in the codebase, don't use `process.cwd()` ad-hoc.
+  - `crypto.randomUUID()` is globally available in Node 18+ (Node 20 is the project target) — no need to import from `crypto` in modern code, but importing `{ randomUUID } from 'crypto'` makes it explicit and is harmless.
+  - `fs.rmdir` (non-recursive) throws `ENOTEMPTY` when the directory has contents and `ENOENT` when it's missing. Both should typically be swallowed for "delete if empty" semantics. `fs.rm(path, { recursive: true, force: true })` is the nuclear option but violates the PRD's "directory if empty" contract here.
+  - Deriving file extensions from `file.mimetype` rather than `file.originalname` is the secure default — never trust the client's filename. Keep a MIME→ext lookup table in the service even though the multer `fileFilter` should have already blocked unknown types; it's belt-and-suspenders and also gives a semantic `.jpg`/`.png` (not `.jpeg`).
+  - US-002's `fileFilter` rejects bad MIME types with `Error('INVALID_FILE_TYPE')` — reuse the same error message string here so US-008's global handler only needs one match.
+  - When `npm test` fails, check the pre-existing baseline before blaming your change. Current baseline: 4 files / 16 tests failed (all Auth0 migration leftovers in `userSync.test.ts` and siblings calling the removed `userService.upsertUserFromAuth0`).
 ---
 
-## 2026-04-21 - US-004
-- Implemented `src/services/ragRetrieverService.ts`:
-  - Exports `retrieveRelevantChunks(query, overrideDeps?): Promise<RetrievedChunk[]>` where `RetrievedChunk = { id, content, title, score }`.
-  - Embeds the query via `OpenAIEmbeddings` using the same `EMBEDDING_MODEL` as ingestion.
-  - Single `$queryRawUnsafe` against `knowledge_documents` using pgvector cosine: `SELECT id, content, title, (embedding <=> $1::vector) AS distance ... WHERE embedding IS NOT NULL ORDER BY embedding <=> $1::vector ASC LIMIT $2`.
-  - Score is `1 - distance` (distance → similarity). Blank/empty-string queries short-circuit to `[]` without embedding or hitting the DB.
-  - Exposes a `RetrieverDeps` interface (`{ prisma, embedder, k? }`) with `QueryEmbedder` = `{ embedQuery(text) }` for easy mocking; default deps (real OpenAI client + prisma singleton) are lazily built and cached so importing the module does NOT require `OPENAI_API_KEY`.
-- Unit test `tests/ragRetrieverService.test.ts` (7 new cases) verifies:
-  - Blank query returns `[]` without touching embedder/prisma.
-  - Query embedding is forwarded; SQL contains `embedding IS NOT NULL`, `ORDER BY embedding <=>`, `LIMIT`.
-  - Vector literal param is the `[v1,v2,...]` string and default K is `RETRIEVER_K`.
-  - Ordering returned by the SQL query is preserved and scores are descending (since distance asc).
-  - K limit is honored and a per-call `k` override via deps works.
-  - String distances from the pgvector driver are coerced via `parseFloat`.
-- Files changed: `src/services/ragRetrieverService.ts` (new), `tests/ragRetrieverService.test.ts` (new), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
-- Typecheck (`npx tsc --noEmit`) is clean; `npm test` green at 57 tests across 9 files (was 50 across 8).
+## 2026-05-06 - US-004
+- Rewrote `createPropertySchema` in `src/utils/propertyValidation.ts` so the same schema accepts JSON bodies and multipart bodies.
+  - `priceField` switched from `z.string().regex(...).transform(Decimal)` to `z.coerce.number().positive().transform(Decimal)` — now works for both `"4500.00"` (multipart) and `4500` (JSON).
+  - Added missing numeric fields that exist on the Prisma Property model (`bedrooms`, `bathrooms`, `parkingSpots`, `views` as int; `area`, `latitude`, `longitude` as float; `condoFee`, `propertyTax` via `optionalMoneyField` → `Prisma.Decimal`) all optional, all via `z.coerce.number()`.
+  - Added `type` (PropertyType enum) as optional.
+  - Added boolean fields (`isFurnished`, `petsAllowed`, `nearSubway`, `isFeatured`) via a local `multipartBoolean` preprocess helper that maps the strings `"true"`/`"false"` explicitly. Deliberately did NOT use `z.coerce.boolean()` — it treats `"false"` as truthy.
+- Smoke-tested via a temporary `src/__smoke_us004.ts` (removed after run) that confirmed: JSON with real numbers/booleans parses, multipart with stringified numbers/booleans parses, negative price is rejected, invalid boolean string is rejected.
+- Typecheck passes. `npm test` unchanged at 16 pre-existing failures / 212 pass — zero regressions.
+- Files changed: `src/utils/propertyValidation.ts` (only).
 - **Learnings for future iterations:**
-  - Repo already had `@langchain/openai` installed — `OpenAIEmbeddings` exposes `embedQuery(text)` for single strings (distinct from `embedDocuments(texts)` which is batch). US-005 should reuse the same `QueryEmbedder` shape if it needs to embed the session's last user turn.
-  - Prefer `$queryRawUnsafe` with two explicit params (vector literal as `$1`, K as `$2`) over tagged-template `$queryRaw`: pgvector needs `$1::vector` casts and the tagged template won't emit the cast cleanly. Safe because both params are non-user-controlled (vector comes from OpenAI, K is a numeric constant).
-  - Place the `WHERE embedding IS NOT NULL` filter BEFORE the `ORDER BY embedding <=> $1::vector` so the planner can skip null rows; also guards against ingestion-in-flight rows where embedding hasn't been written yet.
-  - For US-005: the retriever returns chunks in descending-score order, so checking `chunks[0].score >= SIMILARITY_THRESHOLD` is sufficient for the handoff gate — no need to sort or max-scan.
-  - US-005's chain service should follow the same deps-injection + cached-default pattern so its unit tests can mock both the retriever AND the Claude LLM without env vars.
+  - `z.coerce.boolean()` is a trap in multipart flows — `"false"` becomes `true`. Use `z.preprocess((v) => v === 'true' ? true : v === 'false' ? false : v, z.boolean())` instead. `src/utils/searchValidation.ts` already had this pattern for URL query strings; we now have a matching variant for multipart bodies. If more endpoints get multipart support, lift `multipartBoolean` into a shared util.
+  - `z.coerce.number()` combined with `.int()`, `.nonnegative()`, `.positive()` is safe — constraints run AFTER coercion so the check is against the final number.
+  - `updatePropertySchema` in the same file still uses the old `z.string().regex` priceField and still lacks the extended fields. US-004 only changed the create path per PRD scope. If landlord PATCH via multipart is ever added, `updatePropertySchema` will need the same treatment.
+  - When extending a Zod schema that's called via `.parse(req.body)`, new optional fields never break existing JSON callers — Zod's default object behavior strips unknown keys rather than rejecting them.
+  - Smoke-testing a Zod schema at runtime is cheap and catches the `z.coerce.boolean()` footgun that tsc alone will NOT: both `z.boolean()` and `z.coerce.boolean()` have the same TypeScript output type (`boolean`), so only runtime parsing reveals the semantic bug.
 ---
 
-## 2026-04-21 - US-005
-- Implemented `src/services/ragChainService.ts`:
-  - Exports `generateAnswer({ sessionId, userMessage }, overrideDeps?): Promise<{ answer, handoff, topScore, usedChunkIds }>`.
-  - Calls `retrieveRelevantChunks` (via injected `Retriever`) and gates: if `chunks.length === 0 || chunks[0].score < SIMILARITY_THRESHOLD`, returns the Portuguese fallback + `handoff: true` WITHOUT calling the LLM.
-  - Loads the last N (default 10) messages for the session via `prisma.message.findMany({ orderBy: { timestamp: "desc" }, take: 10 })` then `.reverse()` — yields ASC chronological order in the final prompt. Uses `select: { senderType, content }` to stay lean.
-  - Formats history: BOT -> `AIMessage`, TENANT/LANDLORD -> `HumanMessage`.
-  - Builds a Portuguese system prompt encoding §6 of `documentation/buisness_plan.md`: profissional/acolhedor/confiável, base-apenas-no-contexto, handoff em litígios/exceções, PT-BR, respostas breves. Retrieved chunks are concatenated into the system prompt with `[#N — title (score=X.XXX)]` headers via `formatContext`.
-  - Constructs `ChatAnthropic` with `model: "claude-sonnet-4-6"` and `temperature: 0.2`. Deps-injection + lazy `getDefaultDeps()` cache so the module imports cleanly in tests without `ANTHROPIC_API_KEY`.
-  - Handles both string- and content-block-array LLM responses via `extractTextContent` helper.
-- New unit test `tests/ragChainService.test.ts` (13 cases) covers: no-chunk handoff, low-score handoff, high-score LLM path, history inclusion + ASC ordering, history limit query shape (desc + take 10), context injected in system prompt, array-content-block LLM response parsing, per-call `similarityThreshold` override, plus `formatContext` / `buildSystemPrompt` / `historyToMessages` helpers. 70 tests green (was 57).
-- `npx tsc --noEmit` clean; `npm test` green.
-- Files changed: `src/services/ragChainService.ts` (new), `tests/ragChainService.test.ts` (new), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+## 2026-05-06 - US-005
+- Updated `propertyService.createProperty` in `src/services/propertyService.ts` to accept an optional `files?: Express.Multer.File[]` as its second argument, and return a new `PropertyWithImages` alias (`Property & { images: PropertyImage[] }`).
+- No-files branch: short-circuits to a plain `prisma.property.create({ data, include: { images: true } })`. For JSON-only callers this is functionally unchanged (property is created), with the sole visible difference that the response now has `images: []` — which is exactly what US-006 AC requires ("no regression from current JSON-only flow"). No existing caller (propertyController, adminController, whatsappWorker) relied on `images` being absent from the response.
+- Files-present branch: wraps everything in `prisma.$transaction(async (tx) => { ... })`:
+  1. `tx.property.create({ data })` creates the DB row.
+  2. `savePropertyImages(property.id, files)` writes buffers to disk — called INSIDE the transaction callback per PRD acceptance criteria, so a DB rollback after this point still triggers filesystem cleanup via the outer catch.
+  3. `tx.propertyImage.createMany({ data: saved.map(...) })` inserts the image rows.
+  4. `tx.property.findUniqueOrThrow({ where: { id }, include: { images: true } })` returns the full property-with-images payload as the transaction's return value.
+- Failure-atomicity: `createdPropertyId` and `savedUrls` are captured on each step that succeeds. On any throw from the transaction, the outer catch calls `cleanupPropertyImages(createdPropertyId, savedUrls)`. A failure INSIDE `savePropertyImages` itself (mid-loop write error, or an INVALID_FILE_TYPE belt-and-suspenders throw) is already self-cleaned by that service — `savedUrls` stays `[]` because the assignment only runs after `await` resolves successfully, so the outer cleanup doesn't run twice.
+- Cleanup failures are caught and logged via `logger.error`, never thrown — we must not mask the original error with a cleanup error.
+- Typecheck: `npx tsc --noEmit` passes with zero errors.
+- Tests: `npm test` shows 16 failed / 212 passed — identical to the pre-existing Auth0-migration baseline. No regressions. (Controller still calls `createProperty(validatedData)` with a single arg; TS allows the new param to be omitted since it's optional.)
+- Files changed: `src/services/propertyService.ts` (only).
 - **Learnings for future iterations:**
-  - `@langchain/core/messages` exports `AIMessage`, `HumanMessage`, `SystemMessage` (and the `BaseMessage` type). Their `.content` field may be a plain string or an array of content blocks like `[{ type: "text", text: "..." }]` — always normalize via a helper. Array-shape responses are common from Anthropic when thinking/tool-use is involved, even when you don't ask for it.
-  - `ChatAnthropic` constructor takes `{ apiKey, model, temperature }`. Model IDs: `claude-sonnet-4-6` is the current Sonnet for this project (PRD spec). Do NOT default to `claude-sonnet-4-5-20250929` from the langchain docs examples.
-  - `prisma.message.findMany` with `orderBy: asc` + `take: N` gives the FIRST N messages (oldest), NOT the last N. To get "last N in ASC order" use `orderBy: desc` + `take: N` + `.slice().reverse()`. The acceptance criteria in US-005 specifically said "last 10 ordered ASC".
-  - When mocking a Prisma delegate (`prisma.message.findMany`) in vitest, narrow the `ChainDeps["prisma"]` type to `Pick<PrismaClient, "message">` and cast the test-only mock object via `as unknown as ChainDeps["prisma"]`. Full `PrismaClient` shape is too big to satisfy with a literal mock.
-  - For US-006 (wiring into worker): the chain already handles retrieval + LLM + prompt construction. The worker only needs to: persist inbound Message (TENANT), call `generateAnswer`, persist outbound Message (BOT), send via `whatsappService`, and if `handoff === true` flip `ChatSession.status` to `WAITING_HUMAN`. No need to touch retrieval, prompts, or history loading — it's all inside `generateAnswer`.
-  - For US-007 (lead extraction): reuse the same deps-injection pattern + `ChatAnthropic` setup, but with `temperature: 0` and LangChain structured output (`.withStructuredOutput(zodSchema)`). The structured-output call path is separate from `generateAnswer` — run it in a microtask/separate BullMQ job AFTER the reply is sent.
+  - Prisma's interactive transaction callback (`prisma.$transaction(async (tx) => {...})`) is the right tool when you need non-DB side-effects (filesystem writes) interleaved with DB writes — BUT the side-effects are NOT automatically rolled back. You must do cleanup yourself in an outer catch. The callback receiving `tx` gives you a scoped client; all DB calls inside should use `tx`, never `prisma` (mixing them would bypass the transaction).
+  - `findUniqueOrThrow` is preferable to `findUnique` as the final statement in a create-transaction — the record must exist (we just created it in the same transaction), so `null` would indicate a serious invariant violation rather than a normal "not found" case. Throwing is the correct signal.
+  - When a service accepts an optional trailing parameter (here `files?`), existing callers need NO changes because TypeScript allows omitting optional parameters. This is the safe path for US-006 to wire multer into the controller — the signature change is backward-compatible.
+  - `Property & { images: PropertyImage[] }` is the pragmatic return type for an `include: { images: true }` Prisma query. `Prisma.PropertyGetPayload<{ include: { images: true } }>` is more formally correct but adds verbosity; both are equivalent at runtime.
+  - Ordering of state-capture variables matters: `createdPropertyId = property.id` must come BEFORE `await savePropertyImages(...)` so that a filesystem failure still leaves `createdPropertyId` set — but `savedUrls = saved.map(...)` must come AFTER the await resolves, so a throw from savePropertyImages keeps `savedUrls = []` (savePropertyImages handles its own cleanup in that case). This ordering avoids double-cleanup bugs.
+  - Cleanup errors in the catch block should be swallowed (or logged at error level) and the ORIGINAL error re-thrown. `cleanupPropertyImages(...).catch(...)` achieves this without a nested try/catch.
 ---
 
-## 2026-04-21 - US-006
-- Refactored `src/services/whatsappService.ts`:
-  - `sendMessage(to, text)` now ONLY posts to the Meta Graph API and returns `SendMessageResponse` (`{ messages: [{ id }], ... }`). Removed the baked-in outbound persistence + session/user lookup — the worker now owns all session/message state, avoiding the double-persist race that would have landed once US-006 wired the worker's own `prisma.message.create` for outbound.
-  - `prisma` import is dropped from this module (it's now pure I/O to Meta).
-- Rewrote `src/workers/whatsappWorker.ts`:
-  - Extracted the job body into a pure `handleWhatsappMessage(payload, deps)` exported function with `WhatsappHandlerDeps = { prisma, sendMessage, generateAnswer }`. Matches the deps-injection pattern from ingestKnowledge / ragRetrieverService / ragChainService.
-  - Flow: parse payload → dup wamid check → `prisma.user.upsert({ where: phoneNumber })` → find latest `ChatSession` by `tenantId` (any status, `orderBy: startedAt desc`) → create new ACTIVE_BOT if none → persist inbound `Message` (TENANT) → if session.status !== ACTIVE_BOT return `{ success, reason: 'session_<status>' }` without replying → call `generateAnswer({ sessionId, userMessage })` (try/catch) → call `sendMessage(phoneNumber, answer)` → persist outbound `Message` (BOT, wamid captured from Meta response) → if `handoff === true` `prisma.chatSession.update({ status: 'WAITING_HUMAN' })`.
-  - RAG errors: caught, replaced with `RAG_ERROR_FALLBACK` Portuguese apology, forced `handoff: true`, still sent + persisted + flipped session.
-  - `sendMessage` failures: logged but non-fatal — outbound Message is still persisted (wamid: null) and handoff flip still runs.
-  - BullMQ `Worker` at bottom is a thin wrapper that calls `handleWhatsappMessage` with the real deps (prisma singleton, real `sendMessage`, real `generateAnswer`).
-- Rewrote `tests/whatsappWorker.test.ts`:
-  - `vi.mock('ioredis')` with a fake class + `vi.mock('bullmq')` with a fake `Worker` so importing the worker module does not require a live Redis.
-  - `vi.hoisted(() => { process.env.TOKEN_ACCES_WHATSAPP = ...; process.env.PHONE_NUMBER_ID = ...; process.env.REDIS_URL = ... })` satisfies the two modules' boot-time guards.
-  - Tests cover: sendMessage (Meta happy path + 130497 + generic API error + network error), empty-payload / not-message / duplicate-wamid short-circuits, happy path (ACTIVE_BOT reuse, grounded answer, session stays ACTIVE), new-session creation, handoff path (fallback from low-score retriever → WAITING_HUMAN), WAITING_HUMAN early-return, RESOLVED early-return, RAG-error apology → WAITING_HUMAN, and sendMessage-failure with outbound still persisted (wamid: null).
-- Files changed: `src/services/whatsappService.ts`, `src/workers/whatsappWorker.ts`, `tests/whatsappWorker.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
-- Typecheck (`npx tsc --noEmit`) clean. `npm test` green at 75 tests across 10 files (was 70 across 10). No browser/UI surface to test manually — worker is queue-driven.
+## 2026-05-06 - US-006
+- Wired multer middleware into the POST /properties route. In `src/routes/propertyRoutes.ts` imported `propertyPhotoUploadHandler` from `../middlewares/uploadMiddleware` and mounted it before `propertyController.create`: `router.post('/properties', propertyPhotoUploadHandler, propertyController.create)`.
+- In `src/controllers/propertyController.ts` the `create` handler now reads `req.files as Express.Multer.File[] | undefined` and forwards it as the second argument to `propertyService.createProperty(validatedData, files)`. The optional second parameter landed in US-005, so TS allows both the old one-arg and the new two-arg shape.
+- Order of operations matches PRD: multer runs first (populating req.files from memory), then Zod validates req.body, then the service runs the transaction. Because multer uses memoryStorage, NO disk writes happen until `propertyService.createProperty` decides to call `savePropertyImages` — a Zod validation failure leaves no files on disk, satisfying AC "if validation fails, no files are written to disk".
+- Typecheck: `npx tsc --noEmit` passes with zero errors.
+- Tests: `npm test` shows 16 failed / 212 passed — identical pre-existing Auth0-migration baseline. No regressions.
+- Files changed: `src/routes/propertyRoutes.ts`, `src/controllers/propertyController.ts`.
 - **Learnings for future iterations:**
-  - The OLD `whatsappService.sendMessage` silently persisted the outbound message by looking up `User` by phoneNumber + `ChatSession` by `status: ACTIVE_BOT`. This is fine as long as the worker doesn't ALSO persist, but once you need session-aware logic (handoff flip, pointer to the same session object the worker used), the in-service persistence hides a race: `sendMessage`'s session lookup could return a DIFFERENT session than the one `handleWhatsappMessage` has in hand (e.g. if multiple sessions exist, or if the handoff happened mid-flight). Move persistence to the worker and keep `sendMessage` single-purpose.
-  - BullMQ `Worker` + `IORedis` construct network-y resources at module import time. To unit-test a module that exports both a handler function and `new Worker(...)` at top level, mock both packages in `vi.mock`. Do NOT try to refactor to lazy-init the Worker — production code wants it eagerly running.
-  - Session lookup in the worker is `findFirst({ where: { tenantId }, orderBy: { startedAt: 'desc' } })` — NOT filtered by `status: 'ACTIVE_BOT'`. If you filter on ACTIVE_BOT, you'd miss a WAITING_HUMAN session and accidentally create a parallel ACTIVE_BOT session alongside it, causing the bot to start replying again while a human is also handling the same tenant. Fetch latest regardless of status, then branch on status.
-  - Dep-inject `generateAnswer` into the worker rather than calling the module-level one directly — otherwise the test file has to also set up `ANTHROPIC_API_KEY` + `OPENAI_API_KEY` and mock `@langchain/anthropic` / `@langchain/openai`. The ragChainService's cached-default-deps handles production; the worker's test uses `vi.fn()`.
-  - Outbound wamid capture pattern: `const r = await sendMessage(phone, answer); const outboundWamid = r.messages?.[0]?.id ?? null;` then `prisma.message.create({ data: { wamid: outboundWamid, ... } })`. Use `null` (not undefined / not a thrown error) when `sendMessage` fails so the Message row still writes and subsequent status-update webhooks for that wamid simply no-op in `messageStatusService`.
-  - For US-007 (lead extraction): hook into the worker AFTER `await deps.sendMessage(...)` and AFTER the outbound `message.create`. Use `queueMicrotask` (or a new BullMQ queue) so extraction failures don't block the user-facing reply. The handler already has `user`, `chatSession`, and `messageText` in scope — pass them to `extractInsights({ sessionId, userMessage })`.
-  - For US-008 (eval script): it does NOT go through the worker — just calls `generateAnswer` directly with a synthetic sessionId. No need to stand up BullMQ or set `REDIS_URL`.
+  - Express's `req.files` is typed as `{ [fieldname: string]: Express.Multer.File[] } | Express.Multer.File[] | undefined` in `@types/multer` — the union covers both `upload.array()` (array) and `upload.fields()` (dict) cases. Since we specifically use `.array('photos', 20)`, narrowing via `as Express.Multer.File[] | undefined` is safe and keeps the service signature simple.
+  - The Swagger JSDoc block above `router.post('/properties', ...)` is INTENTIONALLY left documenting `application/json` only — updating it to document `multipart/form-data` is US-009's scope. Don't touch it here.
+  - When adding middleware to a route, middleware runs in the order passed to `router.post(path, ...handlers)`. `propertyPhotoUploadHandler` must come BEFORE `propertyController.create` so `req.body` and `req.files` are populated by the time the controller runs. This ordering also means a multer error (LIMIT_FILE_SIZE, etc.) short-circuits before the controller — those flow into the global error handler directly via `next(err)`. US-008 will map those MulterError codes to the API error shape.
+  - The convenience `propertyPhotoUploadHandler` export (= `propertyPhotoUpload.array('photos', 20)`) defined in US-002 is what lets this be a single-line import — if US-002 had only exported the multer instance, each route would have to call `.array('photos', 20)` inline, duplicating the field name and max count. Good pattern for future upload endpoints: export both the raw instance AND a pre-bound handler.
+  - `req.body` in a multipart request is populated by multer (from the non-file text fields), NOT by express.json(). Express's body-parser sees a `multipart/form-data` Content-Type and passes the body through untouched; multer's handler then parses it. This is why US-004's `z.coerce.*` schema changes were mandatory — multer hands us string values even for "numeric" fields.
 ---
 
-## 2026-04-21 - US-007
-- Implemented `src/services/leadExtractionService.ts`:
-  - Exports `extractInsights({ sessionId, userMessage }, overrideDeps?): Promise<{ insights, rentalProcessId, upsertedKeys, handoff }>`.
-  - Zod schema `InsightsSchema`: `{ budget?, neighborhood?, bedrooms?, pets_allowed?, intent }` where `intent` is `"search" | "schedule_visit" | "contract_question" | "human_handoff" | "other"` (required).
-  - Uses `new ChatAnthropic({ apiKey, model: "claude-sonnet-4-6", temperature: 0 }).withStructuredOutput(InsightsSchema, { name: "extract_lead_insights" })`. Portuguese system prompt explaining each field + the five intent values; user message is the second message in the prompt.
-  - Flow: `prisma.chatSession.findUnique({ where: { id } })` (throws if missing) → LLM structured call → find open RentalProcess (`status != CLOSED`, latest by `createdAt desc`), create TRIAGE row if none → loop over `budget / neighborhood / bedrooms / pets_allowed / intent`, skip null/undefined, `findFirst` by `(rentalProcessId, insightKey)`, create if missing, update if value differs, no-op if unchanged → if `intent === "human_handoff"` and session is not already WAITING_HUMAN, flip it.
-  - Deps-injection + lazy cached default deps (same pattern as retriever/chain services) so the module imports cleanly in tests without `ANTHROPIC_API_KEY`.
-- Wired into `src/workers/whatsappWorker.ts`:
-  - Added `extractInsights: ExtractInsightsFn` and `scheduleMicrotask?: (task) => void` to `WhatsappHandlerDeps`.
-  - After the outbound `message.create` and session-handoff-flip, schedules `extractInsights({ sessionId, userMessage })` via `queueMicrotask` (default) with error-catch so failures don't affect the user-facing reply. Gated on `!ragError` so apology messages don't feed the extractor with noise.
-  - Production `Worker` wrapper wires `defaultExtractInsights` from the new service.
-- Tests: new `tests/leadExtractionService.test.ts` (13 cases) covers: schema accept/reject, prompt-builder shape, primitive serialization, missing-session throws, TRIAGE creation + 5-field upsert in one pass, process reuse (second call reuses the row), null/undefined skip, second-call updates existing insight row (doesn't duplicate), no-op when value unchanged, human_handoff → WAITING_HUMAN flip, no-re-flip when already WAITING_HUMAN, user message forwarded verbatim to LLM. Extended `tests/whatsappWorker.test.ts` with: happy-path schedules extraction (asserts not-yet-invoked before draining microtasks, then invoked with correct args after), extraction-failure swallowed (doesn't throw out of handler), and RAG-error path does NOT schedule extraction.
-- Files changed: `src/services/leadExtractionService.ts` (new), `src/workers/whatsappWorker.ts`, `tests/leadExtractionService.test.ts` (new), `tests/whatsappWorker.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
-- Typecheck (`npx tsc --noEmit`) clean. `npm test` green at 92 tests across 11 files (was 75 across 10).
+## 2026-05-06 - US-007
+- No source changes required. `app.use('/uploads', express.static(path.join(__dirname, '../uploads')))` is already present at `src/app.ts:46`, registered BEFORE the global `errorHandler` at `src/app.ts:132`. It landed on `main` via an earlier PR (the seed-images work — commit `f429f34`) and has been serving the seed fixtures at `uploads/b0000001-.../0001.png` etc. since then.
+- Deliberately kept `path.join(__dirname, '../uploads')` — the PRD AC literally writes `path.resolve(process.cwd(), 'uploads')`, but the `__dirname`-relative form is the documented Codebase Pattern (progress.txt line 14) and is strictly more robust. `process.cwd()` depends on where Node is launched from (e.g., running `node dist/app.js` from a sibling directory would break `process.cwd()`-based paths), whereas `__dirname` is always the directory of the compiled `app.js`. Both forms resolve to the same project-root `uploads/` in the happy path.
+- Verified the four functional acceptance criteria via a temporary supertest smoke file (`src/__smoke_us007.ts`, removed after run, ran through `ts-node`):
+  1. `GET /uploads/b0000001-0000-4000-8000-000000000001/0001.png` → **200** with `Content-Type: image/png`.
+  2. `GET /uploads/missing.jpg` → **404**.
+  3. `GET /uploads/../package.json` (literal traversal) → **404** — Express/`serve-static` normalizes `..` before file resolution, so the request never escapes the `/uploads` root.
+  4. `GET /uploads/..%2Fpackage.json` (URL-encoded traversal) → **404** — same normalization applies after URL decoding.
+- Typecheck: `npx tsc --noEmit` passes with zero errors.
+- Tests: `npm test` — 16 failed / 212 passed, matching the pre-existing Auth0-migration baseline. No regressions.
+- Files changed: NONE (no source changes). Only `scripts/ralph/prd.json` (`passes:true` + notes) and `scripts/ralph/progress.txt` (this entry).
 - **Learnings for future iterations:**
-  - `withStructuredOutput(zodSchema, { name })` returns a Runnable that takes `BaseMessage[]` (or any `BaseLanguageModelInput`) and resolves to the typed parsed object. Anthropic implements it via tool-calling under the hood. Response is pre-validated against the schema by LangChain, but defensive `InsightsSchema.parse(result)` at the boundary is cheap insurance against upstream SDK changes.
-  - `AiExtractedInsight` has no compound unique index — you CANNOT use `prisma.aiExtractedInsight.upsert`. Do `findFirst` + branch. Adding a `@@unique([rentalProcessId, insightKey])` to the schema in a future iteration would enable `.upsert` and remove the two-step pattern, but would require a migration.
-  - Don't filter open-process lookup to `status: 'TRIAGE'` — a tenant mid-VISIT_SCHEDULED should still have new insights written to their existing process, not a brand-new TRIAGE one. Filter `status: { not: 'CLOSED' }` instead.
-  - Worker-side fire-and-forget: inject `scheduleMicrotask?: (task) => void` with a `queueMicrotask` default. In tests, replace it with a queue array that tests drain explicitly. Makes timing deterministic — `await handleWhatsappMessage(...); await deps.runScheduledMicrotasks();` works cleanly instead of relying on real-time microtask ordering.
-  - Gate post-reply hooks on `!ragError`. The RAG-error apology path doesn't represent the user's real intent — extracting insights from that interaction just pollutes the lead record. The low-score handoff path (generic fallback, valid user message, `handoff: true`) IS still extractable — only actual chain exceptions skip.
-  - For US-008 (eval script): it only needs `generateAnswer` + a throwaway sessionId. No need to set up the extraction hook or touch the worker path.
+  - Before implementing a story, ALWAYS grep the current codebase for the feature first — US-007's static-serving line was already in place from a prior unrelated PR. If an AC turns out to already be satisfied (ideally by a superior pattern), the right move is to verify behavior, document the deviation, and mark it done — NOT to regress the existing code to match the PRD's exact wording. The PRD is a target spec, not a literal diff.
+  - `express.static` (backed by the `serve-static` package) handles path-traversal protection by default: both literal `..` segments and URL-encoded `%2E%2E` / `%2F` forms are normalized before the file lookup, and any path that resolves outside the static root returns 404. You don't need to add your own traversal guards when using `express.static` with a fixed root directory.
+  - `serve-static`'s 404 behavior: for a missing file, it calls `next()` (not `next(err)`), which lets the request fall through to subsequent handlers. In this codebase, the errorHandler is the last `.use()`, so a missing `/uploads/...` request hits the default 404 pathway (no route matched). The response is an empty 404 with the default Express body — if API consumers need a JSON 404 for missing assets, a dedicated `app.use('/uploads/*', (_req, res) => res.status(404).json({...}))` AFTER the static middleware would be needed. Not in scope for US-007.
+  - `path.join(__dirname, '../uploads')` vs `path.resolve(process.cwd(), 'uploads')`: the first is always stable relative to the file's location (works under ts-node, `node dist/`, or any other invocation). The second depends on the current working directory at the moment Node started — fragile for CLI/cron/systemd invocations where CWD might not be the project root. Prefer `__dirname`-relative resolution for files that live at fixed project-root locations.
+  - To smoke-test a route without writing a full vitest suite, drop a throwaway `src/__smoke_*.ts` that imports the real `app` and uses `supertest(app)`, then run via `npx ts-node src/__smoke_*.ts`. Keep `// @ts-nocheck` at the top if `@types/supertest` isn't installed (it's not, in this repo — only runtime `supertest` is). Remove the file before committing.
 ---
 
-## 2026-04-21 - US-008
-- Implemented `src/scripts/evalRag.ts`:
-  - 8 hard-coded Portuguese test questions spanning the PRD-specified topics: triagem (screening), documentação (documents), agendar visita (schedule visit), pagamento (payment), pets, rescisão (contract termination), taxas/IPTU (fees/property tax), e cobrança inicial (upfront charges).
-  - For each question: calls `retrieveRelevantChunks(question)` to surface the top chunk's title + similarity score, then calls `generateAnswer({ sessionId, userMessage })` against a synthetic `sessionId = eval-${Date.now()}-${rand}`. Prisma `message.findMany` against a non-existent sessionId just returns `[]`, so no throwaway ChatSession row is needed.
-  - Prints `question / top chunk / similarity (retriever + chain) / handoff / answer (truncated to 500 chars with whitespace normalized)` per question.
-  - Retriever and chain calls are wrapped in try/catch per question so a single failure doesn't abort the run.
-  - `assertRagSecrets()` at `main()` entry so both `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are required before any LLM call.
-  - `prisma.$disconnect()` in the `.finally()` block, matching the CLI shutdown pattern from `ingestKnowledge.ts`.
-- Added npm script `"eval:rag": "ts-node src/scripts/evalRag.ts"`.
-- Files changed: `src/scripts/evalRag.ts` (new), `package.json` (script), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
-- Typecheck (`npx tsc --noEmit`) clean. `npm test` green at 92 tests across 11 files (no new tests — PRD only requires typecheck for US-008).
+## 2026-05-06 - US-008
+- Extended `src/middlewares/errorHandler.ts` with two new branches (placed BEFORE the existing `SyntaxError` catch-all so more-specific matches win, AFTER the ZodError branch so validation keeps precedence):
+  1. `err instanceof multer.MulterError` — maps `err.code` through a `MULTER_ERROR_MAP` lookup table to the PRD-mandated Portuguese error shapes:
+     - `LIMIT_FILE_SIZE` → `{ code: 'FILE_TOO_LARGE', message: 'Arquivo excede 10MB' }`
+     - `LIMIT_FILE_COUNT` → `{ code: 'TOO_MANY_FILES', message: 'Máximo de 20 fotos por propriedade' }`
+     - `LIMIT_UNEXPECTED_FILE` → `{ code: 'UNEXPECTED_FILE_FIELD', message: 'Campo de arquivo inválido' }`
+     - Safe fallback: any unmapped MulterError code becomes `{ code: 'UPLOAD_ERROR', message: err.message }` so future multer versions (e.g., LIMIT_PART_COUNT, LIMIT_FIELD_VALUE) don't regress to 500.
+  2. `err.message === 'INVALID_FILE_TYPE'` (plain `Error`, thrown by US-002's fileFilter and US-003's belt-and-suspenders MIME check) → `{ status: 400, code: 'INVALID_FILE_TYPE', messages: [{ message: 'Apenas JPEG ou PNG são aceitos' }] }`.
+- Status codes: all upload-related branches set `response.status = 400`, matching the PRD. Response shape is the project-wide `{ status, code, messages: [{ message }] }` — identical to `authMiddleware` and `ZodError` branches.
+- Stack-trace leakage: the existing `logger.error({ err, path, method }, ...)` call runs FIRST (server-side pino log — stack goes to stdout/log aggregator). Nothing from the `err` object is included in the JSON response body — we construct the response from hardcoded strings / `err.message` / `err.code` only, never `err.stack`. Verified by the smoke test's response-body assertions.
+- Existing branches preserved: `ZodError` still returns `{ status: 400, code: 'VALIDATION_ERROR', messages: [{ path, message }] }`. `SyntaxError` still returns `{ status: 400, code: 'BAD_REQUEST', ... }`. Generic fallback still returns `{ status: 500, code: 'INTERNAL_SERVER_ERROR', messages: [{ message: err.message }] }`. Smoke-tested both regressions explicitly.
+- Smoke test: created throwaway `src/__smoke_us008.ts` that stood up a minimal Express app with one route per branch, fired each via supertest, asserted the exact response shape, and then exited. All 6 branches pass (LIMIT_FILE_SIZE, LIMIT_FILE_COUNT, LIMIT_UNEXPECTED_FILE, INVALID_FILE_TYPE, ZodError regression, unknown-error fallback). File removed before commit.
+- Typecheck: `npx tsc --noEmit` passes with zero errors.
+- Tests: `npm test` shows 16 failed / 212 passed — identical to the pre-existing Auth0-migration baseline. No regressions.
+- Files changed: `src/middlewares/errorHandler.ts` (only).
 - **Learnings for future iterations:**
-  - For eval/smoke scripts, skip the deps-injection + unit-test pattern — the script itself is the test. Direct imports of `generateAnswer` + `retrieveRelevantChunks` keep the script readable and the only thing that matters is that it runs.
-  - A synthetic `sessionId` avoids the need to set up a User + ChatSession per run. `prisma.message.findMany` doesn't error on a missing session, so the chain just builds a prompt with no history — exactly what you want for a cold-start eval.
-  - Output format: printing similarity from BOTH the standalone retriever AND the chain's `topScore` lets you verify they agree. They should be identical (the chain calls the retriever internally with the same query), but a divergence would flag a bug in either path.
-  - For future eval work: consider piping the output to a file + diffing across runs to detect regressions, or extending the script to compute mean similarity and handoff rate across the question set. Out of scope for US-008.
-  - This is the final story — all 8 user stories now pass.
+  - Ordering of branches in `errorHandler` matters: `instanceof` class checks (ZodError, multer.MulterError) should come BEFORE message-string checks (INVALID_FILE_TYPE) and generic `.name` sniffing (SyntaxError). Most-specific first, generic-fallback last. When adding a new branch, pick the spot that preserves this gradient — don't just append.
+  - `multer.MulterError` is a class exported from the top-level `multer` import, and `err.code` is a union of string literals (`'LIMIT_FILE_SIZE'`, etc.). Prefer a lookup table over a long switch — it keeps the handler declarative and easy to extend when multer adds new codes.
+  - Always include a fallback inside an instanceof branch (`mapped?.code ?? 'UPLOAD_ERROR'`). A multer minor-version upgrade could introduce a new `err.code` that isn't in the map; without a fallback the branch would crash into `response.messages = [{ message: undefined }]` and confuse clients. Defensive mapping costs one line.
+  - When testing error-handler response shapes WITHOUT a network stack, supertest on a bare `express()` app with synthetic `next(err)` routes is the cleanest approach. No need to wire up real multer or real routes to verify the mapping — just construct the error class directly: `new multer.MulterError('LIMIT_FILE_SIZE', 'photos')`. That's faster than sending actual >10MB buffers through a real upload.
+  - For internationalization: the PRD mandates Portuguese message strings for multer errors (`'Arquivo excede 10MB'`, etc.). If this API ever adds a locale layer, these strings should move to a message catalog keyed by `code`. For now, inline is fine — all other API error messages in this codebase are also hardcoded.
+---
+
+## 2026-05-06 - US-009
+- Updated Swagger/OpenAPI docs for POST /properties to document the new multipart upload flow. Two files touched:
+  1. `src/config/swagger.ts` — added a new `PropertyImage` component schema (id/propertyId/url/isCover/caption/createdAt) and appended `images: { type: 'array', items: $ref PropertyImage }` to the existing `Property` component. This upgrade is codebase-wide: every endpoint that already `$ref`s `Property` (GET /properties/:id, PUT /properties/:id, GET /properties/search) now surfaces the images relation in its documented response without any per-route change.
+  2. `src/routes/propertyRoutes.ts` — rewrote the `@swagger` JSDoc block for POST /properties. `requestBody.content` now has TWO entries:
+     - `application/json` — the existing JSON-only shape, preserved verbatim (all original fields) plus two fields that were missing from the JSDoc but already accepted by the Zod schema (`condoFee`, `propertyTax`) for completeness.
+     - `multipart/form-data` — all Property fields plus `photos: { type: 'array', maxItems: 20, items: { type: 'string', format: 'binary' } }` with description explaining the 20-file/10MB/JPEG-or-PNG rules and that the first photo becomes the cover.
+- Response `201`: uses `allOf: [$ref Property, { properties: { images: array of PropertyImage } }]` — this is the canonical OpenAPI idiom for "extend a referenced schema". Since I also added `images` to the Property component itself, this is belt-and-suspenders — any consumer grabbing Property alone OR the inline 201 schema sees `images`.
+- Response `400`: references `$ref ErrorResponse` (the existing component) and includes four worked `examples` (VALIDATION_ERROR, FILE_TOO_LARGE, TOO_MANY_FILES, INVALID_FILE_TYPE) each with the exact Portuguese message strings produced by the US-008 error handler. Swagger UI renders these as selectable dropdown examples — useful for API consumers debugging without hitting the server.
+- Response `500`: also now references `$ref ErrorResponse` (previously just a free-text description) for consistency.
+- Verified via three throwaway `src/__smoke_us009*.ts` files (all removed before commit):
+  1. `swagger-jsdoc` successfully parses `./src/routes/*.ts` after the edit — POST /properties survives, both content types present, `photos` field has the correct shape, 201 references Property, 400 documents all four error codes.
+  2. `setupSwagger(app)` runs without throwing and the merged spec contains the `#/components/schemas/PropertyImage` $ref in the 201 response body.
+  3. `supertest.get('/api-docs/').redirects(1)` returns 200 with "Swagger UI" in the HTML; `/api-docs/swagger-ui-init.js` contains the `/properties` path — confirms swagger-ui-express loaded the full spec successfully (no silent parsing drops).
+- Typecheck: `npx tsc --noEmit` passes with zero errors.
+- Tests: `npm test` shows 16 failed / 212 passed — identical to the pre-existing Auth0-migration baseline. Zero regressions.
+- Swagger mount path is `/api-docs` in `src/server.ts` (NOT `/docs` as the PRD AC loosely mentioned). The PRD said "or whatever path swagger is mounted on" — this is the correct canonical path.
+- Files changed: `src/config/swagger.ts`, `src/routes/propertyRoutes.ts`.
+- **Learnings for future iterations:**
+  - Swagger is mounted at `/api-docs` via `setupSwagger(app)` called from `src/server.ts` (NOT `src/app.ts`). This means Swagger UI is NOT available when importing just the `app` module for tests — only the server entrypoint wires it up. When writing integration tests that want to assert on Swagger output, you must either call `setupSwagger(app)` in the test or spin up `src/server.ts` directly.
+  - `swagger-jsdoc` parses JSDoc comments permissively: a malformed `@swagger` block does NOT throw at startup — it silently drops the path from the final spec. Always verify changes by running a smoke test that asserts the path survived (`spec.paths['/properties'].post` should be defined, not undefined). Without this check, a typo in indentation could quietly wipe your endpoint from the docs.
+  - For multi-content-type request bodies (JSON + multipart), duplicate the whole schema block — OpenAPI 3.0 has no "shared body schema" mechanism across content types. `allOf`/`$ref` can reduce the duplication if the JSON and multipart shapes are truly identical, but they rarely are (e.g., multipart has the extra `photos` file field). Inlining both is the pragmatic approach.
+  - `format: binary` (NOT `format: byte`) is the correct OpenAPI 3.x tag for actual file upload fields in multipart/form-data. `format: byte` is base64-encoded content in JSON, which is a different use case. Swagger UI uses `format: binary` to render a native file picker in its "Try it out" panel.
+  - The `examples` map on a response object (keyed by user-friendly name, each with `summary` + `value`) renders in Swagger UI as a dropdown selector — much better UX than a single example. Use it when the same response code can represent multiple distinct failure modes (e.g., our 400 covers both validation and upload errors).
+  - `allOf: [$ref X, { properties: { extra: ... } }]` is the OpenAPI way to say "same as X but with these extra/overridden properties". OpenAPI 3.1 adds better composition primitives, but 3.0 (what this project uses) requires `allOf`.
+  - When adding a new schema to `components.schemas` in `swagger.ts`, every existing JSDoc block that `$ref`s a parent schema gets the update for free. Example: adding `images` to `Property` means GET /properties/:id, PUT /properties/:id, GET /properties/search all now document the images relation without any per-route JSDoc change. Prefer extending the shared component over inline schemas.
+---
+
+## 2026-05-06 - US-010
+- Created `tests/propertyPhotoUpload.test.ts` with 5 supertest-driven scenarios covering POST /api/properties photo upload end-to-end through the real multer middleware + global error handler. Mirrors the integration-test pattern in `tests/seedUuidRegression.test.ts`: hoisted mocks via `vi.hoisted`, Firebase/Auth0 env vars stubbed BEFORE `import app from '../src/app'` (because `src/config/firebase.ts` runs at module load), and the `propertyService` is mocked via `vi.mock('../src/services/propertyService', async (importOriginal) => ({ ...actual, propertyService: { ...actual.propertyService, createProperty: mockCreateProperty } }))` so untouched service methods still work.
+- Tests implemented:
+  1. **3 valid JPEGs** → 201, `response.body.images.length === 3`, `images[0].isCover === true`, `images[1..2].isCover === false`.
+  2. **No photos (JSON body)** → 201, `response.body.images === []`. Regression guard proving JSON-only callers still work.
+  3. **Non-image file** (text/plain .txt) → 400 `{ code: 'INVALID_FILE_TYPE' }`, service NEVER called (multer fileFilter rejected before the controller).
+  4. **10MB+1 byte JPEG** → 400 `{ code: 'FILE_TOO_LARGE' }`, service never called. Real `Buffer.alloc(10 * 1024 * 1024 + 1, 0xff)` — exercises multer's actual byte-counting limit, not a spy.
+  5. **21 JPEGs** → 400 `{ code: 'TOO_MANY_FILES' }`, service never called. multer's `files: 20` limit raises `LIMIT_FILE_COUNT` on the 21st part.
+- `afterEach` hook collects property IDs returned by the mock into a `Set<string>` and calls `fs.rm(uploads/<id>, { recursive: true, force: true })` for each, swallowing errors. Belt-and-suspenders — the mock never actually writes to disk, but if a regression ever routes through the real service in CI, the cleanup stops the repo from filling up.
+- `TINY_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xd9])` — 4 bytes, just SOI+EOI. multer's fileFilter reads `file.mimetype` from each multipart part's Content-Type header (populated by supertest's `.attach(..., { contentType: 'image/jpeg' })`), NOT the binary content, so this minimal buffer is enough to exercise the happy path without bloating the test file with a real JPEG fixture. This also keeps the too-many-files test fast (21×4 bytes ≈ 84 bytes of payload, no MB-scale I/O).
+- Mock return shape: `createProperty` inspects the incoming `files?` arg and synthesizes `images` with `isCover: i === 0` so the assertion on index 0 being the cover directly verifies the controller→service handoff preserves file ordering. A real property ID is generated via `randomUUID()` each call and cached for the cleanup hook.
+- Typecheck: `npx tsc --noEmit` passes with zero errors.
+- Tests: `npm test` — **217 passed / 16 failed**. The 16 failures are the documented pre-existing Auth0→Firebase migration baseline (`userSync.test.ts` and siblings still calling the removed `userService.upsertUserFromAuth0`). The new count is exactly 212 (prior baseline) + 5 (new tests), confirming zero regressions.
+- Files changed: `tests/propertyPhotoUpload.test.ts` (new).
+- **Learnings for future iterations:**
+  - For integration tests that need to exercise middleware + errorHandler, import the full `app` from `src/app.ts` and drive it with `supertest(app)`. Bypassing by building a minimal Express in the test misses the order-dependent `app.use(errorHandler)` mounting that exists in the real app.
+  - When mocking a service module that's imported as `{ propertyService }` (object export, not individual named functions), the `vi.mock` factory MUST preserve the other methods or unrelated routes will break mid-test. Pattern: `const actual = await importOriginal(); return { ...actual, propertyService: { ...actual.propertyService, createProperty: mockFn } }`. Spreading just the outer module (without the inner object spread) leaves the other service methods undefined.
+  - supertest's `.attach(field, buffer, options)` accepts `{ filename, contentType }` as the third arg — the `contentType` is what multer's fileFilter sees. Without setting it explicitly, supertest defaults the Content-Type to `application/octet-stream`, which would make the happy-path tests 400 with INVALID_FILE_TYPE instead of 201.
+  - Mocking via `vi.mock` + `vi.hoisted` is the right tool for this kind of test. `vi.spyOn` WOULD NOT work here because propertyService.createProperty is called via a live import inside the controller — by the time the test file runs, the controller has already bound the un-spied reference.
+  - Firebase env-var stubbing order matters: `process.env.FIREBASE_* = ...` must run BEFORE `import app from '../src/app'`, otherwise `src/config/firebase.ts` will warn at module load. Vitest evaluates top-level `process.env` assignments in file order, so place them at the very top (above `vi.hoisted` too, since that's also evaluated early).
+  - Passing `files: 20` in multer limits yields a `MulterError` with code `LIMIT_FILE_COUNT` on the 21st file — not the 20th (the 20th still succeeds and the 21st triggers it). If a future test wants to verify exactly 20 is accepted, use `.attach(...)` 20 times and assert 201.
+  - Test names for integration tests: describe the route and method as the outer describe (`POST /api/properties — photo upload`), then use imperative-sentence `it` blocks that state BOTH the input condition AND the expected response. Mirrors the `describe('visitController.create')` → `it('returns 201 and the created visit on success')` pattern already established in `tests/visitController.test.ts`.
 ---
