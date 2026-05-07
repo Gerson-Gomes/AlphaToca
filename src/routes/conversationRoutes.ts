@@ -232,4 +232,79 @@ router.get('/conversations/resolve', conversationController.resolve);
  */
 router.get('/conversations/:id/messages', conversationController.listMessages);
 
+/**
+ * @swagger
+ * /conversations/{id}/messages:
+ *   post:
+ *     summary: Envia uma nova mensagem na thread
+ *     description: |
+ *       Persiste uma `ConversationMessage` na thread `:id` autorada pelo caller.
+ *       `readAt` é sempre `null` ao criar — o próprio autor nunca conta como
+ *       leitor da sua própria mensagem.
+ *
+ *       Autorização segue a mesma regra **existence-hiding 404** de LL-012:
+ *       conversa inexistente E caller não-participante devolvem 404 (nunca 403).
+ *       Isso impede enumeração de ids de conversas reais via probing.
+ *
+ *       Em LL-014, o servidor emite `conversation:new_message` via Socket.IO
+ *       para o OUTRO participante após o insert ter sucesso — nunca antes, pra
+ *       não anunciar uma mensagem que não ficou no banco (e.g. se o INSERT
+ *       falhar por FK/constraint, nenhum socket emit).
+ *     tags: [Conversations]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [content]
+ *             properties:
+ *               content:
+ *                 type: string
+ *                 minLength: 1
+ *                 maxLength: 4000
+ *                 description: Texto da mensagem. Whitespace não é trimado no servidor.
+ *     responses:
+ *       201:
+ *         description: Mensagem criada — retorna a linha recém-inserida.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string, format: uuid }
+ *                 authorId: { type: string, format: uuid }
+ *                 content: { type: string }
+ *                 createdAt: { type: string, format: date-time }
+ *                 readAt: { type: string, format: date-time, nullable: true }
+ *       400:
+ *         description: `id` não-UUID, body ausente, `content` vazio ou acima de 4000.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Token ausente ou inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Conversa não encontrada OU caller não é participante (existence-hiding).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.post('/conversations/:id/messages', conversationController.createMessage);
+
 export default router;

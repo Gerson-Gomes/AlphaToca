@@ -276,4 +276,44 @@ export const conversationService = {
 
     return { messages, markedReadIds: unreadIds };
   },
+
+  /**
+   * LL-013 — Persiste uma mensagem nova na thread. Assume que o caller já
+   * passou pelo guard do controller (existe a conversa + o caller é
+   * participante); este método NÃO re-valida autorização para evitar um
+   * segundo round-trip ao banco.
+   *
+   * Retorna a linha recém-criada no mesmo shape que o `listMessages` devolve —
+   * o que permite reuso direto pelo socket emitter (LL-014) sem reshaping.
+   * `readAt` sempre começa `null` numa mensagem recém-enviada: o próprio autor
+   * não conta como leitor.
+   */
+  async createMessage(
+    conversationId: string,
+    authorId: string,
+    content: string,
+  ): Promise<ConversationMessageView> {
+    const row = await prisma.conversationMessage.create({
+      data: {
+        conversationId,
+        authorId,
+        content,
+      },
+      select: {
+        id: true,
+        authorId: true,
+        content: true,
+        createdAt: true,
+        readAt: true,
+      },
+    });
+
+    return {
+      id: row.id,
+      authorId: row.authorId,
+      content: row.content,
+      createdAt: row.createdAt.toISOString(),
+      readAt: row.readAt ? row.readAt.toISOString() : null,
+    };
+  },
 };

@@ -39,3 +39,27 @@ export const listConversationMessagesQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional().default(50),
 });
 export type ListConversationMessagesQuery = z.infer<typeof listConversationMessagesQuerySchema>;
+
+// Path params de POST /api/conversations/:id/messages (LL-013 — send message).
+// Compartilha a mesma validação do GET paginado — `id` deve ser UUID. Mantido
+// separado do schema de LL-012 para não acoplar o POST à presença de `before` /
+// `limit`, que são estritamente da leitura.
+export const createConversationMessageParamsSchema = z.object({
+  id: z.string().uuid(),
+});
+export type CreateConversationMessageParams = z.infer<
+  typeof createConversationMessageParamsSchema
+>;
+
+// Body de POST /api/conversations/:id/messages. `content.min(1)` rejeita
+// strings vazias com 400 antes de tocar o banco — evita linhas vazias na
+// tabela que seriam inúteis para o leitor e ainda disparariam o emit socket
+// (LL-014). `max(4000)` limita o tamanho do conteúdo em um único turno; acima
+// disso o cliente deve paginar em múltiplas mensagens. NÃO usamos `.trim()` na
+// validação — whitespace significativo pertence ao autor, e trimming no server
+// silenciaria mensagens que parecem vazias mas carregam conteúdo intencional
+// (ex: "\n" para quebra explícita).
+export const createConversationMessageBodySchema = z.object({
+  content: z.string().min(1).max(4000),
+});
+export type CreateConversationMessageBody = z.infer<typeof createConversationMessageBodySchema>;

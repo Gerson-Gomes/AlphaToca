@@ -7,6 +7,8 @@ import {
   listConversationsQuerySchema,
   listConversationMessagesParamsSchema,
   listConversationMessagesQuerySchema,
+  createConversationMessageParamsSchema,
+  createConversationMessageBodySchema,
 } from '../utils/conversationValidation';
 
 export const conversationController = {
@@ -165,6 +167,59 @@ export const conversationController = {
         before,
       );
       return res.status(200).json(messages);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * POST /api/conversations/:id/messages
+   *
+   * Persiste uma mensagem nova. Mesma regra "existence-hiding 404" que LL-012:
+   * tanto conversa inexistente quanto conversa existente-mas-não-sou-participante
+   * devolvem 404 — NÃO 403 — para fechar o oráculo de enumeração de ids.
+   *
+   * Ordem dos guards:
+   *   1. 401 se não autenticado.
+   *   2. 400 se path :id ou body.content falham Zod.
+   *   3. 404 se conversa não existe OU caller não é nem landlord nem tenant.
+   *   4. 201 com a mensagem recém-criada (inclui `readAt: null`).
+   *
+   * Em LL-014 o conversationSocketService.emitNewMessage será invocado após o
+   * insert ter sucesso, nunca antes — uma mensagem não persistida não pode
+   * fazer eco pelo socket.
+   */
+  async createMessage(req: Request, res: Response, next: NextFunction) {
+    try {
+      const localUser = req.localUser;
+      if (!localUser) {
+        return res.status(401).json({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          messages: [{ message: 'Authentication required.' }],
+        });
+      }
+
+      const { id } = createConversationMessageParamsSchema.parse(req.params);
+      const { content } = createConversationMessageBodySchema.parse(req.body);
+
+      const conversation = await prisma.conversation.findUnique({
+        where: { id },
+        select: { landlordId: true, tenantId: true },
+      });
+      if (
+        !conversation ||
+        (conversation.landlordId !== localUser.id && conversation.tenantId !== localUser.id)
+      ) {
+        return res.status(404).json({
+          status: 404,
+          code: 'NOT_FOUND',
+          messages: [{ message: 'Conversation not found' }],
+        });
+      }
+
+      const message = await conversationService.createMessage(id, localUser.id, content);
+      return res.status(201).json(message);
     } catch (error) {
       next(error);
     }
