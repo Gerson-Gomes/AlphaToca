@@ -15,6 +15,9 @@ Started: Thu May  7 12:11:39 PM -03 2026
 - Integration tests that need a "backing store" without a real DB: mount the real Express app via `supertest` and swap `propertyService` with `vi.mock('../src/services/propertyService', importOriginal)` spreading the actual module plus overriding only the methods you exercise. A `Map<id, record>` in `beforeEach` is enough to simulate create/update/get/search chains — Prisma model semantics are preserved by having the mock merge updates (`{...existing, ...data}`).
 - Route-level auth: `app.use('/api', propertyRoutes)` in src/app.ts mounts WITHOUT the `authStack`, so POST/PUT/DELETE /properties are currently unauthenticated at the Express layer. Owner-only checks (US-006/US-007) will need the middleware added OR an inline `localUser`/ownership guard in the controller.
 - Zod error shape: the global errorHandler (`src/middlewares/errorHandler.ts`) already converts `ZodError` into `{ status: 400, code: 'VALIDATION_ERROR', messages: [...] }` — route/controllers only need to `schema.parse(req.body)` and pass the ZodError to `next(error)`.
+- `ProcessStatus` on `RentalProcess` in this schema is `TRIAGE|VISIT_SCHEDULED|CONTRACT_ANALYSIS|CLOSED` — there is NO `ACTIVE` value. When a PRD/handoff says "RentalProcess with status=ACTIVE", the semantic the codebase actually implements is the `Contract` model (ContractStatus=ACTIVE|TERMINATED|COMPLETED). `contractService.createContract` already couples an ACTIVE Contract insert with `Property.status='RENTED'` in one transaction — so Contract is the source of truth for "who is the current tenant".
+- To add a relation-derived field (e.g., currentTenant) to a property read path without N+1: use `include: { contracts: { where: { status: 'ACTIVE' }, select: { tenant: { select: { id, name } } }, take: 1 } }` in Prisma findUnique/findMany (single JOIN), and for any raw `$queryRaw` path in the same service, emulate the include with ONE batched `prisma.contract.findMany({ where: { status: 'ACTIVE', propertyId: { in: ids } } })` followed by a Map join in memory — still constant queries per page.
+- Mocking Prisma for service-level tests: `vi.mock('../src/config/db', () => ({ default: { model: { method: vi.fn() }, $queryRaw: vi.fn() } }))` at the TOP of the test file (before any import that pulls the service in), then cast with `(prisma.model.method as any).mockResolvedValue(...)` per test. See `tests/propertyCurrentTenant.test.ts` for the full template — works cleanly with `src/config/db`'s `export default prisma` shape.
 
 ---
 
@@ -86,4 +89,32 @@ Started: Thu May  7 12:11:39 PM -03 2026
   - `supertest` + `vi.mock(... importOriginal)` with a `Map` backing store is the cheapest way to write end-to-end integration tests in this repo without spinning up Postgres. Future stories (US-004..US-007, US-018..US-020) can reuse this shape — see `tests/propertyStatus.test.ts` for the template.
   - `app.use('/api', propertyRoutes)` in `src/app.ts` is the one router mounted WITHOUT `authStack`. When US-006/US-007 adds the multipart PUT with owner-only 403s, either prepend `authStack` here or guard inside the controller via `req.localUser` (set by `authSyncMiddleware`).
   - Raw SQL `SELECT *` path inside `propertyService.searchProperties` returns Postgres column names (e.g., `moderation_status`), not camelCased field names — but `status` has no `@map`, so it comes through as `status` either way. If a future story touches a raw-SQL response shape for fields WITH `@map`, the raw SELECT list must be explicit to avoid shape drift vs. the Prisma path.
+---
+
+## [2026-05-07] - US-004 - Include currentTenant in GET /properties responses
+- Semantic decision up-front: the PRD + `BACKEND_HANDOFF.md §4` both say "RentalProcess.status='ACTIVE'", but `ProcessStatus` (TRIAGE|VISIT_SCHEDULED|CONTRACT_ANALYSIS|CLOSED) has no `ACTIVE` value. The model that DOES carry `status=ACTIVE` together with a `tenantId` is `Contract` (ContractStatus=ACTIVE|TERMINATED|COMPLETED), and `contractService.createContract` already flips `Property.status → RENTED` inside the same transaction that inserts an ACTIVE Contract. So Contract is the de-facto "active occupancy" link between Property and Tenant in this codebase. All three query paths source currentTenant from `Contract.status=ACTIVE`.
+- Three read paths updated inside `src/services/propertyService.ts`:
+  1. `getPropertyById` — 1 query. `include: { images: true, contracts: { where: { status: 'ACTIVE' }, select: { tenant: { select: { id, name } } }, take: 1, orderBy: { createdAt: 'desc' } } }`, then strip the internal `contracts` field and expose `currentTenant`.
+  2. `searchProperties` findMany branch — 2 queries (count + findMany with include). Same include. `contracts` stripped from each returned item.
+  3. `searchProperties` raw SQL branch (geolocation/`$queryRaw`) — 3 queries total: raw SELECT + raw COUNT + a single batched `prisma.contract.findMany({ where: { status: 'ACTIVE', propertyId: { in: ids } }, select: { propertyId, createdAt, tenant: { id, name } } })`. Map-join in memory. Short-circuits if page is empty (test covers this).
+- PII scope kept minimal: the nested select exposes ONLY `tenant.id` + `tenant.name`. Email/phone deliberately excluded since the dossier UI cards only need the CHAT deeplink target.
+- Swagger `Property` schema (`src/config/swagger.ts`) extended with a nullable `currentTenant` object: `{ type: object, nullable: true, required: [id, name], properties: { id: {format: uuid}, name: string } }`. Route-level JSDoc refs `$ref: '#/components/schemas/Property'` so both GET /:id and GET /search automatically pick it up — no per-route JSDoc edit needed this time.
+- No DB migration: `Contract` + `ContractStatus` already live in `prisma/schema.prisma:407-433` (shipped earlier). Nothing in Prisma changes.
+- New types exported from propertyService for downstream reuse: `CurrentTenant` (`{ id, name } | null`) and `PropertyWithCurrentTenant` (`Property & { images?: PropertyImage[]; currentTenant: CurrentTenant }`). `getPropertyById` now returns `PropertyWithCurrentTenant | null`.
+- Files changed:
+  - src/services/propertyService.ts
+  - src/config/swagger.ts
+  - tests/propertyCurrentTenant.test.ts (new)
+  - scripts/ralph/prd.json (US-004 passes → true + notes)
+  - scripts/ralph/progress.txt (this entry + Codebase Patterns additions)
+- Verification:
+  - `npx tsc --noEmit` → exit 0
+  - `npx vitest run tests/propertyCurrentTenant.test.ts` → 8/8 pass
+  - Related test set (propertyCurrentTenant + propertyStatus + propertyPhotoUpload + seedUuidRegression + seed + generators + demoIds) → 66/66 pass
+  - Full suite: 229 pass / 15 fail — same pre-existing Auth0→Firebase baseline. +8 vs. end of US-003 (221/15), exactly matching the 8 new tests added. No regressions.
+- **Learnings for future iterations:**
+  - When a PRD references an enum value that doesn't exist in-schema, don't invent it. Trace how the surrounding code actually represents the concept — in this project, `Contract.status=ACTIVE` is the "tenant is currently renting" signal, NOT `RentalProcess`. Future stories US-005 (auto-transition Property.status on RentalProcess lifecycle) will need to decide how to reconcile — probably by treating "RentalProcess transitioning to ACTIVE" as "Contract being created with status=ACTIVE", since that's the path the codebase already uses to flip Property.status to RENTED.
+  - To prove "no N+1" in a vitest test without Postgres: assert `mock.mock.calls` length on each Prisma model method — see `tests/propertyCurrentTenant.test.ts` last two describe blocks. For the findMany path, `property.count` + `property.findMany` each called once = 2 calls total; `contract.findMany` zero calls (the contracts come from the `include`, not a separate call). For the raw SQL path, `$queryRaw` twice + `contract.findMany` exactly once = 3 calls total, constant regardless of `limit`.
+  - The `include` shape that's cleanest for "grab one relation row and project only specific fields of its nested relation" is `include: { relation: { where, select: { nestedRelation: { select: { ...fields } } }, take, orderBy } }`. `select` inside `include` at the same level is what Prisma expects — no need for a second findMany.
+  - When mocking `prisma` via `vi.mock('../src/config/db', ...)`, the mock must export `default: { model: { method: vi.fn() }, ... }` because `src/config/db` uses `export default prisma`. Miss the `default` wrapper and you get "prisma is undefined" at import time.
 ---

@@ -84,6 +84,16 @@ const options: swaggerJsdoc.Options = {
               description: 'Fotos da propriedade. A primeira foto enviada é marcada como capa (isCover=true).',
               items: { $ref: '#/components/schemas/PropertyImage' },
             },
+            currentTenant: {
+              type: 'object',
+              nullable: true,
+              description: 'Inquilino do contrato ACTIVE atualmente vinculado ao imóvel. `null` quando não há contrato ACTIVE.',
+              required: ['id', 'name'],
+              properties: {
+                id: { type: 'string', format: 'uuid' },
+                name: { type: 'string', example: 'Maria Silva' },
+              },
+            },
           },
         },
         WhatsAppPayload: {

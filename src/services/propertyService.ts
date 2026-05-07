@@ -11,7 +11,31 @@ export type PropertySearchParams = PropertySearchInput;
 
 export type PropertyWithImages = Property & { images: PropertyImage[] };
 
+export type CurrentTenant = { id: string; name: string } | null;
+export type PropertyWithCurrentTenant = Property & {
+  images?: PropertyImage[];
+  currentTenant: CurrentTenant;
+};
 
+// Seleção reutilizada nas queries que expõem currentTenant: somente o contrato
+// ACTIVE mais recente e, dele, só { id, name } do tenant. Evita vazar PII extra
+// na resposta e garante que `include` produza no máximo 1 linha de contrato
+// por property (mesmo se dois ACTIVE coexistirem por um bug transitório).
+const CURRENT_TENANT_CONTRACT_SELECT = {
+  where: { status: 'ACTIVE' as const },
+  select: {
+    tenant: { select: { id: true, name: true } },
+  },
+  take: 1,
+  orderBy: { createdAt: 'desc' as const },
+};
+
+function extractCurrentTenant(
+  contracts: Array<{ tenant: { id: string; name: string } | null }> | undefined,
+): CurrentTenant {
+  if (!contracts || contracts.length === 0) return null;
+  return contracts[0].tenant ?? null;
+}
 
 export const propertyService = {
   async createProperty(
@@ -198,8 +222,35 @@ export const propertyService = {
       `;
       const total = Number(totalResult[0].count);
 
+      // Busca única de contratos ACTIVE para todos os property ids da página —
+      // mantém o contrato de "no N+1": 1 query extra, constante independente
+      // do tamanho da página.
+      const propertyIds = properties.map((p: any) => p.id);
+      const currentTenantByPropertyId = new Map<string, CurrentTenant>();
+      if (propertyIds.length > 0) {
+        const activeContracts = await prisma.contract.findMany({
+          where: { status: 'ACTIVE', propertyId: { in: propertyIds } },
+          select: {
+            propertyId: true,
+            createdAt: true,
+            tenant: { select: { id: true, name: true } },
+          },
+          orderBy: { createdAt: 'desc' },
+        });
+        for (const contract of activeContracts) {
+          if (!currentTenantByPropertyId.has(contract.propertyId)) {
+            currentTenantByPropertyId.set(contract.propertyId, contract.tenant);
+          }
+        }
+      }
+
+      const data = properties.map((p: any) => ({
+        ...p,
+        currentTenant: currentTenantByPropertyId.get(p.id) ?? null,
+      }));
+
       return {
-        data: properties,
+        data,
         meta: {
           total,
           page,
@@ -219,13 +270,22 @@ export const propertyService = {
       include: {
         images: {
           where: { isCover: true },
-          take: 1
-        }
-      }
+          take: 1,
+        },
+        // Single JOIN pulls the ACTIVE contract + tenant name in the same query
+        // as the properties themselves (Prisma batches relation loads into 1 extra
+        // query regardless of page size — no N+1).
+        contracts: CURRENT_TENANT_CONTRACT_SELECT,
+      },
     });
 
+    const data = properties.map(({ contracts, ...rest }) => ({
+      ...rest,
+      currentTenant: extractCurrentTenant(contracts),
+    }));
+
     return {
-      data: properties,
+      data,
       meta: {
         total,
         page,
@@ -235,11 +295,17 @@ export const propertyService = {
     };
   },
 
-  async getPropertyById(id: string): Promise<Property | null> {
-    return prisma.property.findUnique({
+  async getPropertyById(id: string): Promise<PropertyWithCurrentTenant | null> {
+    const property = await prisma.property.findUnique({
       where: { id },
-      include: { images: true }
+      include: {
+        images: true,
+        contracts: CURRENT_TENANT_CONTRACT_SELECT,
+      },
     });
+    if (!property) return null;
+    const { contracts, ...rest } = property;
+    return { ...rest, currentTenant: extractCurrentTenant(contracts) };
   },
 
   async updateProperty(id: string, data: UpdatePropertyInput): Promise<Property | null> {
