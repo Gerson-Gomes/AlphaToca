@@ -1,197 +1,153 @@
 # Ralph Progress Log
-Started: Tue Apr 21 11:19:46 PM -03 2026
+Started: Wed May  6 2026 (feature: fix-seed-uuid-consistency)
 ---
 
 ## Codebase Patterns
+- Canonical demo UUIDs live in `prisma/demoIds.ts` (18 exported constants: `DEMO_LANDLORD_1_ID`, `DEMO_TENANT_1_ID`, `DEMO_ADMIN_ID`, `DEMO_PROPERTY_{SP_1,RJ_1..4}_ID`, `DEMO_IMAGE_{RJ_1..4,RJ2_1..4,RJ3_1..2}_ID`). All pass `z.string().uuid()` and the strict v4 regex `/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i`. Reuse these constants — never regenerate or hardcode ad-hoc UUIDs for demo entities.
+- Pre-existing vitest failures on `main`: `tests/auth.test.ts` (4), `tests/generators.test.ts` (1), `tests/ingestKnowledge.test.ts` (6), `tests/seed.test.ts` (FIXED in US-006 — was a suite error because the `@prisma/client` mock didn't export `Role`/`PropertyType`/`PropertyStatus`/`ModerationStatus`; now uses `vi.mock(import('@prisma/client'), async (importOriginal) => ({ ...actual, PrismaClient: ... }))` so real enums flow through), `tests/userSync.test.ts` (5). Baseline 16 failed / 168 passed (184) before this PRD's work; after all US-001..US-006 it's 16 failed / 212 passed. Do NOT attribute these to your changes.
+- Partial-mock pattern for `@prisma/client` (when the module under test imports both `PrismaClient` and enums like `Role`): use `vi.mock(import('@prisma/client'), async (importOriginal) => { const actual = await importOriginal(); return { ...actual, PrismaClient: class { constructor() { return mockPrismaClient; } } as unknown as typeof actual.PrismaClient }; })`. Spreads the real enums while overriding only the PrismaClient constructor. The factory-only pattern (`vi.mock('@prisma/client', () => ({ PrismaClient: ... }))`) silently strips every other export and breaks any module that references an enum at top level.
 - Prisma client singleton lives in `src/config/db.ts` (reuse via `import prisma from "../config/db"`) — do NOT instantiate a second `PrismaClient`.
-- Tests use `vitest` (config at `vitest.config.ts`). Test files live in `tests/` at repo root, not colocated.
-- `npx tsc --noEmit` should be clean end-to-end (no known noise). If a new error appears, it came from your changes — do NOT treat it as pre-existing. (Prior `seed-knowledge.ts` error was fixed in US-003 by switching to `@langchain/textsplitters`.)
-- `KnowledgeDocument.embedding` is `Unsupported("vector(1536)")` in Prisma — writes/reads must use `$executeRawUnsafe` / `$queryRawUnsafe` with `::vector` casts. Never interpolate user input.
-- `langchain@^1.3.3` is the v1 API — use LCEL `RunnableSequence` / `ChatPromptTemplate`, NOT the deprecated `ConversationalRetrievalChain`.
-- Project uses `dotenv` for secrets; fail-fast on missing keys at boot rather than returning `undefined` deep in a call chain.
-- `.env` `DATABASE_URL` points to Supabase (production) — NEVER run `prisma migrate dev` with default env. Use local Docker DB (`alphatoca_db` on :5433, creds `admin`/`admin_pwd`) via inline env overrides.
-- `prisma migrate dev` refuses to run non-interactively in this harness. Use this two-step workaround: (1) `prisma migrate diff --from-migrations ./prisma/migrations --to-schema-datamodel ./prisma/schema.prisma --shadow-database-url <local_shadow> --script` to emit SQL; (2) write it to `prisma/migrations/<TS>_<name>/migration.sql`; (3) `prisma migrate deploy` with local env overrides to apply.
+- Tests use `vitest` (config at `vitest.config.ts`). Test files live in `tests/` at repo root, not colocated. Controller tests use Supertest against the real Express app — see `tests/auth.test.ts` for the canonical Supertest-vs-app pattern, or `tests/visitController.test.ts` / `tests/webhookController.test.ts` for direct controller calls. `tests/seedUuidRegression.test.ts` shows the full-replacement mock recipe: `vi.mock('../src/middlewares/authMiddleware', () => ({ validateAuthConfig: ()=>{}, checkJwt, authSyncMiddleware, requireRole }))` — avoids running the real module (no Firebase SDK calls) and lets tests attach a synthetic `req.localUser` by id.
+- `/api/properties/search` is PUBLIC (mounted at `app.use('/api', propertyRoutes)` BEFORE `authStack` in `src/app.ts:92-93`), so Zod validation on `landlordId`/`tenantId` is the only gate — tests hitting it don't need auth headers.
+- Supertest is installed (`^7.2.2`) but there is no `@types/supertest` in node_modules. `import request from 'supertest'` works at runtime and `npx tsc --noEmit` is clean because supertest ships its own ambient typings; don't add `@types/supertest` unless tsc actually complains.
+- `npx tsc --noEmit` should be clean end-to-end. If a new error appears, it came from your changes — do NOT treat it as pre-existing.
+- `.env` `DATABASE_URL` points to Supabase (production) — NEVER run `prisma migrate` or `prisma db seed` with default env. Use local Docker DB (`alphatoca_db` on :5433, creds `admin`/`admin_pwd`) via inline env overrides.
+- `prisma migrate dev` refuses to run non-interactively in this harness. Use the two-step workaround: (1) `prisma migrate diff --from-migrations ./prisma/migrations --to-schema-datamodel ./prisma/schema.prisma --shadow-database-url <local_shadow> --script` to emit SQL; (2) write it to `prisma/migrations/<TS>_<name>/migration.sql`; (3) `prisma migrate deploy` with local env overrides to apply. (Only relevant if a schema change is needed — this PRD explicitly does NOT change the schema.)
 - Shadow DB (`alphatoca_shadow`) exists on the local Docker postgres for migration diffs; pgvector extension already enabled on both local DBs.
-- `KnowledgeDocument` now has ingestion-tracking fields: `sourcePath`, `chunkIndex`, `contentHash`, `createdAt`, `updatedAt`. Compound unique index on `(sourcePath, chunkIndex)` — use this for upserts. Index on `contentHash` for hash-skip lookups.
-- The existing `prisma/seed.ts` + `prisma/generators.ts` insert `KnowledgeDocument` rows via `$executeRawUnsafe` without the new NOT NULL columns — they will fail at runtime post-migration. US-003 did NOT fix this (the real RAG ingestion path is `npm run ingest:knowledge`); the generator path is still broken. If anyone runs `npm run seed`, update `prisma/generators.ts::generateKnowledgeDocuments` to supply `source_path` / `chunk_index` / `content_hash` / `updated_at`, then match in `prisma/seed.ts`.
-- Text splitting is served by `@langchain/textsplitters` (separate package, added as a dep in US-003). `langchain@^1.3.3` no longer re-exports `RecursiveCharacterTextSplitter` from `langchain/text_splitter`. Import from `"@langchain/textsplitters"` everywhere.
-- Ingestion script pattern: keep a pure `runIngestion(deps)` function (deps object with `{ prisma, embedder, splitter, listMarkdownFiles, readFile }`) + a thin CLI wrapper that constructs real `OpenAIEmbeddings` / `RecursiveCharacterTextSplitter` / prisma singleton. Makes the hash-skip / insert / update / delete logic trivial to unit-test with mocked deps, and mirrors how US-004+ retriever/chain services should be structured.
-- Vector literals for pgvector go in as a string of the form `"[v1,v2,...]"` passed to `$executeRawUnsafe` with `$N::vector` cast — never interpolate the array directly into the SQL string.
-- Retrieval uses `$queryRawUnsafe` with the cosine-distance operator `embedding <=> $1::vector`. Compute similarity as `1 - distance` (pgvector returns distance, NOT similarity). `score >= SIMILARITY_THRESHOLD` is the gate for "trust the LLM answer" vs. "hand off to a human".
-- Services that need LLM/embedding clients should cache the constructed client in a module-level `let defaultDepsCache = null` + `getDefaultDeps()` helper. That way the module can be imported in tests without requiring `OPENAI_API_KEY`, but production callers still get a warm singleton.
-- Prisma raw returns of numeric columns (e.g. pgvector distance) can come back as JS `number` OR as `string` depending on the driver — always coerce with `typeof x === "string" ? parseFloat(x) : x` at the boundary.
-- To load the "last N" messages ordered ASC in a single call: use `orderBy: { timestamp: "desc" }, take: N` then `.slice().reverse()` in JS. `orderBy: asc, take: N` loads the FIRST N (oldest), not the most recent.
-- `@langchain/core` message classes (`HumanMessage`, `AIMessage`, `SystemMessage`) have a `.content` field that can be `string` OR an array of content blocks (e.g. `[{ type: "text", text: "..." }, ...]`) — always normalize LLM output through a helper that handles both shapes before returning user-facing strings.
-- Business-plan tone rules live in `documentation/buisness_plan.md` §6 — any chatbot-facing prompt should encode: profissional/acolhedor/confiável, base-apenas-no-contexto, handoff em litígios/exceções, PT-BR, respostas breves para WhatsApp.
-- `whatsappService.sendMessage(to, text)` now ONLY sends to Meta and returns the raw response (`SendMessageResponse` with `messages[0].id`). It no longer persists the outbound Message or looks up user/session. All persistence is owned by the worker (`handleWhatsappMessage`). If you add a new caller, you must persist the outbound yourself.
-- `whatsappWorker.ts` exports a pure `handleWhatsappMessage(payload, deps)` function (deps = `{ prisma, sendMessage, generateAnswer }`) plus the BullMQ `Worker` wrapper. Test the handler directly with mocked deps; tests must also `vi.mock('ioredis')` and `vi.mock('bullmq')` because the module constructs `new IORedis` + `new Worker` at import time for the production path.
-- Session lookup order in the worker: find the *latest* `ChatSession` for the tenant regardless of status (`orderBy: startedAt desc`). If none, create ACTIVE_BOT. Always persist the inbound Message. If the session's status is not ACTIVE_BOT (i.e. WAITING_HUMAN or RESOLVED), return early without calling the RAG chain or sending anything. This is how the human-handoff mode keeps working even after the bot flipped the flag.
-- LangChain v1 structured output: call `new ChatAnthropic({...}).withStructuredOutput(zodSchema, { name: "..." })` — returns a `Runnable<BaseLanguageModelInput, z.infer<typeof schema>>`. Invoke with a `BaseMessage[]` (SystemMessage + HumanMessage). Zod is already installed at repo root. This replaces the old "ask for JSON in prompt then JSON.parse" pattern.
-- `AiExtractedInsight` has no `@@unique` on `(rentalProcessId, insightKey)` — cannot use prisma `.upsert({ where: ... })` on it. Pattern: `findFirst({ where: { rentalProcessId, insightKey } })` -> `update({ where: { id } })` if found, `create(...)` otherwise. Skip the update when `existing.insightValue === newValue` so you don't bump `extractedAt` unnecessarily.
-- "Open RentalProcess for tenant" = `findFirst({ where: { tenantId, status: { not: "CLOSED" } }, orderBy: { createdAt: "desc" } })`. Only create a new TRIAGE process if this returns null — don't filter to just TRIAGE, since a tenant mid-VISIT_SCHEDULED should still have their insights attached to the same process, not a fresh TRIAGE one.
-- Worker-side fire-and-forget hook pattern: accept a `scheduleMicrotask?: (task: () => void) => void` in the deps object; default to the global `queueMicrotask`. Tests replace it with a queue they can drain manually (`scheduledMicrotasks.push; runScheduledMicrotasks()`). Avoid hooking via a real `queueMicrotask` in tests — timing races make assertions flaky.
-- When wiring a post-reply task like lead extraction, gate on `!ragError` so apologies don't feed garbage into the extractor. The handoff case (low score, valid user message) DOES still extract — only actual chain errors skip.
-- For one-shot CLI eval/smoke-test scripts (no unit tests), you can call `generateAnswer` with a synthetic sessionId like `eval-${Date.now()}-${rand}`. `prisma.message.findMany` with a non-existent sessionId returns `[]` — no need to create a throwaway ChatSession row. Don't forget `await prisma.$disconnect()` in `.finally()` or the node process hangs.
+- Project name is **I-Moveis** (the repo directory is still named `AlphaToca-Backend`, which is the obsolete legacy name — use I-Moveis in user-facing text and new docs).
+- Zod UUID validators are spread across 6 files under `src/utils/`: `contractValidation.ts`, `proposalValidation.ts`, `visitValidation.ts`, `propertyValidation.ts`, `searchValidation.ts`, `chatValidation.ts`. This PRD keeps all of them strict — any attempt to downgrade to `z.string().min(1)` is a regression.
+- Demo seed entities live in `prisma/demoData.ts` and are inserted via `prisma/seed.ts`. The `/users/me` endpoint returns whatever `id` is in the DB, so seed ids MUST satisfy every downstream validator.
+- `prisma/demoData.ts` image `url` fields are template literals referencing the `DEMO_PROPERTY_RJ_*_ID` constants (e.g. `` `http://10.0.2.2:3000/uploads/${DEMO_PROPERTY_RJ_1_ID}/0001.png` ``). The on-disk folders under `uploads/` are named with the same property UUIDs, not with legacy `prop-demo-rj-*` slugs. If you change a property id constant, rename the matching `uploads/<uuid>/` directory — the static server at `app.use('/uploads', express.static(...))` (src/app.ts:46) resolves URL path segments directly to filesystem paths.
+- Prior archived run (`rag-implementation`) lives in `archive/2026-05-06-rag-implementation/` — consult it for pre-existing patterns (RAG pipeline, LangChain v1 LCEL, pgvector raw SQL, etc.) that aren't relevant to this PRD but are still part of the codebase.
+
+## Feature goal (this run)
+Replace the hardcoded non-UUID demo ids in `prisma/demoData.ts` (`user-demo-landlord-1`, `prop-demo-sp-1`, `img-demo-rj-1`, etc.) with canonical UUID v4 literals exposed as exported constants in a new `prisma/demoIds.ts`. Keep the Prisma schema (`id String`) and every `z.string().uuid()` validator unchanged. Document the drop+re-seed flow and add an E2E regression test that proves an authenticated landlord can list their own properties via `/properties/search?landlordId={id}`.
 
 ---
 
-## 2026-04-21 - US-001
-- Implemented `src/config/rag.ts` with typed constants: `EMBEDDING_MODEL`, `EMBEDDING_DIMS`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `RETRIEVER_K`, `SIMILARITY_THRESHOLD`.
-- Added `getOpenAIApiKey()`, `getAnthropicApiKey()`, and `assertRagSecrets()` — each throws with a clear message if the env var is missing/empty.
-- Files changed: `src/config/rag.ts` (new), `scripts/ralph/prd.json` (new), `scripts/ralph/progress.txt` (this file).
+## 2026-05-06 21:12 - US-001
+- Implemented: new file `prisma/demoIds.ts` exporting 18 canonical UUID v4 string-literal constants:
+  - users (3): `DEMO_LANDLORD_1_ID`, `DEMO_TENANT_1_ID`, `DEMO_ADMIN_ID`
+  - properties (5): `DEMO_PROPERTY_SP_1_ID`, `DEMO_PROPERTY_RJ_1_ID` .. `DEMO_PROPERTY_RJ_4_ID`
+  - images (10): `DEMO_IMAGE_RJ_1_ID` .. `DEMO_IMAGE_RJ_4_ID`, `DEMO_IMAGE_RJ2_1_ID` .. `DEMO_IMAGE_RJ2_4_ID`, `DEMO_IMAGE_RJ3_1_ID`, `DEMO_IMAGE_RJ3_2_ID`
+- Added `tests/demoIds.test.ts` with 38 assertions:
+  - presence + string type for every expected constant
+  - `z.string().uuid().safeParse(...).success === true` for each
+  - strict UUID v4 regex `/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i` for each
+  - uniqueness across all 18 values
+- Quality checks:
+  - `npx vitest run tests/demoIds.test.ts` → 38 passed
+  - `npx tsc --noEmit` → clean
+  - `npx vitest run` → 16 pre-existing failures (auth/generators/ingestKnowledge/seed/userSync), 206 passed — identical to main minus my 38 new passing tests (confirmed by temp-removing my files and re-running: 16 failed / 168 passed)
+- Files changed:
+  - `prisma/demoIds.ts` (new)
+  - `tests/demoIds.test.ts` (new)
 - **Learnings for future iterations:**
-  - The repo already has `@langchain/openai`, `@langchain/anthropic`, `@langchain/core`, and `langchain` v1.3.3 installed — no need to add deps for US-003 through US-008.
-  - `src/config/` currently holds `db.ts` (Prisma singleton) and `swagger.ts`. Adding `rag.ts` there follows the existing pattern.
-  - Constants are exported as `as const` literal types so downstream consumers get narrow types (e.g., the exact embedding model string).
-  - Fail-fast secret accessors are functions (not module-level throws) so importing `src/config/rag.ts` in a test file does NOT require the env vars to be set. Call `assertRagSecrets()` at worker boot / script entry only.
-  - Full test suite (43 tests across 7 files) runs in ~3.4s via `npm test`.
+  - PRD prose said "11 property image ids" but enumerated list has only 10 (RJ_1-4 + RJ2_1-4 + RJ3_1-2). `grep -cE "^\s*id: '(user-demo|prop-demo|img-demo)" prisma/demoData.ts` returns 18 (3+5+10). I followed the enumerated list, which matches the actual `prisma/demoData.ts`. Future stories that import all constants should expect exactly 18.
+  - UUIDs must match strict v4 (third group starts with `4`, fourth with `[89ab]`). Zod's `z.string().uuid()` is lenient (accepts any version), but US-006 pins a strict v4 regex — so pick v4 shape from day one. I used deterministic literal patterns (`11111111-...`, `a0000001-...`, `b0000001-...`, `c0000001-...`) so humans can eyeball the entity type from the first group.
+  - `tests/seed.test.ts` currently fails at import time because the `@prisma/client` vitest mock in that file doesn't export the `Role` enum, and `prisma/demoData.ts` uses `Role.LANDLORD` at module top level. This will need fixing in US-006 (which extends `tests/seed.test.ts`). The fix pattern is to use `vi.mock(import("@prisma/client"), async (importOriginal) => { const actual = await importOriginal(); return { ...actual, PrismaClient: class { ... } }; })`.
+  - `vitest` `it.each([...] as const)('%s', (name) => { ... })` is idiomatic here — each tuple element becomes a separate test case, keeping failure output granular.
 ---
 
-## 2026-04-21 - US-002
-- Extended `KnowledgeDocument` in `prisma/schema.prisma` with `sourcePath`, `chunkIndex`, `contentHash`, `createdAt` (default now), `updatedAt` (@updatedAt). Added `@@unique([sourcePath, chunkIndex])` and `@@index([contentHash])`.
-- Generated migration `prisma/migrations/20260422022358_add_rag_ingestion_tracking/migration.sql` via `prisma migrate diff` (since `migrate dev` can't run non-interactively in this harness).
-- Applied migration via `prisma migrate deploy` against local Docker DB (`alphatoca_db` at :5433). Verified columns + indexes via `\d knowledge_documents`.
-- `npx prisma generate` produces clean client; `npx tsc --noEmit` has only the pre-existing `seed-knowledge.ts` error; all 43 tests still pass.
-- Files changed: `prisma/schema.prisma`, `prisma/migrations/20260422022358_add_rag_ingestion_tracking/migration.sql` (new), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+## 2026-05-06 21:18 - US-002
+- Implemented: rewrote `prisma/demoData.ts` to import all 18 constants from `./demoIds` and use them for every id, landlordId, and propertyId field. All legacy literal ids (`user-demo-*`, `prop-demo-*`, `img-demo-*`) were removed — `grep -E "(user-demo-|prop-demo-|img-demo-)" prisma/demoData.ts` returns no matches (exit 1).
+- Cross-references are consistent: all 5 entries in `demoProperties` use `landlordId: DEMO_LANDLORD_1_ID`, and every `propertyId` in `demoPropertyImages` references the matching `DEMO_PROPERTY_RJ_*_ID`.
+- Email fields (`landlord@imoveis.com`, `admin@alphatoca.com`) are intact. `firebaseUid` env-var fallbacks (`LANDLORD_FIREBASE_UID`, `TENANT_FIREBASE_UID`, `ADMIN_FIREBASE_UID`) are unchanged. `prisma/schema.prisma` is untouched.
+- Image `url` fields were converted to template literals that interpolate the property UUID constant (e.g. `` `http://10.0.2.2:3000/uploads/${DEMO_PROPERTY_RJ_1_ID}/0001.png` ``). The corresponding on-disk directories under `uploads/` were renamed to match: `uploads/prop-demo-rj-1` → `uploads/b0000001-0000-4000-8000-000000000001`, `uploads/prop-demo-rj-2` → `uploads/b0000002-...`, `uploads/prop-demo-rj-3` → `uploads/b0000003-...`. Static file serving (`src/app.ts:46`) resolves URL segments directly to disk, so URLs still return 200.
+- Files changed: `prisma/demoData.ts` (rewritten), `uploads/prop-demo-rj-{1,2,3}/` → `uploads/<DEMO_PROPERTY_RJ_{1,2,3}_ID>/` (renamed on disk, git tracks as rename).
+- Quality checks:
+  - `npx tsc --noEmit` → clean
+  - `npx vitest run` → 16 failed / 206 passed — identical to the pre-existing baseline documented in the Codebase Patterns section. No new failures.
 - **Learnings for future iterations:**
-  - `prisma migrate dev` fails with "non-interactive environment" error in this harness even with `--create-only`. Workaround: `prisma migrate diff --from-migrations ... --to-schema-datamodel ... --shadow-database-url <local_shadow> --script` → write SQL to a timestamped migration dir → `prisma migrate deploy`. Needed a pre-existing shadow DB (`alphatoca_shadow`) with pgvector enabled.
-  - The local Docker Postgres (`alphatoca_db` on :5433, creds `admin`/`admin_pwd`, DB `alphatoca`) starts empty — needed `CREATE EXTENSION IF NOT EXISTS vector;` before the init migration will apply.
-  - The Supabase `DATABASE_URL` in `.env` is production — always override to local via inline `DATABASE_URL=... DIRECT_URL=...` when running migration commands.
-  - `prisma migrate diff` emits a redundant `CREATE EXTENSION IF NOT EXISTS "vector";` at the top of cross-migration diffs; safe to drop from the final migration file since the init migration already creates it.
-  - The existing `prisma/seed.ts` / `prisma/generators.ts` path inserts knowledge docs via `$executeRawUnsafe` without the new NOT NULL columns — the seed will break at runtime until US-003 updates it (or supplies dummy values). No typecheck impact because the path uses raw SQL, not the typed Prisma client.
+  - The AC "grep -E '(user-demo-|prop-demo-|img-demo-)' prisma/demoData.ts returns no matches" is strict — it catches URL strings too, not just id fields. The fix is to express URLs with template literals that reference the UUID constants, and rename the on-disk `uploads/<slug>/` directories to the new UUIDs. US-003's re-seed verification doesn't fetch those URLs, so there's no runtime breakage.
+  - `uploads/` is served statically from `src/app.ts:46` (`app.use('/uploads', express.static(path.join(__dirname, '../uploads')))`). The URL path segment after `/uploads/` is a direct filesystem lookup — no id translation layer. So directory names must exactly match whatever's in the DB `url` column.
+  - Only one file in the repo (`prisma/demoData.ts`) referenced the legacy `prop-demo-rj-*` slugs (confirmed via `grep -r prop-demo-rj`). Renaming the folders was safe.
+  - `prisma/seed.ts` did not need to change — it imports `demoUsers`, `demoProperties`, `demoPropertyImages` and passes them verbatim to `createMany`. Whatever id shape `demoData.ts` exports is what the DB gets.
 ---
 
-## 2026-04-21 - US-003
-- Implemented `src/scripts/ingestKnowledge.ts`:
-  - Walks `documentation/` recursively, collects all `.md` files (sorted, deterministic order).
-  - Splits each file with `RecursiveCharacterTextSplitter` from `@langchain/textsplitters` (new dep) using `CHUNK_SIZE` / `CHUNK_OVERLAP` from `src/config/rag.ts`.
-  - Computes `sha256(content)` per chunk as `content_hash`.
-  - Upserts by `(source_path, chunk_index)`: insert if missing, skip if hash matches, update if hash differs. Deletes rows whose `(source_path, chunk_index)` key no longer appears.
-  - Embeddings written via `$executeRawUnsafe` with `$N::vector` cast (vector literal `[v1,v2,...]`).
-  - Exports a pure `runIngestion(deps)` + `hashContent` / `listMarkdownFiles` / `buildChunksForFile` so the CLI wrapper at the bottom is thin and the core logic is unit-testable.
-  - Logs summary line `files=X inserted=Y updated=Z skipped=W deleted=V`.
-- Added npm script: `"ingest:knowledge": "ts-node src/scripts/ingestKnowledge.ts"`.
-- New unit test `tests/ingestKnowledge.test.ts` covers: hash-skip when DB already matches, insert-all when DB empty, update-on-hash-delta, delete-stale, and a mixed insert/update/skip/delete run — all with mocked embedder + mocked Prisma (only `$queryRawUnsafe` and `$executeRawUnsafe` surfaces used). 50 tests green (was 43).
-- Fixed pre-existing typecheck error in `src/scripts/seed-knowledge.ts` by pointing the import at `@langchain/textsplitters` (the old `langchain/text_splitter` path was removed in langchain v1). `npx tsc --noEmit` is now clean.
-- Files changed: `src/scripts/ingestKnowledge.ts` (new), `src/scripts/seed-knowledge.ts` (import fix), `tests/ingestKnowledge.test.ts` (new), `package.json` (dep + script), `package-lock.json`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+## 2026-05-06 21:25 - US-003
+- Implemented: proved the new seed writes canonical UUIDs end-to-end against the real local Docker Postgres and added a README section documenting the drop+re-seed flow.
+- Re-seed command used (inline DATABASE_URL override, never against Supabase):
+  `DATABASE_URL='postgresql://admin:admin_pwd@127.0.0.1:5433/alphatoca?schema=public' DIRECT_URL='postgresql://admin:admin_pwd@127.0.0.1:5433/alphatoca?schema=public' npm run seed`
+  Output: `Starting seed... Clearing database... Generating Users... Inserting Demo Properties... Inserting Property Images... Generating Chat Sessions... Generating Messages... Generating Knowledge Documents... Seeding completed successfully.` (no errors).
+- Verification one-liner (checks BOTH users and properties against strict v4 regex):
+  `npx tsx -e "import prisma from './src/config/db'; Promise.all([prisma.user.findMany(), prisma.property.findMany()]).then(([us, ps]) => { const re=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i; const badU=us.filter(u=>!re.test(u.id)); const badP=ps.filter(p=>!re.test(p.id)); if(badU.length||badP.length){console.error('NON-UUID users:',badU.map(u=>u.id),'properties:',badP.map(p=>p.id)); process.exit(1);} console.log('OK users:',us.length,'properties:',ps.length); process.exit(0); });"`
+  Output: `OK users: 51 properties: 5` — exit 0.
+- Spot check via psql confirmed the demo landlord id is `11111111-1111-4111-8111-111111111111` (matches `DEMO_LANDLORD_1_ID`) and the five property rows match `DEMO_PROPERTY_{SP_1,RJ_1..4}_ID` exactly, all with `landlord_id = 11111111-...`.
+- README.md gained a new "Re-seeding after the UUID migration" section appended after the interfaces block. It contains the full drop+re-seed command (`prisma migrate reset --force` with inline env) AND the lighter `npm run seed`-only alternative (since the seed already calls `deleteMany()` on every table), plus the verification one-liner and the explicit warning to never run migrate against the Supabase DATABASE_URL.
+- Files changed: `README.md` (added re-seed section), `scripts/ralph/progress.txt` (this entry), `scripts/ralph/prd.json` (US-003 passes: true + notes).
+- Quality checks:
+  - `npx tsc --noEmit` → clean
+  - `npx vitest run` → 16 failed / 206 passed — identical to the pre-existing baseline. No new failures.
 - **Learnings for future iterations:**
-  - `langchain@^1.3.3` dropped the `langchain/text_splitter` module path. Text splitters live in the standalone `@langchain/textsplitters` package now — `RecursiveCharacterTextSplitter`, `MarkdownTextSplitter`, `CharacterTextSplitter`, etc. are all exported from its root.
-  - The OpenAIEmbeddings constructor in `@langchain/openai` v1 accepts `{ apiKey, model }` (old `openAIApiKey` / `modelName` are deprecated aliases but still work).
-  - For unit-testing ingestion/chain code, structure the module as a pure `runX(deps)` function with an explicit deps object instead of importing the singleton `prisma` + real LLM clients inside the logic. Then the CLI wrapper at module bottom builds the real deps and calls `runX`. Reuse this pattern for US-004 (retriever) and US-005 (chain).
-  - Vector-column writes via Prisma raw: pass the array as a string literal `"[v1,v2,...]"` and cast with `$N::vector` in the SQL. Do NOT use `$executeRaw` tagged-template with a `number[]` — it will not coerce correctly.
-  - When mocking `$queryRawUnsafe` in vitest, cast the `vi.fn` back to the Prisma method type (`as unknown as IngestDeps["prisma"]["$queryRawUnsafe"]`) so `strict: true` TS compilation passes despite the generic.
-  - The ingestion script is idempotent: second run on unchanged files yields `inserted=0 updated=0 skipped=N deleted=0` — verified by the `skips chunks whose contentHash matches` test. If US-008's eval script ever wants a "fresh" ingestion, have it delete by `source_path` first rather than relying on re-runs doing something.
+  - Local Docker container name is `alphatoca_db`, but the Postgres database *inside* it is literally `alphatoca` (not `alphatoca_db`). The correct connection string is `postgresql://admin:admin_pwd@127.0.0.1:5433/alphatoca?schema=public`. Progress.txt said "alphatoca_db on :5433" and that was shorthand for the container, not the DB — don't paste it into a connection string verbatim.
+  - `prisma migrate reset --force` is currently BROKEN against a fresh local DB because migration `20260505153136_add_rental_process_status_flow` is a byte-for-byte duplicate of `20260504204911_add_contract_logic` (both `CREATE TYPE "ProposalStatus"`). It aborts with `ERROR: type "ProposalStatus" already exists`. This is a pre-existing bug on `main`, introduced by Heloiza Mendes in commit `45f7d1e` on 2026-05-05, and is NOT caused by this PRD. Fix would be making one of the migrations use `CREATE TYPE IF NOT EXISTS` or deleting the duplicate — out of scope here. As a workaround, the README documents the lighter `npm run seed`-only path for machines whose schema is already up to date, which is the common case.
+  - `prisma migrate deploy` alone fails with the same `ProposalStatus` error on a fresh DB, but will succeed on a DB that's already through migration 20260504204911 (since `_prisma_migrations` marks everything else applied).
+  - `property` columns in Postgres use snake_case (`landlord_id`, `created_at`), not the Prisma camelCase (`landlordId`, `createdAt`). When spot-checking via psql, use the DB column names.
+  - `npm run seed` uses `ts-node` directly, so it picks up the env vars from the inline `DATABASE_URL=... npm run seed` prefix without needing a `.env` override. No need to edit `.env` during local re-seeds.
 ---
 
-## 2026-04-21 - US-004
-- Implemented `src/services/ragRetrieverService.ts`:
-  - Exports `retrieveRelevantChunks(query, overrideDeps?): Promise<RetrievedChunk[]>` where `RetrievedChunk = { id, content, title, score }`.
-  - Embeds the query via `OpenAIEmbeddings` using the same `EMBEDDING_MODEL` as ingestion.
-  - Single `$queryRawUnsafe` against `knowledge_documents` using pgvector cosine: `SELECT id, content, title, (embedding <=> $1::vector) AS distance ... WHERE embedding IS NOT NULL ORDER BY embedding <=> $1::vector ASC LIMIT $2`.
-  - Score is `1 - distance` (distance → similarity). Blank/empty-string queries short-circuit to `[]` without embedding or hitting the DB.
-  - Exposes a `RetrieverDeps` interface (`{ prisma, embedder, k? }`) with `QueryEmbedder` = `{ embedQuery(text) }` for easy mocking; default deps (real OpenAI client + prisma singleton) are lazily built and cached so importing the module does NOT require `OPENAI_API_KEY`.
-- Unit test `tests/ragRetrieverService.test.ts` (7 new cases) verifies:
-  - Blank query returns `[]` without touching embedder/prisma.
-  - Query embedding is forwarded; SQL contains `embedding IS NOT NULL`, `ORDER BY embedding <=>`, `LIMIT`.
-  - Vector literal param is the `[v1,v2,...]` string and default K is `RETRIEVER_K`.
-  - Ordering returned by the SQL query is preserved and scores are descending (since distance asc).
-  - K limit is honored and a per-call `k` override via deps works.
-  - String distances from the pgvector driver are coerced via `parseFloat`.
-- Files changed: `src/services/ragRetrieverService.ts` (new), `tests/ragRetrieverService.test.ts` (new), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
-- Typecheck (`npx tsc --noEmit`) is clean; `npm test` green at 57 tests across 9 files (was 50 across 8).
+## 2026-05-06 21:40 - US-004
+- Implemented: wrote `tasks/audit-uuid-validators.md` cataloguing every `z.string().uuid()` call across the 6 validator files listed in the PRD, with file:line references and a strict/verified verdict for each.
+- Inventory totals: **20 UUID validators, all strict**.
+  - `contractValidation.ts`: 3 (lines 5, 6, 7 — `propertyId`, `tenantId`, `landlordId`, all in `createContractSchema`).
+  - `proposalValidation.ts`: 5 (lines 5, 6 in `createProposalSchema`; lines 16, 17, 18 in `listProposalsQuerySchema`).
+  - `visitValidation.ts`: 7 (lines 20, 21, 22 in `createVisitSchema`; lines 40, 41, 42 in `listVisitsQuerySchema`; line 49 in `availabilityQuerySchema`).
+  - `propertyValidation.ts`: 1 (line 9 in `createPropertySchema`).
+  - `searchValidation.ts`: 2 (lines 39, 40 in `propertySearchSchema`).
+  - `chatValidation.ts`: 2 (lines 5, 12 in `sendMessageSchema` / `createSessionSchema`).
+- Regression guard: `grep -rn "z\\.string\\(\\)\\.(min|nonempty)" src/utils/` returned 8 hits — all on non-id fields (`name`, `title`, `description`, `address`, `content`). No id validator was downgraded.
+- One AC-vs-file discrepancy documented in the audit doc: PRD AC expected 6 validators in `proposalValidation.ts` ("propertyId, tenantId, landlordId and their optional variants"), but the file has 5 — `createProposalSchema` omits `landlordId` (derived server-side from the property). No regression; the AC prose over-counted by one.
+- No validator needed relaxing — the Open Questions section of `tasks/prd-fix-seed-uuid-consistency.md` was left as-is.
+- Files changed: `tasks/audit-uuid-validators.md` (new), `scripts/ralph/progress.txt` (this entry), `scripts/ralph/prd.json` (US-004 `passes: true` + notes).
+- Quality checks:
+  - `npx tsc --noEmit` → clean
+  - (No source changes, so `npx vitest run` was not re-run for this story; pre-existing baseline of 16 failed / 206 passed stands.)
 - **Learnings for future iterations:**
-  - Repo already had `@langchain/openai` installed — `OpenAIEmbeddings` exposes `embedQuery(text)` for single strings (distinct from `embedDocuments(texts)` which is batch). US-005 should reuse the same `QueryEmbedder` shape if it needs to embed the session's last user turn.
-  - Prefer `$queryRawUnsafe` with two explicit params (vector literal as `$1`, K as `$2`) over tagged-template `$queryRaw`: pgvector needs `$1::vector` casts and the tagged template won't emit the cast cleanly. Safe because both params are non-user-controlled (vector comes from OpenAI, K is a numeric constant).
-  - Place the `WHERE embedding IS NOT NULL` filter BEFORE the `ORDER BY embedding <=> $1::vector` so the planner can skip null rows; also guards against ingestion-in-flight rows where embedding hasn't been written yet.
-  - For US-005: the retriever returns chunks in descending-score order, so checking `chunks[0].score >= SIMILARITY_THRESHOLD` is sufficient for the handoff gate — no need to sort or max-scan.
-  - US-005's chain service should follow the same deps-injection + cached-default pattern so its unit tests can mock both the retriever AND the Claude LLM without env vars.
+  - Zod's `z.string().uuid()` is lenient about UUID version — it accepts v1, v3, v4, v5. The strict v4 regex `/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i` (used in `tests/demoIds.test.ts` and pinned for US-006) is a stronger check than the validators in production. That's fine: the seed generates v4 literals, so any id that reaches a validator via `/users/me` or `/properties/search?landlordId=` is already v4-shaped. If a validator ever needs to forbid non-v4 UUIDs (e.g. accept only v4 from external callers), upgrade it to `z.string().regex(UUID_V4_REGEX)` rather than trusting `.uuid()`.
+  - The AC phrase "propertyId, tenantId, landlordId and their optional variants" for `proposalValidation.ts` over-counts by one: `createProposalSchema` has no `landlordId` (it's derived from the property's `landlordId` server-side). When reading PRD ACs that enumerate fields-per-file, always cross-check against the actual file — PRD prose can drift.
+  - All 7 `visitValidation.ts` UUID calls are on id fields (`propertyId`, `tenantId`, `rentalProcessId`, `landlordId`). `rentalProcessId` is the only non-actor id; everything else is a user or property reference. Keep them all strict — `rentalProcessId` comes from `RentalProcess.id` which is also UUID-shaped (Prisma `id String @id @default(uuid())` or similar, verified indirectly because every id passing through these validators in production is UUID).
+  - `grep -rn "z\\.string\\(\\)\\.(min|nonempty)" src/utils/` is a cheap regression guard to bake into future PRDs: any new hit that is on an id field (fields ending in `Id` or named exactly `id`) is a likely validator downgrade and should be flagged immediately.
 ---
 
-## 2026-04-21 - US-005
-- Implemented `src/services/ragChainService.ts`:
-  - Exports `generateAnswer({ sessionId, userMessage }, overrideDeps?): Promise<{ answer, handoff, topScore, usedChunkIds }>`.
-  - Calls `retrieveRelevantChunks` (via injected `Retriever`) and gates: if `chunks.length === 0 || chunks[0].score < SIMILARITY_THRESHOLD`, returns the Portuguese fallback + `handoff: true` WITHOUT calling the LLM.
-  - Loads the last N (default 10) messages for the session via `prisma.message.findMany({ orderBy: { timestamp: "desc" }, take: 10 })` then `.reverse()` — yields ASC chronological order in the final prompt. Uses `select: { senderType, content }` to stay lean.
-  - Formats history: BOT -> `AIMessage`, TENANT/LANDLORD -> `HumanMessage`.
-  - Builds a Portuguese system prompt encoding §6 of `documentation/buisness_plan.md`: profissional/acolhedor/confiável, base-apenas-no-contexto, handoff em litígios/exceções, PT-BR, respostas breves. Retrieved chunks are concatenated into the system prompt with `[#N — title (score=X.XXX)]` headers via `formatContext`.
-  - Constructs `ChatAnthropic` with `model: "claude-sonnet-4-6"` and `temperature: 0.2`. Deps-injection + lazy `getDefaultDeps()` cache so the module imports cleanly in tests without `ANTHROPIC_API_KEY`.
-  - Handles both string- and content-block-array LLM responses via `extractTextContent` helper.
-- New unit test `tests/ragChainService.test.ts` (13 cases) covers: no-chunk handoff, low-score handoff, high-score LLM path, history inclusion + ASC ordering, history limit query shape (desc + take 10), context injected in system prompt, array-content-block LLM response parsing, per-call `similarityThreshold` override, plus `formatContext` / `buildSystemPrompt` / `historyToMessages` helpers. 70 tests green (was 57).
-- `npx tsc --noEmit` clean; `npm test` green.
-- Files changed: `src/services/ragChainService.ts` (new), `tests/ragChainService.test.ts` (new), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+## 2026-05-06 21:32 - US-005
+- Implemented: new `tests/seedUuidRegression.test.ts` with 3 cases that exercise the real `/api/users/me` → `/api/properties/search` chain via Supertest against `import app from '../src/app'`.
+- Test 1 (`GET /api/users/me`): sends `Authorization: Bearer valid-landlord-token` and asserts status 200, body.id is a string, passes `z.string().uuid().safeParse(...).success`, passes the strict v4 regex, AND equals `DEMO_LANDLORD_1_ID` from `prisma/demoIds.ts`. Proves `/users/me` returns a validator-clean UUID when the seed is correct.
+- Test 2 (`GET /api/properties/search?landlordId={id}`): extracts the id from Test 1's response, fires the search with it, asserts 200 and `response.body.data.length >= 1`. Also asserts the mocked `propertyService.searchProperties` was called with `landlordId: DEMO_LANDLORD_1_ID` — confirms the Zod-validated landlordId reached the service layer unchanged.
+- Test 3 (`GET /api/properties/search?landlordId=user-demo-landlord-1`): fires the search with the legacy non-UUID id and asserts 400 with `code: 'VALIDATION_ERROR'`. Also asserts the mocked service was NOT called — proves `searchValidation.ts:39` (`landlordId: z.string().uuid().optional()`) stayed strict and short-circuits before the controller reaches the service.
+- Mock strategy (follows the `tests/auth.test.ts` Supertest pattern, but cleaner): `vi.mock('../src/middlewares/authMiddleware', () => ({ validateAuthConfig:()=>{}, checkJwt, authSyncMiddleware, requireRole }))` — a full-replacement factory that never touches the real module (no Firebase SDK calls during import). `checkJwt` accepts `Bearer valid-landlord-token` and rejects everything else with the project's standard 401 envelope. `authSyncMiddleware` synthesizes `req.localUser = { id: DEMO_LANDLORD_1_ID, firebaseUid, name, email, phoneNumber, role: 'LANDLORD', ... }`. `requireRole` returns a pass-through middleware (not needed by these 3 cases but required for the module contract since userRoutes imports it).
+- Separately mocks `../src/services/propertyService` (NOT `@prisma/client` — the PRD explicitly forbids a fully mocked Prisma client). Wraps `actual.propertyService` and swaps only `searchProperties`, which returns 2 demo-UUID properties when `params.landlordId === DEMO_LANDLORD_1_ID` and empty otherwise. Keeps Zod validation (`propertySearchSchema.parse(req.query)`) fully in the request pipeline.
+- Firebase env vars (`FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`) are defaulted to stubs at test-file top before `import app` — harmless because `src/config/firebase.ts` only warns if missing and the mocked authMiddleware replaces all runtime usage.
+- Files changed: `tests/seedUuidRegression.test.ts` (new), `scripts/ralph/progress.txt` (this entry + 3 new Codebase Patterns lines), `scripts/ralph/prd.json` (US-005 `passes: true` + notes).
+- Quality checks:
+  - `npx vitest run tests/seedUuidRegression.test.ts` → 3 passed / 0 failed
+  - `npx tsc --noEmit` → clean
+  - `npx vitest run` → 16 failed / 209 passed — baseline was 16 failed / 206 passed, so +3 passes, 0 new failures.
 - **Learnings for future iterations:**
-  - `@langchain/core/messages` exports `AIMessage`, `HumanMessage`, `SystemMessage` (and the `BaseMessage` type). Their `.content` field may be a plain string or an array of content blocks like `[{ type: "text", text: "..." }]` — always normalize via a helper. Array-shape responses are common from Anthropic when thinking/tool-use is involved, even when you don't ask for it.
-  - `ChatAnthropic` constructor takes `{ apiKey, model, temperature }`. Model IDs: `claude-sonnet-4-6` is the current Sonnet for this project (PRD spec). Do NOT default to `claude-sonnet-4-5-20250929` from the langchain docs examples.
-  - `prisma.message.findMany` with `orderBy: asc` + `take: N` gives the FIRST N messages (oldest), NOT the last N. To get "last N in ASC order" use `orderBy: desc` + `take: N` + `.slice().reverse()`. The acceptance criteria in US-005 specifically said "last 10 ordered ASC".
-  - When mocking a Prisma delegate (`prisma.message.findMany`) in vitest, narrow the `ChainDeps["prisma"]` type to `Pick<PrismaClient, "message">` and cast the test-only mock object via `as unknown as ChainDeps["prisma"]`. Full `PrismaClient` shape is too big to satisfy with a literal mock.
-  - For US-006 (wiring into worker): the chain already handles retrieval + LLM + prompt construction. The worker only needs to: persist inbound Message (TENANT), call `generateAnswer`, persist outbound Message (BOT), send via `whatsappService`, and if `handoff === true` flip `ChatSession.status` to `WAITING_HUMAN`. No need to touch retrieval, prompts, or history loading — it's all inside `generateAnswer`.
-  - For US-007 (lead extraction): reuse the same deps-injection pattern + `ChatAnthropic` setup, but with `temperature: 0` and LangChain structured output (`.withStructuredOutput(zodSchema)`). The structured-output call path is separate from `generateAnswer` — run it in a microtask/separate BullMQ job AFTER the reply is sent.
+  - Critical routing detail: `/api/properties/search` is mounted via `app.use('/api', propertyRoutes)` at `src/app.ts:93` — BEFORE `authStack`. So the endpoint is unauthenticated and the Zod validator on `landlordId` is the only gate. Tests hitting it don't need Bearer tokens; any auth wiring there is dead code. This is also why Test 3 can return a 400 without an auth header — the request never goes through checkJwt.
+  - The `tests/auth.test.ts` pattern uses `vi.mock('../src/middlewares/authMiddleware', async (importOriginal) => { const actual = await importOriginal(); return { ...actual, checkJwt: ... } })`. Spreading `actual` pulls in the real `upsertUserFromFirebase` path via `authSyncMiddleware`, which is why `auth.test.ts` shows 4 pre-existing failures (it doesn't override `authSyncMiddleware`). For an E2E test that needs to fully control the `req.localUser`, use a factory-only mock (`() => ({ ... })`) that replaces all four exports and never calls `importOriginal`. Much cleaner and avoids entangling with the pre-existing failure modes.
+  - Full-replacement mocks must export every name the target module's consumers import. authMiddleware's consumers want: `validateAuthConfig` (app.ts), `checkJwt`/`authSyncMiddleware` (app.ts, propertyRoutes.ts), `requireRole` (userRoutes.ts, propertyRoutes.ts, and others). Missing any of these crashes the app module load with `TypeError: X is not a function`. When in doubt: `grep -rn "from '[^']*authMiddleware'" src/`.
+  - `supertest` is in node_modules without a matching `@types/supertest` package, but `npx tsc --noEmit` is clean — supertest exposes its own typings. Don't add `@types/supertest` reflexively; let `tsc` drive that decision.
+  - The PRD AC's "NOT a fully mocked Prisma client" means: mock at the service layer, not the `@prisma/client` layer. Here `propertyService.searchProperties` is the seam. For US-006 (next story), `tests/seed.test.ts` mocks `@prisma/client` itself — that's a different category (unit test of `prisma/seed.ts`, not an E2E) and is what the PRD meant to distinguish from.
+  - vitest `vi.hoisted(() => ({ mockSearchProperties: vi.fn() }))` is how you keep a mutable handle to a mock that's referenced inside a `vi.mock(...)` factory — the factory runs before any `import` statements, but the hoisted block runs even earlier, so the reference resolves. Used here so each test can `vi.clearAllMocks()` and re-configure the impl.
 ---
 
-## 2026-04-21 - US-006
-- Refactored `src/services/whatsappService.ts`:
-  - `sendMessage(to, text)` now ONLY posts to the Meta Graph API and returns `SendMessageResponse` (`{ messages: [{ id }], ... }`). Removed the baked-in outbound persistence + session/user lookup — the worker now owns all session/message state, avoiding the double-persist race that would have landed once US-006 wired the worker's own `prisma.message.create` for outbound.
-  - `prisma` import is dropped from this module (it's now pure I/O to Meta).
-- Rewrote `src/workers/whatsappWorker.ts`:
-  - Extracted the job body into a pure `handleWhatsappMessage(payload, deps)` exported function with `WhatsappHandlerDeps = { prisma, sendMessage, generateAnswer }`. Matches the deps-injection pattern from ingestKnowledge / ragRetrieverService / ragChainService.
-  - Flow: parse payload → dup wamid check → `prisma.user.upsert({ where: phoneNumber })` → find latest `ChatSession` by `tenantId` (any status, `orderBy: startedAt desc`) → create new ACTIVE_BOT if none → persist inbound `Message` (TENANT) → if session.status !== ACTIVE_BOT return `{ success, reason: 'session_<status>' }` without replying → call `generateAnswer({ sessionId, userMessage })` (try/catch) → call `sendMessage(phoneNumber, answer)` → persist outbound `Message` (BOT, wamid captured from Meta response) → if `handoff === true` `prisma.chatSession.update({ status: 'WAITING_HUMAN' })`.
-  - RAG errors: caught, replaced with `RAG_ERROR_FALLBACK` Portuguese apology, forced `handoff: true`, still sent + persisted + flipped session.
-  - `sendMessage` failures: logged but non-fatal — outbound Message is still persisted (wamid: null) and handoff flip still runs.
-  - BullMQ `Worker` at bottom is a thin wrapper that calls `handleWhatsappMessage` with the real deps (prisma singleton, real `sendMessage`, real `generateAnswer`).
-- Rewrote `tests/whatsappWorker.test.ts`:
-  - `vi.mock('ioredis')` with a fake class + `vi.mock('bullmq')` with a fake `Worker` so importing the worker module does not require a live Redis.
-  - `vi.hoisted(() => { process.env.TOKEN_ACCES_WHATSAPP = ...; process.env.PHONE_NUMBER_ID = ...; process.env.REDIS_URL = ... })` satisfies the two modules' boot-time guards.
-  - Tests cover: sendMessage (Meta happy path + 130497 + generic API error + network error), empty-payload / not-message / duplicate-wamid short-circuits, happy path (ACTIVE_BOT reuse, grounded answer, session stays ACTIVE), new-session creation, handoff path (fallback from low-score retriever → WAITING_HUMAN), WAITING_HUMAN early-return, RESOLVED early-return, RAG-error apology → WAITING_HUMAN, and sendMessage-failure with outbound still persisted (wamid: null).
-- Files changed: `src/services/whatsappService.ts`, `src/workers/whatsappWorker.ts`, `tests/whatsappWorker.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
-- Typecheck (`npx tsc --noEmit`) clean. `npm test` green at 75 tests across 10 files (was 70 across 10). No browser/UI surface to test manually — worker is queue-driven.
+## 2026-05-06 21:52 - US-006
+- Implemented: rewrote `tests/seed.test.ts` to close the long-standing `@prisma/client` mock gap AND add UUID-shape assertions for the `user.createMany` / `property.createMany` payloads, closing the gap that let the original non-UUID seed bug through.
+- Mock fix: replaced the factory-only `vi.mock('@prisma/client', () => ({ PrismaClient: class { ... } }))` with `vi.mock(import('@prisma/client'), async (importOriginal) => { const actual = await importOriginal(); return { ...actual, PrismaClient: class { constructor() { return mockPrismaClient; } } as unknown as typeof actual.PrismaClient }; })`. This preserves the real `Role` / `PropertyType` / `PropertyStatus` / `ModerationStatus` enums so `prisma/demoData.ts`'s top-level `Role.LANDLORD` / `PropertyType.APARTMENT` references resolve at import time. Before the fix, the test file was a **suite error** (no tests ran); now all 3 tests run.
+- Also added `propertyImage` to the mocked client (`prisma/seed.ts` calls `prisma.propertyImage.createMany` on line 46, which the old mock lacked — it was a silent no-op before).
+- New assertion 1 (users): `expect(prisma.user.createMany).toHaveBeenCalled()` plus extraction of `mockPrismaClient.user.createMany.mock.calls[0][0].data` and a loop asserting every `user.id` is either one of `{DEMO_LANDLORD_1_ID, DEMO_TENANT_1_ID, DEMO_ADMIN_ID}` or matches the strict v4 regex `/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i`. Random-generated landlord/tenant ids from `prisma/generators.ts` come via `faker.string.uuid()` which emits v4, so both the 3 demo users and the 48 random users pass.
+- New assertion 2 (properties): parallel loop over `mockPrismaClient.property.createMany.mock.calls[0][0].data` asserting every `property.id` (must be one of `DEMO_PROPERTY_{SP_1,RJ_1..4}_ID` or v4) AND every `property.landlordId` (must be one of the demo user ids or v4). Since `prisma/seed.ts` passes `demoProperties` verbatim to `createMany`, this validates both columns end-to-end.
+- Existing assertions (deleteMany / createMany / $executeRawUnsafe all called) preserved unchanged in test 1.
+- Files changed: `tests/seed.test.ts` (rewritten), `scripts/ralph/progress.txt` (this entry + updated Codebase Patterns line about the mock pattern), `scripts/ralph/prd.json` (US-006 `passes: true` + notes).
+- Quality checks:
+  - `npx vitest run tests/seed.test.ts` → 3 passed / 0 failed (was 0 passed / suite error on baseline)
+  - `npx tsc --noEmit` → clean
+  - `npx vitest run` → 16 failed / 212 passed — baseline after US-005 was 16 failed / 209 passed, so +3 passes, zero new failures, and `tests/seed.test.ts` is no longer in the failed-suites list (went from 5 failed suites to 4).
 - **Learnings for future iterations:**
-  - The OLD `whatsappService.sendMessage` silently persisted the outbound message by looking up `User` by phoneNumber + `ChatSession` by `status: ACTIVE_BOT`. This is fine as long as the worker doesn't ALSO persist, but once you need session-aware logic (handoff flip, pointer to the same session object the worker used), the in-service persistence hides a race: `sendMessage`'s session lookup could return a DIFFERENT session than the one `handleWhatsappMessage` has in hand (e.g. if multiple sessions exist, or if the handoff happened mid-flight). Move persistence to the worker and keep `sendMessage` single-purpose.
-  - BullMQ `Worker` + `IORedis` construct network-y resources at module import time. To unit-test a module that exports both a handler function and `new Worker(...)` at top level, mock both packages in `vi.mock`. Do NOT try to refactor to lazy-init the Worker — production code wants it eagerly running.
-  - Session lookup in the worker is `findFirst({ where: { tenantId }, orderBy: { startedAt: 'desc' } })` — NOT filtered by `status: 'ACTIVE_BOT'`. If you filter on ACTIVE_BOT, you'd miss a WAITING_HUMAN session and accidentally create a parallel ACTIVE_BOT session alongside it, causing the bot to start replying again while a human is also handling the same tenant. Fetch latest regardless of status, then branch on status.
-  - Dep-inject `generateAnswer` into the worker rather than calling the module-level one directly — otherwise the test file has to also set up `ANTHROPIC_API_KEY` + `OPENAI_API_KEY` and mock `@langchain/anthropic` / `@langchain/openai`. The ragChainService's cached-default-deps handles production; the worker's test uses `vi.fn()`.
-  - Outbound wamid capture pattern: `const r = await sendMessage(phone, answer); const outboundWamid = r.messages?.[0]?.id ?? null;` then `prisma.message.create({ data: { wamid: outboundWamid, ... } })`. Use `null` (not undefined / not a thrown error) when `sendMessage` fails so the Message row still writes and subsequent status-update webhooks for that wamid simply no-op in `messageStatusService`.
-  - For US-007 (lead extraction): hook into the worker AFTER `await deps.sendMessage(...)` and AFTER the outbound `message.create`. Use `queueMicrotask` (or a new BullMQ queue) so extraction failures don't block the user-facing reply. The handler already has `user`, `chatSession`, and `messageText` in scope — pass them to `extractInsights({ sessionId, userMessage })`.
-  - For US-008 (eval script): it does NOT go through the worker — just calls `generateAnswer` directly with a synthetic sessionId. No need to stand up BullMQ or set `REDIS_URL`.
----
-
-## 2026-04-21 - US-007
-- Implemented `src/services/leadExtractionService.ts`:
-  - Exports `extractInsights({ sessionId, userMessage }, overrideDeps?): Promise<{ insights, rentalProcessId, upsertedKeys, handoff }>`.
-  - Zod schema `InsightsSchema`: `{ budget?, neighborhood?, bedrooms?, pets_allowed?, intent }` where `intent` is `"search" | "schedule_visit" | "contract_question" | "human_handoff" | "other"` (required).
-  - Uses `new ChatAnthropic({ apiKey, model: "claude-sonnet-4-6", temperature: 0 }).withStructuredOutput(InsightsSchema, { name: "extract_lead_insights" })`. Portuguese system prompt explaining each field + the five intent values; user message is the second message in the prompt.
-  - Flow: `prisma.chatSession.findUnique({ where: { id } })` (throws if missing) → LLM structured call → find open RentalProcess (`status != CLOSED`, latest by `createdAt desc`), create TRIAGE row if none → loop over `budget / neighborhood / bedrooms / pets_allowed / intent`, skip null/undefined, `findFirst` by `(rentalProcessId, insightKey)`, create if missing, update if value differs, no-op if unchanged → if `intent === "human_handoff"` and session is not already WAITING_HUMAN, flip it.
-  - Deps-injection + lazy cached default deps (same pattern as retriever/chain services) so the module imports cleanly in tests without `ANTHROPIC_API_KEY`.
-- Wired into `src/workers/whatsappWorker.ts`:
-  - Added `extractInsights: ExtractInsightsFn` and `scheduleMicrotask?: (task) => void` to `WhatsappHandlerDeps`.
-  - After the outbound `message.create` and session-handoff-flip, schedules `extractInsights({ sessionId, userMessage })` via `queueMicrotask` (default) with error-catch so failures don't affect the user-facing reply. Gated on `!ragError` so apology messages don't feed the extractor with noise.
-  - Production `Worker` wrapper wires `defaultExtractInsights` from the new service.
-- Tests: new `tests/leadExtractionService.test.ts` (13 cases) covers: schema accept/reject, prompt-builder shape, primitive serialization, missing-session throws, TRIAGE creation + 5-field upsert in one pass, process reuse (second call reuses the row), null/undefined skip, second-call updates existing insight row (doesn't duplicate), no-op when value unchanged, human_handoff → WAITING_HUMAN flip, no-re-flip when already WAITING_HUMAN, user message forwarded verbatim to LLM. Extended `tests/whatsappWorker.test.ts` with: happy-path schedules extraction (asserts not-yet-invoked before draining microtasks, then invoked with correct args after), extraction-failure swallowed (doesn't throw out of handler), and RAG-error path does NOT schedule extraction.
-- Files changed: `src/services/leadExtractionService.ts` (new), `src/workers/whatsappWorker.ts`, `tests/leadExtractionService.test.ts` (new), `tests/whatsappWorker.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
-- Typecheck (`npx tsc --noEmit`) clean. `npm test` green at 92 tests across 11 files (was 75 across 10).
-- **Learnings for future iterations:**
-  - `withStructuredOutput(zodSchema, { name })` returns a Runnable that takes `BaseMessage[]` (or any `BaseLanguageModelInput`) and resolves to the typed parsed object. Anthropic implements it via tool-calling under the hood. Response is pre-validated against the schema by LangChain, but defensive `InsightsSchema.parse(result)` at the boundary is cheap insurance against upstream SDK changes.
-  - `AiExtractedInsight` has no compound unique index — you CANNOT use `prisma.aiExtractedInsight.upsert`. Do `findFirst` + branch. Adding a `@@unique([rentalProcessId, insightKey])` to the schema in a future iteration would enable `.upsert` and remove the two-step pattern, but would require a migration.
-  - Don't filter open-process lookup to `status: 'TRIAGE'` — a tenant mid-VISIT_SCHEDULED should still have new insights written to their existing process, not a brand-new TRIAGE one. Filter `status: { not: 'CLOSED' }` instead.
-  - Worker-side fire-and-forget: inject `scheduleMicrotask?: (task) => void` with a `queueMicrotask` default. In tests, replace it with a queue array that tests drain explicitly. Makes timing deterministic — `await handleWhatsappMessage(...); await deps.runScheduledMicrotasks();` works cleanly instead of relying on real-time microtask ordering.
-  - Gate post-reply hooks on `!ragError`. The RAG-error apology path doesn't represent the user's real intent — extracting insights from that interaction just pollutes the lead record. The low-score handoff path (generic fallback, valid user message, `handoff: true`) IS still extractable — only actual chain exceptions skip.
-  - For US-008 (eval script): it only needs `generateAnswer` + a throwaway sessionId. No need to set up the extraction hook or touch the worker path.
----
-
-## 2026-04-21 - US-008
-- Implemented `src/scripts/evalRag.ts`:
-  - 8 hard-coded Portuguese test questions spanning the PRD-specified topics: triagem (screening), documentação (documents), agendar visita (schedule visit), pagamento (payment), pets, rescisão (contract termination), taxas/IPTU (fees/property tax), e cobrança inicial (upfront charges).
-  - For each question: calls `retrieveRelevantChunks(question)` to surface the top chunk's title + similarity score, then calls `generateAnswer({ sessionId, userMessage })` against a synthetic `sessionId = eval-${Date.now()}-${rand}`. Prisma `message.findMany` against a non-existent sessionId just returns `[]`, so no throwaway ChatSession row is needed.
-  - Prints `question / top chunk / similarity (retriever + chain) / handoff / answer (truncated to 500 chars with whitespace normalized)` per question.
-  - Retriever and chain calls are wrapped in try/catch per question so a single failure doesn't abort the run.
-  - `assertRagSecrets()` at `main()` entry so both `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are required before any LLM call.
-  - `prisma.$disconnect()` in the `.finally()` block, matching the CLI shutdown pattern from `ingestKnowledge.ts`.
-- Added npm script `"eval:rag": "ts-node src/scripts/evalRag.ts"`.
-- Files changed: `src/scripts/evalRag.ts` (new), `package.json` (script), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
-- Typecheck (`npx tsc --noEmit`) clean. `npm test` green at 92 tests across 11 files (no new tests — PRD only requires typecheck for US-008).
-- **Learnings for future iterations:**
-  - For eval/smoke scripts, skip the deps-injection + unit-test pattern — the script itself is the test. Direct imports of `generateAnswer` + `retrieveRelevantChunks` keep the script readable and the only thing that matters is that it runs.
-  - A synthetic `sessionId` avoids the need to set up a User + ChatSession per run. `prisma.message.findMany` doesn't error on a missing session, so the chain just builds a prompt with no history — exactly what you want for a cold-start eval.
-  - Output format: printing similarity from BOTH the standalone retriever AND the chain's `topScore` lets you verify they agree. They should be identical (the chain calls the retriever internally with the same query), but a divergence would flag a bug in either path.
-  - For future eval work: consider piping the output to a file + diffing across runs to detect regressions, or extending the script to compute mean similarity and handoff rate across the question set. Out of scope for US-008.
-  - This is the final story — all 8 user stories now pass.
+  - The `vi.mock(import('@prisma/client'), async (importOriginal) => ...)` syntax is from vitest's typed-mock API — passing a literal `import(...)` expression (not a string) gives `importOriginal` a proper return type so the spread `{ ...actual, PrismaClient: ... }` preserves the enum exports without a `any` cast. Required the `as unknown as typeof actual.PrismaClient` tail-cast on the replacement class because a test double doesn't match the full PrismaClient type signature.
+  - When `prisma/seed.ts` imports the Prisma singleton via `import prisma from '../src/config/db'`, the mock on `@prisma/client` transparently intercepts the `new PrismaClient()` call inside `src/config/db.ts` — no need to separately mock `src/config/db`. `vi.hoisted` ensures the `mockPrismaClient` reference resolves inside the `vi.mock` factory.
+  - `mock.calls[0][0]` is the first positional arg of the first call. For `prisma.user.createMany({ data: [...] })`, it's the `{ data }` object, so the payload is `mock.calls[0][0].data`. Cast to a concrete record shape to satisfy tsc without `any`.
+  - `prisma/generators.ts` uses `faker.string.uuid()` which emits RFC 4122 v4. That's why the UUID assertion accepts both the fixed demo UUIDs and any v4-shaped id — random seed data already satisfies the strict regex.
+  - When the mock for `@prisma/client` is missing a table used by `prisma/seed.ts` (e.g. `propertyImage`, `rentalDocument`), the missing call becomes a silent `undefined is not a function` at runtime IF `createMany` is called on it. Keep the mock in sync with `prisma/seed.ts` — whenever seed.ts adds a new table, mirror it in the mock.
 ---

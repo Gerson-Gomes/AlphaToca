@@ -1,146 +1,102 @@
 {
-  "project": "AlphaToca-Backend",
-  "branchName": "rag-implementation",
-  "description": "RAG Implementation with LangChain for WhatsApp Chatbot - Adds a Retrieval-Augmented Generation pipeline built on LangChain that ingests Markdown docs, retrieves relevant chunks, generates grounded answers, extracts lead insights, and hands off to humans when confidence is low.",
+  "project": "I-Moveis",
+  "branchName": "ralph/fix-seed-uuid-consistency",
+  "description": "Fix Seed/Validator UUID Consistency - Demo seed in prisma/demoData.ts inserts human-readable ids (e.g. user-demo-landlord-1) that fail the backend's strict z.string().uuid() validators, so /users/me returns an identity the backend itself rejects on downstream filtered routes. Replace seed ids with canonical UUID v4 literals exposed as exported constants, keep validators strict, document the drop+re-seed flow, and add a regression test that exercises the real /users/me to /properties/search chain.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Define ingestion pipeline shape and config",
-      "description": "As a developer, I want a single config module that centralizes the embedding model, chunking strategy, and retrieval parameters so the rest of the RAG code reads them from one place.",
+      "title": "Create prisma/demoIds.ts with canonical UUID v4 constants",
+      "description": "As a backend developer, I need a single module exporting canonical UUID constants for every hardcoded demo entity so seed, tests, and docs share one source of truth.",
       "acceptanceCriteria": [
-        "New file src/config/rag.ts exports typed constants: EMBEDDING_MODEL = \"text-embedding-3-small\", EMBEDDING_DIMS = 1536, CHUNK_SIZE = 800, CHUNK_OVERLAP = 120, RETRIEVER_K = 4, SIMILARITY_THRESHOLD = 0.72",
-        "Reads OPENAI_API_KEY and ANTHROPIC_API_KEY from process.env, fails fast with a clear error at boot if either is missing",
-        "Typecheck passes (npx tsc --noEmit)"
+        "New file prisma/demoIds.ts exports named string constants for every demo entity currently hardcoded in prisma/demoData.ts: 3 users (DEMO_LANDLORD_1_ID, DEMO_TENANT_1_ID, DEMO_ADMIN_ID), 5 properties (DEMO_PROPERTY_SP_1_ID, DEMO_PROPERTY_RJ_1_ID through DEMO_PROPERTY_RJ_4_ID), and 11 property image ids (DEMO_IMAGE_RJ_1_ID through DEMO_IMAGE_RJ_4_ID, DEMO_IMAGE_RJ2_1_ID through DEMO_IMAGE_RJ2_4_ID, DEMO_IMAGE_RJ3_1_ID, DEMO_IMAGE_RJ3_2_ID). Verify count with: grep -cE \"^\\s*id: '(user-demo|prop-demo|img-demo)\" prisma/demoData.ts before editing demoData.ts",
+        "Every exported constant is a hardcoded UUID v4 string literal (not crypto.randomUUID(), not runtime-generated) so ids stay stable across re-seeds, CI runs, and developer machines",
+        "Every exported constant passes z.string().uuid().safeParse(...).success === true, verified by a unit test at tests/demoIds.test.ts that imports all constants and asserts each one",
+        "tests/demoIds.test.ts passes: npx vitest run tests/demoIds.test.ts",
+        "Typecheck passes: npx tsc --noEmit",
+        "Tests pass: npx vitest run"
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Completed 2026-04-21. Created src/config/rag.ts with typed constants and fail-fast secret accessors (getOpenAIApiKey, getAnthropicApiKey, assertRagSecrets)."
+      "notes": "Implemented prisma/demoIds.ts with 18 canonical UUID v4 literal constants (3 users, 5 properties, 10 images). Added tests/demoIds.test.ts with 38 assertions (presence, z.string().uuid(), strict v4 regex, uniqueness) — all pass. Typecheck clean. The 'verify count with grep' in AC returns 18 occurrences in demoData.ts (3+5+10). PRD prose said 11 image ids but enumerated list only lists 10 (RJ_1-4, RJ2_1-4, RJ3_1-2); followed the enumerated list which matches demoData.ts."
     },
     {
       "id": "US-002",
-      "title": "Extend KnowledgeDocument with ingestion-tracking fields",
-      "description": "As a developer, I want to track the source file, chunk index, and content hash per row so re-ingestion can skip unchanged chunks.",
+      "title": "Rewrite prisma/demoData.ts to consume the UUID constants",
+      "description": "As a backend developer, I want prisma/demoData.ts to reference the constants from prisma/demoIds.ts so the seed stops inserting ids that fail the global UUID validators.",
       "acceptanceCriteria": [
-        "Add to KnowledgeDocument: sourcePath String, chunkIndex Int, contentHash String, createdAt DateTime @default(now()), updatedAt DateTime @updatedAt",
-        "Add compound unique index on (sourcePath, chunkIndex) so upserts are deterministic",
-        "Add index on contentHash for fast skip lookups",
-        "Prisma migration generated and applied against a local DB (npx prisma migrate dev --name add_rag_ingestion_tracking)",
-        "npx prisma generate runs cleanly",
-        "Typecheck passes"
+        "prisma/demoData.ts imports every constant from ./demoIds and uses them for all id and cross-reference fields. After the change, zero occurrences of the legacy literals remain: grep -E \"(user-demo-|prop-demo-|img-demo-)\" prisma/demoData.ts returns no matches",
+        "Cross-references are updated consistently: every landlordId field in demoProperties references DEMO_LANDLORD_1_ID, and every propertyId field in demoPropertyImages references the matching DEMO_PROPERTY_* constant",
+        "demo user email fields stay intact (e.g. landlord1@demo.com) so identification of demo users via email + role still works. No slug or demoLabel field is added to the Prisma schema",
+        "firebaseUid env-var fallbacks (LANDLORD_FIREBASE_UID, TENANT_FIREBASE_UID, ADMIN_FIREBASE_UID) are unchanged - only the Prisma id PK fields change",
+        "prisma/schema.prisma is unchanged (still id String, no @db.Uuid, no @default(dbgenerated))",
+        "Typecheck passes: npx tsc --noEmit",
+        "Tests pass: npx vitest run"
       ],
       "priority": 2,
       "passes": true,
-      "notes": "Completed 2026-04-21. Added sourcePath, chunkIndex, contentHash, createdAt, updatedAt to KnowledgeDocument in prisma/schema.prisma with compound unique index on (sourcePath, chunkIndex) and index on contentHash. Migration 20260422022358_add_rag_ingestion_tracking generated via `prisma migrate diff` (non-interactive workaround for migrate dev) and applied cleanly to local DB via `prisma migrate deploy`. prisma generate and typecheck pass; 43 tests green."
+      "notes": "Rewrote prisma/demoData.ts to import 18 constants from ./demoIds and use them for every id/landlordId/propertyId field. grep -E '(user-demo-|prop-demo-|img-demo-)' prisma/demoData.ts returns zero matches (exit 1). Image URL strings were template-literal-ed to reference the property UUID constant (e.g. `http://10.0.2.2:3000/uploads/${DEMO_PROPERTY_RJ_1_ID}/0001.png`) and the on-disk upload directories were renamed to match (uploads/prop-demo-rj-1 → uploads/b0000001-0000-4000-8000-000000000001, etc). Email fields, firebaseUid env fallbacks, and prisma/schema.prisma all unchanged. Typecheck clean; full test suite 16 pre-existing failures / 206 passed — identical to the baseline documented in progress.txt."
     },
     {
       "id": "US-003",
-      "title": "Build the ingestion CLI script",
-      "description": "As a developer, I want npm run ingest:knowledge to walk documentation/, chunk every .md file, embed new/changed chunks, and upsert them into KnowledgeDocument.",
+      "title": "Run seed against clean local DB and document the re-seed command",
+      "description": "As a backend developer, I want to prove the new seed writes UUIDs end-to-end against the real local Postgres and document the drop+re-seed command so teammates can converge their envs.",
       "acceptanceCriteria": [
-        "New script src/scripts/ingestKnowledge.ts reads all *.md files under documentation/ recursively",
-        "Splits each file with LangChain RecursiveCharacterTextSplitter using CHUNK_SIZE / CHUNK_OVERLAP from src/config/rag.ts",
-        "Computes sha256(content) per chunk as contentHash",
-        "Upserts by (sourcePath, chunkIndex): insert if missing, skip if contentHash matches, update if differs",
-        "Deletes rows whose (sourcePath, chunkIndex) no longer exists in the file",
-        "Writes embeddings via raw SQL ($executeRaw) with ::vector casts",
-        "Logs a summary: N files, X inserted, Y updated, Z skipped, W deleted",
-        "New npm script: \"ingest:knowledge\": \"ts-node src/scripts/ingestKnowledge.ts\"",
-        "Running the script twice produces 0 inserted, 0 updated, N skipped on second run",
-        "Unit test covers the hash-skip logic with mocked embeddings + mocked Prisma client",
-        "Typecheck passes; tests pass (npm test)"
+        "Re-seed runs cleanly against local Docker DB (alphatoca_db on :5433, creds admin/admin_pwd, per Codebase Patterns in progress.txt). Use inline DATABASE_URL override; NEVER run migrate/seed against the production Supabase URL in .env",
+        "After re-seed, all user and property rows have canonical UUID ids. Ship a verification one-liner in the PR description, for example: DATABASE_URL=<local> npx tsx -e \"import prisma from './src/config/db'; prisma.user.findMany().then(us => { const re=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i; const bad=us.filter(u=>!re.test(u.id)); if(bad.length){console.error('NON-UUID',bad); process.exit(1);} console.log('OK',us.length); });\" exits 0",
+        "README.md gains a \"Re-seeding after the UUID migration\" section with the exact commands: npx prisma migrate reset --force (against local env) followed by npm run seed (or npx prisma db seed), plus the warning to never run migrate against the Supabase DATABASE_URL",
+        "No changes to prisma/seed.ts logic required - if the existing deleteMany() chain plus createMany() works unchanged, leave it alone",
+        "Typecheck passes: npx tsc --noEmit"
       ],
       "priority": 3,
       "passes": true,
-      "notes": "Completed 2026-04-21. Created src/scripts/ingestKnowledge.ts with pure `runIngestion(deps)` core + thin CLI wrapper, using RecursiveCharacterTextSplitter from @langchain/textsplitters (new dep) with CHUNK_SIZE/CHUNK_OVERLAP from src/config/rag.ts. sha256 content hash per chunk; upsert-by-(source_path, chunk_index) with skip-if-hash-matches; delete rows whose keys no longer exist. Embeddings written via $executeRawUnsafe with ::vector cast. Added `ingest:knowledge` npm script. Unit test (tests/ingestKnowledge.test.ts) covers insert-all, skip-on-match, update-on-hash-delta, delete-stale, and mixed paths with mocked embedder + mocked Prisma; 50 tests green. Also fixed pre-existing typecheck error in src/scripts/seed-knowledge.ts by pointing import at @langchain/textsplitters."
+      "notes": "Ran `npm run seed` against the local Docker DB (`alphatoca_db` on 127.0.0.1:5433, user admin/admin_pwd, database `alphatoca`) via inline DATABASE_URL override. The existing deleteMany+createMany chain in prisma/seed.ts was left unchanged. After the re-seed, the verification one-liner (`npx tsx -e \"...Promise.all([prisma.user.findMany(), prisma.property.findMany()])...strict v4 regex...\"`) printed `OK users: 51 properties: 5` and exited 0. Spot-check via psql confirmed demo landlord id `11111111-1111-4111-8111-111111111111` and all five property ids (`a0000001-...`, `b0000001-...` through `b0000004-...`) match the DEMO_* constants. README.md gained a 'Re-seeding after the UUID migration' section with the drop+re-seed commands (both `prisma migrate reset --force` and the lighter `npm run seed`-only path) plus the warning to never run migrate against the Supabase DATABASE_URL. Typecheck clean; full suite still 16 pre-existing failures / 206 passed. Caveat: `prisma migrate reset --force` currently aborts on migration `20260505153136_add_rental_process_status_flow` because it is an exact byte-for-byte duplicate of `20260504204911_add_contract_logic` (both `CREATE TYPE \"ProposalStatus\"`), a pre-existing issue on main introduced in 45f7d1e — documented both commands in the README so devs whose schema is already up to date can skip the migrate step."
     },
     {
       "id": "US-004",
-      "title": "Implement the pgvector retriever",
-      "description": "As a developer, I want a LangChain VectorStoreRetriever that queries KnowledgeDocument by cosine similarity and returns the top K chunks plus their similarity scores.",
+      "title": "Audit every z.string().uuid() validator and confirm none were loosened",
+      "description": "As a backend developer, I want written confirmation that every UUID validator stayed strict after the seed fix, so we don't silently ship a bypass.",
       "acceptanceCriteria": [
-        "New module src/services/ragRetrieverService.ts exports retrieveRelevantChunks(query: string): Promise<RetrievedChunk[]> where RetrievedChunk = { id, content, title, score }",
-        "Generates the query embedding with the same EMBEDDING_MODEL used for ingestion",
-        "Runs a single raw SQL query using the pgvector cosine operator (<=> for distance or 1 - (embedding <=> $1) for similarity), ORDER BY embedding <=> $1 ASC LIMIT K",
-        "Rows with embedding IS NULL are excluded",
-        "Unit test with a seeded in-memory fixture (or mocked Prisma) verifies ordering and K limit",
-        "Typecheck passes; tests pass"
+        "New file tasks/audit-uuid-validators.md lists every z.string().uuid() call across these 6 files with file:line references, each marked strict/verified: src/utils/contractValidation.ts (propertyId, tenantId, landlordId), src/utils/proposalValidation.ts (propertyId, tenantId, landlordId and their optional variants), src/utils/visitValidation.ts (propertyId, tenantId, landlordId, rentalProcessId), src/utils/propertyValidation.ts (landlordId), src/utils/searchValidation.ts (landlordId, tenantId), src/utils/chatValidation.ts (sessionId, tenantId)",
+        "Grep guard: grep -rn \"z\\.string()\\.(min|nonempty)\" src/utils/ shows no occurrence that replaces a prior .uuid() on an id field (confirm no validator was downgraded to z.string().min(1) during this PRD)",
+        "If a genuine need to relax a validator is discovered, it is NOT silently changed - it is added to the Open Questions section of tasks/prd-fix-seed-uuid-consistency.md instead",
+        "Typecheck passes: npx tsc --noEmit"
       ],
       "priority": 4,
       "passes": true,
-      "notes": "Completed 2026-04-21. Created src/services/ragRetrieverService.ts exporting retrieveRelevantChunks(query, overrideDeps?) -> Promise<RetrievedChunk[]> with { id, content, title, score }. Embeds the query via OpenAIEmbeddings (same EMBEDDING_MODEL as ingestion), then runs one $queryRawUnsafe against knowledge_documents using pgvector cosine distance (<=>), ORDER BY ASC LIMIT K, WHERE embedding IS NOT NULL. Score is computed as 1 - distance. Uses the deps-injection pattern from ingestKnowledge so tests can mock prisma + embedder. Blank queries short-circuit to []. Default deps are cached (lazy OpenAI client init) so importing the module does NOT require env vars. New unit test tests/ragRetrieverService.test.ts (7 tests) verifies: blank-query no-op, embedding is forwarded, SQL includes embedding IS NOT NULL + ORDER BY + LIMIT, vector literal param shape, default K = RETRIEVER_K, ordering is preserved, K limit honored, per-call k override, and string-distance parsing. 57 tests green; typecheck clean."
+      "notes": "Wrote tasks/audit-uuid-validators.md cataloging all 20 z.string().uuid() calls across the 6 files (contractValidation 3, proposalValidation 5, visitValidation 7, propertyValidation 1, searchValidation 2, chatValidation 2). Every call is strict — none was downgraded to z.string().min(1) or .nonempty(). Grep guard `grep -rn 'z\\.string\\(\\)\\.(min|nonempty)' src/utils/` returned 8 hits, all on non-id fields (name, title, description, address, content) that predate this PRD. One PRD AC discrepancy documented in-line: the AC wording expected 6 proposalValidation.ts validators ('propertyId, tenantId, landlordId and their optional variants') but the file only has 5 — createProposalSchema omits landlordId (derived server-side from the property). No validator needed relaxing, so the Open Questions section of tasks/prd-fix-seed-uuid-consistency.md was left as-is. Typecheck clean."
     },
     {
       "id": "US-005",
-      "title": "Build the conversational RAG chain",
-      "description": "As a developer, I want a single function that, given a user message and a ChatSession.id, produces a grounded Portuguese reply.",
+      "title": "Add E2E regression test - authenticated landlord lists own properties",
+      "description": "As a backend developer, I want an automated test that exercises the full chain (/users/me returns id, GET /properties/search?landlordId={id} returns 200) so this class of seed/validator drift can't regress silently.",
       "acceptanceCriteria": [
-        "New module src/services/ragChainService.ts exports generateAnswer(input: { sessionId: string; userMessage: string })",
-        "Loads the last 10 Messages for the session (ordered by timestamp ASC) and formats them as LangChain HumanMessage / AIMessage history",
-        "Calls retrieveRelevantChunks(userMessage) and concatenates chunk text into a context string",
-        "If no chunk exceeds SIMILARITY_THRESHOLD, returns { answer: <fallback>, handoff: true } without calling the LLM",
-        "Builds a Portuguese system prompt encoding tone rules from documentation/buisness_plan.md section 6",
-        "Calls Claude Sonnet 4.6 via @langchain/anthropic with temperature: 0.2",
-        "Returns { answer: string, handoff: boolean, topScore: number, usedChunkIds: string[] }",
-        "Unit test with mocked LLM + mocked retriever verifies low-score handoff path, high-score LLM path, and that chat history is included in the prompt",
-        "Typecheck passes; tests pass"
+        "New test file tests/seedUuidRegression.test.ts uses Supertest against the real Express app (follow the pattern of tests/visitController.test.ts or tests/webhookController.test.ts - NOT a fully mocked Prisma client)",
+        "Test 1: authenticated GET /users/me as the demo landlord returns 200, and the returned user.id passes z.string().uuid().safeParse(...).success",
+        "Test 2: GET /properties/search?landlordId={id extracted from /users/me} returns 200 (not 400) and the response data array length is >= 1",
+        "Test 3: GET /properties/search?landlordId=user-demo-landlord-1 (legacy format) returns 400 with code VALIDATION_ERROR - proving the validator stayed strict",
+        "Test file passes: npx vitest run tests/seedUuidRegression.test.ts",
+        "Full test suite still passes: npx vitest run",
+        "Typecheck passes: npx tsc --noEmit"
       ],
       "priority": 5,
       "passes": true,
-      "notes": "Completed 2026-04-21. Created src/services/ragChainService.ts exporting generateAnswer({ sessionId, userMessage }, overrideDeps?) -> { answer, handoff, topScore, usedChunkIds }. Loads the last N (default 10) messages for the session via prisma.message.findMany (orderBy timestamp desc + reverse -> ASC in final prompt). Calls retrieveRelevantChunks and gates on topScore >= SIMILARITY_THRESHOLD: if below (or zero chunks) returns Portuguese fallback + handoff=true WITHOUT calling the LLM. Builds a Portuguese system prompt encoding tone rules from documentation/buisness_plan.md §6 (profissional/acolhedor/confiável, base-apenas-no-contexto, handoff em litígios, PT-BR, breve). Calls ChatAnthropic with model claude-sonnet-4-6 and temperature 0.2. Deps-injection + cached-default-deps pattern (matches retriever service) so tests don't need ANTHROPIC_API_KEY. Handles string- and content-block-array LLM responses. Unit tests (tests/ragChainService.test.ts) cover: low-score handoff path, high-score LLM path, chat history inclusion + ASC ordering, historyLimit (take+desc+reverse), context injection in system prompt, content-block parsing, similarityThreshold override, formatContext/buildSystemPrompt/historyToMessages helpers. 70 tests green (was 57); typecheck clean."
+      "notes": "Added tests/seedUuidRegression.test.ts (3 cases, all pass). Uses Supertest against the real Express app via `import app from '../src/app'`. Mocks `../src/middlewares/authMiddleware` with a full-replacement stub (exports validateAuthConfig/checkJwt/authSyncMiddleware/requireRole) — checkJwt accepts `Bearer valid-landlord-token` and authSyncMiddleware attaches a synthesized localUser with id=DEMO_LANDLORD_1_ID. Also mocks `../src/services/propertyService.searchProperties` so the landlordId branch returns 2 demo-UUID properties without hitting Postgres — keeps Zod validation in the chain. Test 1: GET /api/users/me with Bearer token → 200, body.id passes `z.string().uuid().safeParse(...).success` AND the strict v4 regex AND === DEMO_LANDLORD_1_ID. Test 2: GET /api/properties/search?landlordId=<id from /users/me> → 200, data.length >= 1, mock called with landlordId=DEMO_LANDLORD_1_ID. Test 3: GET /api/properties/search?landlordId=user-demo-landlord-1 → 400 with code VALIDATION_ERROR (proves searchValidation.ts:39 stayed strict) and the mocked service was NOT called. `npx vitest run tests/seedUuidRegression.test.ts` → 3 passed. Full suite → 16 failed / 209 passed (baseline 16/206 + my 3). Typecheck clean."
     },
     {
       "id": "US-006",
-      "title": "Wire the RAG chain into whatsappWorker.ts",
-      "description": "As a user on WhatsApp, when I send a message the bot should reply with a grounded answer and persist both sides of the conversation.",
+      "title": "Update tests/seed.test.ts to assert UUID-shaped ids",
+      "description": "As a backend developer, I want the existing mocked seed unit test to assert that user.createMany received UUID-shaped ids, closing the gap that let the original bug through.",
       "acceptanceCriteria": [
-        "whatsappWorker.ts job handler: finds-or-creates User by phoneNumber",
-        "Finds active ChatSession (status ACTIVE_BOT) or creates one",
-        "If session status is WAITING_HUMAN or RESOLVED, persist inbound Message and return (no auto-reply)",
-        "Persists inbound Message with senderType: TENANT",
-        "Calls generateAnswer({ sessionId, userMessage })",
-        "Persists outbound Message with senderType: BOT",
-        "If handoff is true, updates ChatSession.status to WAITING_HUMAN",
-        "Sends answer via existing whatsappService outbound call",
-        "Errors from RAG chain are caught; worker sends generic Portuguese apology and flips session to WAITING_HUMAN",
-        "Integration-style unit test with mocked Prisma + whatsappService + generateAnswer covers happy path, handoff path, and already-WAITING_HUMAN path",
-        "Typecheck passes; tests pass"
+        "tests/seed.test.ts adds one assertion that every user id in the payload passed to prisma.user.createMany matches the UUID v4 regex /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i (or equals one of the DEMO_*_ID constants imported from ../prisma/demoIds)",
+        "A parallel assertion for prisma.property.createMany confirms every property.id and property.landlordId is UUID-shaped",
+        "Existing assertions (deleteMany called, createMany called, $executeRawUnsafe called) still pass unchanged",
+        "Test file passes: npx vitest run tests/seed.test.ts",
+        "Full test suite still passes: npx vitest run",
+        "Typecheck passes: npx tsc --noEmit"
       ],
       "priority": 6,
       "passes": true,
-      "notes": "Completed 2026-04-21. Refactored `src/services/whatsappService.ts` to only send to Meta (removed the baked-in outbound-message persistence + session lookup — the worker now owns all session/message state). Extracted the worker body into `handleWhatsappMessage(payload, deps)` in `src/workers/whatsappWorker.ts` with a deps-injection object `{ prisma, sendMessage, generateAnswer }` (same pattern as US-003/US-004/US-005). Handler flow: finds-or-creates `User` by phoneNumber; finds most recent `ChatSession` (any status) ordered by startedAt desc and creates a new ACTIVE_BOT session if none; persists inbound `Message` (TENANT); if session.status !== ACTIVE_BOT returns `{ success: true, reason: 'session_<status>' }` without replying; otherwise calls `generateAnswer({ sessionId, userMessage })`, sends via `whatsappService.sendMessage` (captures outbound wamid), persists outbound `Message` (BOT), and flips session to WAITING_HUMAN when `handoff === true`. RAG errors are caught and emit a Portuguese apology + handoff flip. `sendMessage` failures are logged but the outbound message is still persisted (wamid null) and the handoff/status update still runs. Tests in `tests/whatsappWorker.test.ts` rewritten to cover: empty payload/no-message/duplicate wamid, happy path (ACTIVE_BOT reuse + new session creation), handoff path, WAITING_HUMAN + RESOLVED early-return paths, RAG-error apology path, and sendMessage-failure persistence. Module top-level `new IORedis`/`new Worker` are mocked via `vi.mock('ioredis')` and `vi.mock('bullmq')` so the test file can import the worker module without a live Redis. 75 tests green (was 70); typecheck clean."
-    },
-    {
-      "id": "US-007",
-      "title": "Extract structured lead insights",
-      "description": "As an operator, I want the chatbot to capture the tenant's rental preferences (budget, neighborhood, bedrooms, pets, intent) into the database so a human can follow up with real listings.",
-      "acceptanceCriteria": [
-        "New module src/services/leadExtractionService.ts exports extractInsights(input: { sessionId: string; userMessage: string }): Promise<ExtractedInsights>",
-        "Uses LangChain structured output with a Zod schema: { budget?, neighborhood?, bedrooms?, pets_allowed?, intent: \"search\"|\"schedule_visit\"|\"contract_question\"|\"human_handoff\"|\"other\" }",
-        "Runs against Claude Sonnet 4.6; temperature: 0",
-        "Invoked from whatsappWorker.ts AFTER the reply is sent (queueMicrotask or separate BullMQ job)",
-        "Finds-or-creates a RentalProcess for the tenant with status TRIAGE (one open process per tenant)",
-        "For each non-null extracted key, upserts an AiExtractedInsight row; updates existing rows rather than duplicating",
-        "If intent === \"human_handoff\", flips ChatSession to WAITING_HUMAN",
-        "Unit test with mocked LLM verifies insights are parsed, RentalProcess created once per tenant, insights upserted (second call with new budget updates, doesn't insert new row)",
-        "Typecheck passes; tests pass"
-      ],
-      "priority": 7,
-      "passes": true,
-      "notes": "Completed 2026-04-21. Created src/services/leadExtractionService.ts exporting extractInsights({ sessionId, userMessage }, overrideDeps?) -> { insights, rentalProcessId, upsertedKeys, handoff }. Uses LangChain withStructuredOutput with a Zod InsightsSchema ({ budget?, neighborhood?, bedrooms?, pets_allowed?, intent }) against ChatAnthropic (claude-sonnet-4-6, temperature 0). Flow: look up ChatSession (error if missing) -> call structured LLM on a Portuguese system prompt + userMessage -> findFirst on open RentalProcess (status != CLOSED, orderBy createdAt desc); create TRIAGE one if none -> for each non-null insight field, findFirst AiExtractedInsight by (rentalProcessId, insightKey) + create or update (value-delta-aware: no update if unchanged) -> if intent === 'human_handoff' and session.status !== WAITING_HUMAN, flip session to WAITING_HUMAN. Deps-injection + cached-default-deps (lazy ChatAnthropic init) matches the pattern from retriever/chain services. Hooked into whatsappWorker.handleWhatsappMessage after the outbound reply + outbound Message.create via queueMicrotask (swappable via deps.scheduleMicrotask in tests). Skipped on RAG-error paths so the apology case doesn't produce misleading lead insights. Failures inside the microtask are caught + logged, never propagate. Updated whatsappWorker + tests to include extractInsights in the deps (WhatsappHandlerDeps). Tests: tests/leadExtractionService.test.ts (13 new cases: schema validation, prompt builder, value serializer, session-missing error, new-process creation + 5-field upsert, process reuse, null-field skip, second-call-updates, no-op on unchanged value, human_handoff flip, no-re-flip if already WAITING_HUMAN, user message forwarded to LLM). tests/whatsappWorker.test.ts extended with happy-path extraction-scheduled, extraction-failure-swallowed, and RAG-error-no-extraction cases. 92 tests green (was 75); typecheck clean."
-    },
-    {
-      "id": "US-008",
-      "title": "Seed script for smoke testing",
-      "description": "As a developer, I want an evaluation fixture so I can spot-check RAG quality without touching WhatsApp.",
-      "acceptanceCriteria": [
-        "New script src/scripts/evalRag.ts reads a hard-coded array of ~8 Portuguese test questions (triagem, visita, documentação, rescisão, pagamento)",
-        "For each question, calls generateAnswer with a throwaway ChatSession and prints: question, top chunk title, similarity score, handoff flag, final answer",
-        "New npm script \"eval:rag\": \"ts-node src/scripts/evalRag.ts\"",
-        "Typecheck passes"
-      ],
-      "priority": 8,
-      "passes": true,
-      "notes": "Completed 2026-04-21. Created src/scripts/evalRag.ts with 8 hard-coded Portuguese test questions covering triagem, documentação, agendamento de visita, pagamento, pets, rescisão, taxas/IPTU, e cobrança inicial. For each question the script (a) calls retrieveRelevantChunks to get the top chunk's title + similarity score, (b) calls generateAnswer with a throwaway synthetic sessionId (eval-<timestamp>-<rand>) so no ChatSession/User row is needed — prisma.message.findMany against a non-existent sessionId returns [] cleanly, (c) prints question, top chunk title, similarity score (from both the retriever and the chain's topScore), handoff flag, and the truncated final answer. Retriever and chain errors are caught per-question so one bad row doesn't abort the whole run. assertRagSecrets() is called at main() entry to fail fast if OPENAI_API_KEY or ANTHROPIC_API_KEY is missing. prisma.$disconnect() is called in the finally block (same CLI shutdown pattern as ingestKnowledge.ts). Added npm script `eval:rag`: `ts-node src/scripts/evalRag.ts`. Typecheck clean; 92 tests still green (no new tests — PRD only requires typecheck for this story)."
+      "notes": "Rewrote tests/seed.test.ts to fix the long-standing @prisma/client mock gap and add UUID-shape assertions. Changed the mock from a factory-only `vi.mock('@prisma/client', () => ({ PrismaClient: class {...} }))` to the `vi.mock(import('@prisma/client'), async (importOriginal) => ({ ...actual, PrismaClient: class {...} }))` pattern so real enums (Role, PropertyType, PropertyStatus, ModerationStatus) flow through to prisma/demoData.ts's top-level `Role.LANDLORD`/`PropertyType.APARTMENT`/etc. references. Existing assertions (deleteMany/createMany/$executeRawUnsafe called) preserved unchanged in test 1. Added test 2: extracts user.createMany.mock.calls[0][0].data and asserts every user.id is either one of DEMO_{LANDLORD_1,TENANT_1,ADMIN}_ID or matches strict v4 regex /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i (random-generated landlord/tenant ids from generators.ts come via faker.string.uuid() which is v4). Added test 3: asserts every property.id AND property.landlordId in the property.createMany payload satisfy the same check. Also added propertyImage to the mocked client (prisma/seed.ts calls prisma.propertyImage.createMany which the old mock lacked — silent no-op before, now explicitly tracked). `npx vitest run tests/seed.test.ts` → 3/3 passed (was 0 passed / suite error on baseline). `npx tsc --noEmit` → clean. `npx vitest run` → 16 failed / 212 passed, versus the post-US-005 baseline of 16 failed / 209 passed: +3 passes, zero new failures, and tests/seed.test.ts is no longer in the failed-suites list (4 failed suites now instead of 5)."
     }
   ]
 }
