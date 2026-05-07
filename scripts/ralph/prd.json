@@ -31,8 +31,8 @@
         "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Created src/middlewares/uploadMiddleware.ts exporting propertyPhotoUpload (multer instance with memoryStorage, 10MB/20 file limits, JPEG/PNG-only fileFilter that rejects with Error('INVALID_FILE_TYPE')) and a convenience handler propertyPhotoUploadHandler = propertyPhotoUpload.array('photos', 20). Typecheck passes; pre-existing 16 test failures are Auth0 legacy tests unrelated to this change (confirmed by stashing and re-running)."
     },
     {
       "id": "US-003",

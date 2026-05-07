@@ -9,6 +9,8 @@ Started: Wed May  6 10:16:09 PM -03 2026
 - Validation uses Zod; schemas live in `src/utils/` (e.g., `propertyValidation.ts`).
 - `npm install <pkg>` defaults to the absolute latest tag — pin to a version range (e.g. `@^1.4.5-lts.2`) when the PRD asks for a specific major line.
 - `npm install <pkg>` without `--save-dev` puts the package in `dependencies`, even for `@types/*`. Always pass `--save-dev` for type packages.
+- Test suite has 16 pre-existing failures from Auth0 → Firebase migration (tests reference removed `userService.upsertUserFromAuth0`). Not caused by recent stories; verify regressions by running `git stash -u && npm test` vs. current.
+- API error response shape across the codebase: `{ status: number, code: string, messages: [{ message: string }] }` (see `src/middlewares/authMiddleware.ts`). Stay consistent when adding new error branches.
 
 ---
 
@@ -23,4 +25,18 @@ Started: Wed May  6 10:16:09 PM -03 2026
   - npm warns that multer 1.x has known vulnerabilities and recommends 2.x. The PRD explicitly requested v1.x; a future hardening pass may want to upgrade.
   - To smoke-test an import compiles, drop a throwaway `.ts` file under `src/` (not `/tmp`) so project-level module resolution applies, then remove it after `tsc --noEmit` exits 0.
   - Project typecheck invocation: `npx tsc --noEmit` (no package.json script shortcut for typecheck).
+---
+
+## 2026-05-06 - US-002
+- Created `src/middlewares/uploadMiddleware.ts` exporting:
+  - `propertyPhotoUpload` — a multer instance using `multer.memoryStorage()`, limits `{ fileSize: 10 * 1024 * 1024, files: 20 }`, and a `fileFilter` that accepts only `image/jpeg` / `image/png` and otherwise calls `cb(new Error('INVALID_FILE_TYPE'))` (no file attached, per PRD wording).
+  - `propertyPhotoUploadHandler` — convenience handler equal to `propertyPhotoUpload.array('photos', 20)` so routes can import and mount it directly in US-006.
+- Typecheck (`npx tsc --noEmit`) passes with no errors.
+- Full test run shows 16 failures, but all pre-exist on this branch (verified via `git stash -u && npm test`) — they come from leftover Auth0 tests in `tests/userSync.test.ts` and related files that still call `userService.upsertUserFromAuth0`, which was replaced by the Firebase flow. No regressions introduced by this story.
+- Files changed: `src/middlewares/uploadMiddleware.ts` (new).
+- **Learnings for future iterations:**
+  - `@types/multer@2.1.0` is compatible with `multer@1.4.5-lts.2` at our use level; `FileFilterCallback` is re-exported from the multer types entry. Importing it directly avoids having to hand-roll the callback signature.
+  - Per PRD, `fileFilter` rejects with `cb(new Error('INVALID_FILE_TYPE'))` — do NOT pass `false` as the second arg when rejecting, that would silently drop the file without surfacing the error to the global error handler (US-008 depends on this Error bubbling up).
+  - When adding a new middleware file, verify there are no regressions by running `git stash -u && npm test` before and after — the suite currently has 16 pre-existing Auth0-migration failures, so "16 failed" is the baseline, not a new regression.
+  - `propertyPhotoUpload.array('photos', 20)` in US-002 defines field name `photos` and max count 20 — US-006 and US-010 must reference the same field name or uploads will route to `LIMIT_UNEXPECTED_FILE`.
 ---
