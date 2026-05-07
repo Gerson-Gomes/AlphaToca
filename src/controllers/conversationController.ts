@@ -1,7 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import { propertyService } from '../services/propertyService';
 import { conversationService } from '../services/conversationService';
-import { resolveConversationQuerySchema } from '../utils/conversationValidation';
+import {
+  resolveConversationQuerySchema,
+  listConversationsQuerySchema,
+} from '../utils/conversationValidation';
 
 export const conversationController = {
   /**
@@ -65,6 +68,38 @@ export const conversationController = {
         tenantId,
       );
       return res.status(200).json(conversation);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/conversations?unreadOnly=true
+   *
+   * Lista o inbox do caller — todas as threads a que ele pertence (seja como
+   * landlord OU como tenant). Role-agnóstico: a identidade do contraparte é
+   * decidida pela comparação direta `conversation.landlordId === localUser.id`,
+   * não pelo papel global do usuário — isso mantém a consistência caso um
+   * mesmo User apareça em threads com papéis distintos.
+   *
+   * Guards: 401 para não autenticado; 400 para `unreadOnly` fora de
+   * 'true'|'false'. Role não é gatekeeping: mesmo um ADMIN que nunca figurou
+   * em uma conversa simplesmente recebe `[]`.
+   */
+  async list(req: Request, res: Response, next: NextFunction) {
+    try {
+      const localUser = req.localUser;
+      if (!localUser) {
+        return res.status(401).json({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          messages: [{ message: 'Authentication required.' }],
+        });
+      }
+
+      const { unreadOnly } = listConversationsQuerySchema.parse(req.query);
+      const summaries = await conversationService.list(localUser.id, unreadOnly === 'true');
+      return res.status(200).json(summaries);
     } catch (error) {
       next(error);
     }
