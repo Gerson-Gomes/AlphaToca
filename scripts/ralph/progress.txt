@@ -10,6 +10,8 @@ Started: Thu May  7 04:25:36 PM -03 2026
 - `req.localUser` is populated by `authSyncMiddleware` in `authStack = [checkJwt, authSyncMiddleware]`. On public routes (mounted without authStack — e.g. `GET /properties/:id`) it is undefined, so always guard with `req.localUser?.id ?? null`.
 - Type augmentation for `req.localUser` lives in `src/types/express.d.ts`.
 - Pre-existing test failures (21 tests in auth / ingestKnowledge / ragChainService / ragRetrieverService / userSync / visitValidation) are unrelated to LL-001 — confirmed by stash-and-rerun.
+- HTTP tests that need to exercise BOTH the 401 stub AND the real 403 from `requireRole` MUST use `vi.mock('../src/middlewares/authMiddleware', async (importOriginal) => { const actual = await importOriginal() as any; return { ...actual, checkJwt: ..., authSyncMiddleware: ... }; })` — i.e. preserve `requireRole` from the real module. The plain object-literal mock form (see `conversationResolve.test.ts`) shadows `requireRole` with a pass-through and makes 403 untestable. See `tests/adminSupportTicketsList.test.ts` for the importOriginal pattern.
+- Role-gated route mounts chain middlewares at the `app.use` level rather than spreading them per route: `app.use('/api', authStack, requireRole(Role.LANDLORD), landlordRoutes)`. Routes inside the router stay flat.
 
 ## 2026-05-07 - LL-001 — Profile view tracking table + increment hook
 - Added `ProfileView` Prisma model (landlordId, viewerId?, viewedAt) + inverse relation on `User` + `@@index([landlordId, viewedAt])` + onDelete Cascade.
@@ -25,4 +27,22 @@ Started: Thu May  7 04:25:36 PM -03 2026
   - `npx prisma migrate diff --from-migrations` fails without `--shadow-database-url`. Use `--from-empty --to-schema-datamodel ... --script` for byte-for-byte DDL verification — that's what matches the PRD AC wording.
   - Existing migration timestamps ended at `20260507190000`. Next migrations should use strictly later timestamps to preserve lex order.
   - Full suite currently has 21 pre-existing failing tests unrelated to this story (confirmed by `git stash` + rerun on the same test file). Do not treat these as regressions; future stories can ignore them unless explicitly touching those modules.
+---
+
+## 2026-05-07 - LL-002 — GET /api/landlord/metrics
+- Added `src/controllers/landlordController.ts::getMetrics` returning `{ profileViews, proposalsPending, unreadMessages }` in a single round trip.
+  - profileViews: `prisma.profileView.count` where `landlordId = req.localUser.id` AND `viewedAt >= now()-30d`.
+  - proposalsPending: `prisma.proposal.count` where `status=PENDING` AND `property.landlordId = req.localUser.id` (relation filter — no need to join manually).
+  - unreadMessages: `prisma.conversationMessage.count` where `readAt=null` AND `authorId != landlordId` AND `conversation.landlordId = landlordId`. Wrapped in try/catch that maps Prisma P2021 ("table does not exist") → 0 so the endpoint is safe to deploy BEFORE LL-010 ships.
+- Added `src/routes/landlordRoutes.ts` with a full Swagger JSDoc block and `router.get('/landlord/metrics', landlordController.getMetrics)` — auth middlewares live at the mount site, not the route site, matching the conversationRoutes template.
+- Mounted in `src/app.ts` as `app.use('/api', authStack, requireRole(Role.LANDLORD), landlordRoutes)` — TENANT and ADMIN both get 403 from the real requireRole.
+- Files changed: `src/controllers/landlordController.ts` (new), `src/routes/landlordRoutes.ts` (new), `src/app.ts` (import + mount), `tests/landlordMetrics.test.ts` (new).
+- Tests: 6/6 new tests pass — happy path with exact shape assertions + 30d window math, P2021 graceful fallback, zero-activity landlord, 401 (no header), 403 tenant, 403 admin.
+- `npx tsc --noEmit` clean.
+- Ran `conversationResolve + adminSupportTicketsList + rentalPaymentCurrent + profileViewService` alongside — 44/44 pass, no regressions in adjacent HTTP/auth code.
+- **Learnings for future iterations:**
+  - Prisma `relation filter` syntax (`where: { property: { landlordId } }`) avoids a manual join for "count Proposal where its Property belongs to landlord X" — cleaner than `$queryRaw`, still pushed into one SQL statement.
+  - Casting `prisma as any` at the call site of a not-yet-generated model (`(prisma as any).conversationMessage.count(...)`) lets the endpoint compile and exercise the P2021 fallback today, without waiting for LL-010's `prisma generate`. When LL-010 lands, drop the `as any`.
+  - Testing 403 from `requireRole` requires the `importOriginal` mock variant — pattern now captured in the Codebase Patterns section above.
+  - Mocking `../src/config/db` as a default-export object (`{ default: { profileView: { count: mockFn }, ... } }`) is the right shape for controllers that do `import prisma from '../config/db'`. Namespace-level model functions like `.count` can be driven per-test with `mockFn.mockResolvedValue(...)`.
 ---

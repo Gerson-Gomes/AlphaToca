@@ -19,7 +19,9 @@ import financeRoutes from './routes/financeRoutes';
 import rentalProcessRoutes from './routes/rentalProcessRoutes';
 import conversationRoutes from './routes/conversationRoutes';
 import supportRoutes from './routes/supportRoutes';
-import { checkJwt, authSyncMiddleware, validateAuthConfig } from './middlewares/authMiddleware';
+import landlordRoutes from './routes/landlordRoutes';
+import { checkJwt, authSyncMiddleware, requireRole, validateAuthConfig } from './middlewares/authMiddleware';
+import { Role } from '@prisma/client';
 import prisma from './config/db';
 import { queueRedisConnection } from './queues/whatsappQueue';
 import { logger } from './config/logger';
@@ -135,6 +137,9 @@ app.use('/api', authStack, conversationRoutes);
 
 // Support Routes (ticket open — US-018)
 app.use('/api', authStack, supportRoutes);
+
+// Landlord Dashboard Routes (metrics — LL-002)
+app.use('/api', authStack, requireRole(Role.LANDLORD), landlordRoutes);
 
 // Apply Global Error Handler
 app.use(errorHandler);
