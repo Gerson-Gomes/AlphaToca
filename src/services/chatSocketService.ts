@@ -22,27 +22,34 @@ export interface SessionUpdatedEvent {
   status: string;
 }
 
+function safeEmit(room: string, event: string, data: unknown, context: Record<string, unknown>): void {
+  try {
+    const io = getIO();
+    io.to(room).emit(event, data);
+  } catch (err) {
+    logger.error({ err, room, event, ...context }, '[chatSocket] emit failed');
+  }
+}
+
 export const chatSocketService = {
   emitNewMessage(
     tenantId: string,
     payload: NewMessageEvent,
     landlordId?: string | null,
   ): void {
-    const io = getIO();
-    io.to(`user:${tenantId}`).emit('new_message', payload);
-
     const { message } = payload;
+    const ctx = { tenantId, sessionId: payload.sessionId, messageId: message.id, landlordId };
+
+    safeEmit(`user:${tenantId}`, 'new_message', payload, ctx);
+
     if (message.senderType === 'TENANT' || message.senderType === 'BOT') {
       if (landlordId) {
-        io.to(`landlord:${landlordId}`).emit('new_message', payload);
+        safeEmit(`landlord:${landlordId}`, 'new_message', payload, ctx);
       }
-      io.to('provider:all').emit('new_message', payload);
+      safeEmit('provider:all', 'new_message', payload, ctx);
     }
 
-    logger.info(
-      { tenantId, sessionId: payload.sessionId, messageId: payload.message.id, landlordId },
-      '[chatSocket] new_message emitted',
-    );
+    logger.info(ctx, '[chatSocket] new_message emitted');
   },
 
   emitSessionUpdated(
@@ -50,16 +57,14 @@ export const chatSocketService = {
     payload: SessionUpdatedEvent,
     landlordId?: string | null,
   ): void {
-    const io = getIO();
-    io.to(`user:${tenantId}`).emit('session_updated', payload);
-    if (landlordId) {
-      io.to(`landlord:${landlordId}`).emit('session_updated', payload);
-    }
-    io.to('provider:all').emit('session_updated', payload);
+    const ctx = { tenantId, sessionId: payload.sessionId, status: payload.status, landlordId };
 
-    logger.info(
-      { tenantId, sessionId: payload.sessionId, status: payload.status, landlordId },
-      '[chatSocket] session_updated emitted',
-    );
+    safeEmit(`user:${tenantId}`, 'session_updated', payload, ctx);
+    if (landlordId) {
+      safeEmit(`landlord:${landlordId}`, 'session_updated', payload, ctx);
+    }
+    safeEmit('provider:all', 'session_updated', payload, ctx);
+
+    logger.info(ctx, '[chatSocket] session_updated emitted');
   },
 };

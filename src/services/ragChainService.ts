@@ -43,14 +43,50 @@ export interface ChainDeps {
 }
 
 const DEFAULT_HISTORY_LIMIT = 10;
+const RETRY_MAX_ATTEMPTS = 2;
+const RETRY_BASE_DELAY_MS = 500;
+
 const FALLBACK_ANSWER =
   "Obrigado pela sua mensagem! Para te dar a resposta mais precisa, vou transferir essa conversa para um dos nossos atendentes humanos. Em instantes alguém do nosso time falará com você por aqui.";
+
+export { FALLBACK_ANSWER };
 
 const NO_CONTEXT_REPLY =
   "Entendi seu interesse! Para buscar os melhores imóveis para você, me diga:\n" +
   "\u2022 Em qual cidade e estado você procura?\n" +
   "\u2022 Qual o valor máximo de aluguel?\n\n" +
   "Assim já consigo te mostrar as opções disponíveis agora mesmo. \u{1F3E0}";
+
+interface CacheEntry {
+  answer: GenerateAnswerResult;
+  expiresAt: number;
+}
+
+const answerCache = new Map<string, CacheEntry>();
+const CACHE_MAX_SIZE = 200;
+const CACHE_TTL_MS = 60_000;
+
+function cacheKey(sessionId: string, userMessage: string): string {
+  return `${sessionId}::${userMessage.trim().toLowerCase()}`;
+}
+
+function cacheGet(key: string): GenerateAnswerResult | null {
+  const entry = answerCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    answerCache.delete(key);
+    return null;
+  }
+  return entry.answer;
+}
+
+function cacheSet(key: string, value: GenerateAnswerResult): void {
+  if (answerCache.size >= CACHE_MAX_SIZE) {
+    const firstKey = answerCache.keys().next().value;
+    if (firstKey) answerCache.delete(firstKey);
+  }
+  answerCache.set(key, { answer: value, expiresAt: Date.now() + CACHE_TTL_MS });
+}
 
 const OFF_TOPIC_KEYWORDS = new RegExp(
   "^(triste|feliz|chateado|puto|bravo|ansioso|depressivo|solitário|entediado|" +
@@ -201,11 +237,51 @@ function getDefaultDeps(): ChainDeps {
   return defaultDepsCache;
 }
 
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function invokeWithRetry(
+  llm: ChatLLM,
+  messages: BaseMessage[],
+  invokeTimeoutMs: number,
+): Promise<{ content: unknown }> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= RETRY_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      await sleep(delay);
+    }
+    try {
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new Error(`[rag-chain] LLM invoke timeout after ${invokeTimeoutMs}ms`)),
+          invokeTimeoutMs,
+        );
+      });
+      try {
+        const result = await Promise.race([llm.invoke(messages), timeoutPromise]);
+        return result as { content: unknown };
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      }
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
 export async function generateAnswer(
   input: GenerateAnswerInput,
   overrideDeps?: ChainDeps,
 ): Promise<GenerateAnswerResult> {
   const { sessionId, userMessage } = input;
+
+  const cacheHit = !overrideDeps ? cacheGet(cacheKey(sessionId, userMessage)) : null;
+  if (cacheHit) return cacheHit;
+
   const deps = overrideDeps ?? getDefaultDeps();
   const historyLimit = deps.historyLimit ?? DEFAULT_HISTORY_LIMIT;
   const threshold = deps.similarityThreshold ?? SIMILARITY_THRESHOLD;
@@ -213,20 +289,21 @@ export async function generateAnswer(
   // Pré-filtro off-topic: mensagens curtas e emocionais/saudações sem
   // termos de domínio são encaminhadas para humano sem custo de LLM.
   if (isLikelyOffTopic(userMessage)) {
-    if (GREETING_RAG_REGEX.test(userMessage.trim())) {
-      return {
-        answer: GREETING_REPLY,
-        handoff: false,
-        topScore: 0,
-        usedChunkIds: [],
-      };
-    }
-    return {
-      answer: FALLBACK_ANSWER,
-      handoff: true,
-      topScore: 0,
-      usedChunkIds: [],
-    };
+    const result = GREETING_RAG_REGEX.test(userMessage.trim())
+      ? {
+          answer: GREETING_REPLY,
+          handoff: false,
+          topScore: 0,
+          usedChunkIds: [] as string[],
+        }
+      : {
+          answer: FALLBACK_ANSWER,
+          handoff: true,
+          topScore: 0,
+          usedChunkIds: [] as string[],
+        };
+    if (!overrideDeps) cacheSet(cacheKey(sessionId, userMessage), result);
+    return result;
   }
 
   // Retrieval (embedder + pgvector) e fetch de histórico são independentes —
@@ -245,12 +322,14 @@ export async function generateAnswer(
   const usedChunkIds = chunks.map((c) => c.id);
 
   if (chunks.length === 0 || topScore < threshold) {
-    return {
+    const result: GenerateAnswerResult = {
       answer: DOMAIN_TRIGGERS.test(userMessage) ? NO_CONTEXT_REPLY : FALLBACK_ANSWER,
       handoff: !DOMAIN_TRIGGERS.test(userMessage),
       topScore,
       usedChunkIds,
     };
+    if (!overrideDeps) cacheSet(cacheKey(sessionId, userMessage), result);
+    return result;
   }
 
   const stored = recent.slice().reverse();
@@ -270,29 +349,28 @@ export async function generateAnswer(
   ];
 
   const invokeTimeoutMs = resolveInvokeTimeoutMs();
-  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(
-      () =>
-        reject(
-          new Error(`[rag-chain] LLM invoke timeout after ${invokeTimeoutMs}ms`),
-        ),
-      invokeTimeoutMs,
-    );
-  });
 
   let response: { content: unknown };
   try {
-    response = await Promise.race([deps.llm.invoke(messages), timeoutPromise]);
-  } finally {
-    if (timeoutHandle) clearTimeout(timeoutHandle);
+    response = await invokeWithRetry(deps.llm, messages, invokeTimeoutMs);
+  } catch (err) {
+    const result: GenerateAnswerResult = {
+      answer: FALLBACK_ANSWER,
+      handoff: true,
+      topScore,
+      usedChunkIds,
+    };
+    return result;
   }
+
   const answer = extractTextContent(response.content) || FALLBACK_ANSWER;
 
-  return {
+  const result: GenerateAnswerResult = {
     answer,
     handoff: false,
     topScore,
     usedChunkIds,
   };
+  if (!overrideDeps) cacheSet(cacheKey(sessionId, userMessage), result);
+  return result;
 }

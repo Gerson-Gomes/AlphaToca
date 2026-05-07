@@ -453,11 +453,12 @@ const socketEmitter = new Emitter(connection);
 export const whatsappWorker = new Worker<WhatsAppWebhookPayload>(
     'whatsapp-messages',
     async (job: Job<WhatsAppWebhookPayload>) => {
+        const startedAt = Date.now();
         const wamid = (job.data as any)?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.id;
-        const jobLog = logger.child({ jobId: job.id, wamid });
+        const jobLog = logger.child({ jobId: job.id, wamid, attempt: job.attemptsMade + 1 });
         jobLog.info('[worker] processing job');
         try {
-            return await handleWhatsappMessage(job.data, {
+            const result = await handleWhatsappMessage(job.data, {
                 prisma,
                 sendMessage: defaultSendMessage,
                 generateAnswer: defaultGenerateAnswer,
@@ -482,7 +483,7 @@ export const whatsappWorker = new Worker<WhatsAppWebhookPayload>(
                         }
                         // Notificar landlord específico (se identificado)
                         if (landlordId) {
-                            socketEmitter.to(`user:${landlordId}`).emit('new_lead', data);
+                            socketEmitter.to(`landlord:${landlordId}`).emit('new_lead', data);
                             jobLog.info({ event, landlordId }, '[worker] new_lead sent to landlord');
                         } else if (senderType === 'TENANT' || event === 'session_updated') {
                             socketEmitter.to('provider:all').emit(event, data);
@@ -493,16 +494,25 @@ export const whatsappWorker = new Worker<WhatsAppWebhookPayload>(
                     }
                 },
             });
+            const elapsed = Date.now() - startedAt;
+            jobLog.info({ elapsedMs: elapsed, handoff: result.handoff, ragError: result.ragError }, '[worker] job completed');
+            return result;
         } catch (dbError: any) {
+            const elapsed = Date.now() - startedAt;
             if (dbError?.code === 'P2002' && dbError?.meta?.target?.includes('wamid')) {
-                jobLog.info('[worker] duplicate wamid unique constraint; skipping');
+                jobLog.info({ elapsedMs: elapsed }, '[worker] duplicate wamid unique constraint; skipping');
                 return { success: true, reason: 'duplicate_wamid_db' };
             }
-            jobLog.error({ err: dbError }, '[worker] job failed');
+            jobLog.error({ err: dbError, elapsedMs: elapsed }, '[worker] job failed');
             throw dbError;
         }
     },
-    { connection, lockDuration: 60000 }
+    {
+        connection,
+        lockDuration: 60000,
+        removeOnComplete: { age: 3600 },
+        removeOnFail: { age: 7 * 24 * 3600 },
+    }
 );
 
 whatsappWorker.on('completed', (job: Job) => {

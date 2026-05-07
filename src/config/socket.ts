@@ -75,6 +75,13 @@ export function initializeSocket(server: HttpServer): Server {
     );
 
     socket.on('disconnect', (reason) => {
+      socket.leave(`user:${userId}`);
+      if (role === 'LANDLORD') {
+        socket.leave(`landlord:${userId}`);
+      }
+      if (role === 'LANDLORD' || role === 'ADMIN') {
+        socket.leave('provider:all');
+      }
       logger.info(
         { userId, socketId: socket.id, reason },
         '[Socket.IO] client disconnected',
@@ -99,5 +106,30 @@ export function getIO(): Server {
   }
   return io;
 }
+
+export async function shutdownSocket(): Promise<void> {
+  if (!io) return;
+  logger.info('[Socket.IO] shutting down...');
+  await Promise.allSettled([
+    io.close(),
+    pubClient.quit(),
+    subClient.quit(),
+  ]);
+  io = null;
+  logger.info('[Socket.IO] shutdown complete');
+}
+
+function setupGracefulShutdown() {
+  const shutdown = async (signal: string) => {
+    logger.info({ signal }, '[Socket.IO] received signal, shutting down');
+    await shutdownSocket();
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+}
+
+setupGracefulShutdown();
 
 export { pubClient, subClient };

@@ -13,6 +13,12 @@ import {
 export const SEARCH_INTENT_VALUES = ["search", "other"] as const;
 export type SearchIntent = (typeof SEARCH_INTENT_VALUES)[number];
 
+const BR_STATES = new Set([
+  "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO",
+  "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI",
+  "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO",
+]);
+
 export const SearchFiltersSchema = z.object({
   intent: z.enum(SEARCH_INTENT_VALUES),
   city: z.string().nullable(),
@@ -22,6 +28,7 @@ export const SearchFiltersSchema = z.object({
       const trimmed = s.trim().replace(/[^a-zA-Z]/g, "");
       return trimmed.length >= 2 ? trimmed.slice(0, 2).toUpperCase() : trimmed.toUpperCase();
     })
+    .refine((s) => !s ||  BR_STATES.has(s), { message: "Estado brasileiro invalido" })
     .nullable(),
   maxPrice: z
     .coerce.number()

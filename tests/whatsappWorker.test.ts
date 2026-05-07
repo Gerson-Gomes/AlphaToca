@@ -617,7 +617,7 @@ describe('handleWhatsappMessage - session TTL', () => {
 });
 
 describe('handleWhatsappMessage - inactive session creates new ACTIVE_BOT session', () => {
-    it('creates a new ACTIVE_BOT session when existing session is WAITING_HUMAN', async () => {
+    it('reuses WAITING_HUMAN session (bot stays active, human complements)', async () => {
         const deps = makeDeps();
         deps.prismaMocks.sessionFindFirst.mockResolvedValueOnce({
             id: 'session-wh',
@@ -625,20 +625,12 @@ describe('handleWhatsappMessage - inactive session creates new ACTIVE_BOT sessio
             status: 'WAITING_HUMAN',
             startedAt: new Date(),
         });
-        deps.prismaMocks.sessionCreate.mockResolvedValueOnce({
-            id: 'session-new',
-            tenantId: 'user-1',
-            status: 'ACTIVE_BOT',
-            startedAt: new Date(),
-        });
 
         const result = await handleWhatsappMessage(makeInboundPayload(), deps);
 
-        expect(deps.prismaMocks.sessionCreate).toHaveBeenCalledWith({
-            data: expect.objectContaining({ tenantId: 'user-1', status: 'ACTIVE_BOT' }),
-        });
+        expect(deps.prismaMocks.sessionCreate).not.toHaveBeenCalled();
         expect(deps.generateAnswerMock).toHaveBeenCalledWith(
-            expect.objectContaining({ sessionId: 'session-new' }),
+            expect.objectContaining({ sessionId: 'session-wh' }),
         );
         expect(deps.sendMessageMock).toHaveBeenCalled();
         expect(result).toEqual({ success: true, handoff: false, ragError: false });
