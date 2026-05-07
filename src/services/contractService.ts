@@ -161,6 +161,36 @@ export async function getContractDownloadContext(
   });
 }
 
+// Resposta pública do PUT /api/contracts/:id/signed-document (US-016).
+// Projetada pra casar com a leitura subsequente do GET /api/contracts
+// (US-014) — frontend atualiza o card só reaproveitando esses campos.
+export type SignedDocumentView = {
+  pdfUrl: string;
+  signedAt: string;
+};
+
+// Anexa um PDF assinado ao contrato: grava `pdfUrl` (URL relativa do
+// storage) + `signedAt` (timestamp do servidor) em uma transação. O
+// ownership check (só o landlord pode subir) é feito no controller — o
+// serviço assume o caminho feliz. O caller é responsável por compensar o
+// arquivo em disco se esta chamada falhar (outer try/catch pattern,
+// mesmo padrão do `createProperty` + multer photos).
+export async function attachSignedPdfToContract(
+  id: string,
+  pdfUrl: string,
+): Promise<SignedDocumentView> {
+  const signedAt = new Date();
+  const updated = await prisma.contract.update({
+    where: { id },
+    data: { pdfUrl, signedAt },
+    select: { pdfUrl: true, signedAt: true },
+  });
+  return {
+    pdfUrl: updated.pdfUrl!,
+    signedAt: updated.signedAt!.toISOString(),
+  };
+}
+
 // Forma do Contract exposta por GET /api/contracts?propertyId=&tenantId=
 // (US-014). É um subset deliberado do modelo: omite landlordId/dueDay/status/
 // createdAt/updatedAt para alinhar com o contrato PRD exato. `pdfUrl` e

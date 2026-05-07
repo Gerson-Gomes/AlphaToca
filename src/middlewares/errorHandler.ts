@@ -48,6 +48,10 @@ export const errorHandler = (
         response.status = 400;
         response.code = 'INVALID_FILE_TYPE';
         response.messages = [{ message: 'Apenas JPEG ou PNG são aceitos' }];
+    } else if (err.message === 'INVALID_PDF_FILE_TYPE') {
+        response.status = 400;
+        response.code = 'INVALID_FILE_TYPE';
+        response.messages = [{ message: 'Apenas arquivos PDF são aceitos' }];
     } else if (err.name === 'SyntaxError') { // Catch JSON parse errors
         response.status = 400;
         response.code = 'BAD_REQUEST';

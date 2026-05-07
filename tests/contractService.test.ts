@@ -4,9 +4,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // (US-014). Mocks the prisma client directly so the service's where/select
 // shape and Decimal→number + Date→ISO transforms can be asserted without a DB.
 
-const { prismaContractFindFirst, prismaContractFindUnique } = vi.hoisted(() => ({
+const { prismaContractFindFirst, prismaContractFindUnique, prismaContractUpdate } = vi.hoisted(() => ({
   prismaContractFindFirst: vi.fn(),
   prismaContractFindUnique: vi.fn(),
+  prismaContractUpdate: vi.fn(),
 }));
 
 vi.mock('../src/config/db', () => ({
@@ -14,6 +15,7 @@ vi.mock('../src/config/db', () => ({
     contract: {
       findFirst: prismaContractFindFirst,
       findUnique: prismaContractFindUnique,
+      update: prismaContractUpdate,
     },
   },
 }));
@@ -187,5 +189,58 @@ describe('contractService.getContractDownloadContext — US-015', () => {
     );
 
     expect(result!.pdfUrl).toBeNull();
+  });
+});
+
+describe('contractService.attachSignedPdfToContract — US-016', () => {
+  beforeEach(() => {
+    prismaContractUpdate.mockReset();
+  });
+
+  it('writes pdfUrl + signedAt(now) and returns the ISO-serialized view', async () => {
+    prismaContractUpdate.mockImplementation(async ({ data }: any) => ({
+      pdfUrl: data.pdfUrl,
+      signedAt: data.signedAt,
+    }));
+
+    const before = Date.now();
+    const { attachSignedPdfToContract } = await import(
+      '../src/services/contractService'
+    );
+    const result = await attachSignedPdfToContract(
+      '55555555-5555-5555-5555-555555555555',
+      '/uploads/contracts/55555555/signed.pdf',
+    );
+    const after = Date.now();
+
+    expect(prismaContractUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: '55555555-5555-5555-5555-555555555555' },
+        data: expect.objectContaining({
+          pdfUrl: '/uploads/contracts/55555555/signed.pdf',
+          signedAt: expect.any(Date),
+        }),
+        select: { pdfUrl: true, signedAt: true },
+      }),
+    );
+    expect(result.pdfUrl).toBe('/uploads/contracts/55555555/signed.pdf');
+    // signedAt is server-generated — just assert it lands between before/after.
+    const signedMs = new Date(result.signedAt).getTime();
+    expect(signedMs).toBeGreaterThanOrEqual(before);
+    expect(signedMs).toBeLessThanOrEqual(after);
+  });
+
+  it('propagates errors from prisma.update so the controller can compensate the on-disk file', async () => {
+    const { attachSignedPdfToContract } = await import(
+      '../src/services/contractService'
+    );
+    prismaContractUpdate.mockRejectedValueOnce(new Error('connection reset'));
+
+    await expect(
+      attachSignedPdfToContract(
+        '55555555-5555-5555-5555-555555555555',
+        '/uploads/contracts/55555555/signed.pdf',
+      ),
+    ).rejects.toThrow('connection reset');
   });
 });

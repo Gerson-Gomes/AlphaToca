@@ -9,6 +9,7 @@ import {
   listTenantContracts,
   updateContractStatus,
   updatePaymentStatus,
+  attachSignedPdfToContract,
   ContractError
 } from '../services/contractService';
 import {
@@ -17,6 +18,10 @@ import {
   updateContractStatusSchema,
   updatePaymentStatusSchema
 } from '../utils/contractValidation';
+import {
+  saveSignedContractPdf,
+  removeContractDocumentAbsolute,
+} from '../services/contractDocumentStorageService';
 import { propertyService } from '../services/propertyService';
 import { logger } from '../config/logger';
 
@@ -304,6 +309,103 @@ export const contractController = {
           '[contract.getPdf] sendFile failed mid-stream',
         );
       });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  /**
+   * PUT /api/contracts/:id/signed-document (US-016)
+   *
+   * Landlord envia o PDF assinado; o backend persiste `pdfUrl` e
+   * `signedAt` e devolve ambos. Ordem dos guards (espelha US-015):
+   *   1. 401 UNAUTHORIZED — antes de qualquer I/O.
+   *   2. 400 INVALID_FILE_TYPE — multer fileFilter rejeita mime != pdf
+   *      ANTES de chegar aqui; quando o buffer chega mas os magic bytes
+   *      não são `%PDF`, o controller rejeita com o mesmo code.
+   *   3. 404 NOT_FOUND — contrato não existe.
+   *   4. 403 FORBIDDEN — caller não é o landlord do contrato (somente o
+   *      landlord pode subir, NÃO o tenant — PRD).
+   *   5. 200 — { signedAt, pdfUrl }.
+   *
+   * Compensação em caso de falha no DB write: o arquivo já gravado em
+   * disco é removido via `removeContractDocumentAbsolute` (outer
+   * try/catch pattern, mesma convenção do savePropertyImages).
+   */
+  async uploadSignedDocument(req: Request, res: Response, next: NextFunction) {
+    try {
+      const localUser = req.localUser;
+      if (!localUser) {
+        return res.status(401).json({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          messages: [{ message: 'Authentication required.' }],
+        });
+      }
+
+      const file = req.file;
+      if (!file) {
+        return res.status(400).json({
+          status: 400,
+          code: 'VALIDATION_ERROR',
+          messages: [{ message: 'signedPdf field is required.' }],
+        });
+      }
+
+      // Magic-bytes verification: every valid PDF starts with `%PDF-`.
+      // Multer's fileFilter already rejects non-application/pdf Mime
+      // types before we reach here, but a malicious client can lie about
+      // the Content-Type of a .pdf-named text file. Re-check the bytes.
+      const header = file.buffer.slice(0, 4).toString('latin1');
+      if (header !== '%PDF') {
+        return res.status(400).json({
+          status: 400,
+          code: 'INVALID_FILE_TYPE',
+          messages: [{ message: 'Arquivo não é um PDF válido.' }],
+        });
+      }
+
+      const contractId = req.params.id;
+      const contract = await getContractDownloadContext(contractId);
+      if (!contract) {
+        return res.status(404).json({
+          status: 404,
+          code: 'NOT_FOUND',
+          messages: [{ message: 'Contract not found' }],
+        });
+      }
+
+      if (localUser.id !== contract.landlordId) {
+        return res.status(403).json({
+          status: 403,
+          code: 'FORBIDDEN',
+          messages: [
+            { message: 'Only the contract landlord can upload the signed PDF.' },
+          ],
+        });
+      }
+
+      // Storage write FIRST (produces URL), then DB write. On DB failure
+      // we compensate by deleting the disk file. Opposite order (DB
+      // first, storage after) would leave the DB pointing at a missing
+      // file if the storage write fails.
+      const saved = await saveSignedContractPdf(contractId, file.buffer);
+
+      try {
+        const view = await attachSignedPdfToContract(contractId, saved.url);
+        return res.status(200).json(view);
+      } catch (dbErr) {
+        // Compensate: remove the just-written file so disk and DB stay
+        // in sync. Cleanup failures are logged but don't hide the
+        // original DB error from the caller.
+        await removeContractDocumentAbsolute(saved.absolutePath).catch((cleanupErr) => {
+          logger.warn(
+            { cleanupErr, contractId, absolutePath: saved.absolutePath },
+            '[contract.uploadSignedDocument] failed to clean up orphan PDF after DB rollback',
+          );
+        });
+        throw dbErr;
+      }
     } catch (err) {
       next(err);
     }

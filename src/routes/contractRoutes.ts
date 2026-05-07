@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { contractController } from '../controllers/contractController';
+import { contractDocumentUploadHandler } from '../middlewares/contractDocumentUploadMiddleware';
 
 const router = Router();
 
@@ -191,6 +192,99 @@ router.get('/contracts/:id', contractController.getById);
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.get('/contracts/:id/pdf', contractController.getPdf);
+
+/**
+ * @swagger
+ * /contracts/{id}/signed-document:
+ *   put:
+ *     summary: Upload do PDF assinado do contrato (US-016)
+ *     description: |
+ *       O landlord envia o PDF assinado (multipart/form-data, campo `signedPdf`).
+ *       O backend valida:
+ *       - `Content-Type` do arquivo é `application/pdf` (rejeita antes de buferizar).
+ *       - Magic bytes — os 4 primeiros bytes do buffer são `%PDF` (defesa contra
+ *         clientes que mentem no mime type).
+ *
+ *       Limite de tamanho: 15MB por padrão. Configurável via variável de ambiente
+ *       `CONTRACT_PDF_MAX_BYTES` (bytes). Acima do limite retorna 400
+ *       `FILE_TOO_LARGE`.
+ *
+ *       Autorização: somente o landlord do contrato pode subir. Tenant ou
+ *       terceiros autenticados recebem 403.
+ *
+ *       Persiste `pdfUrl` (path relativo de storage) + `signedAt` (timestamp do
+ *       servidor). Se o DB write falhar após a gravação em disco, o arquivo é
+ *       removido para evitar orfãos (outer try/catch compensation).
+ *     tags: [Contratos]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: 'string', format: 'uuid' }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [signedPdf]
+ *             properties:
+ *               signedPdf:
+ *                 type: string
+ *                 format: binary
+ *                 description: PDF assinado (application/pdf, max 15MB por padrão).
+ *     responses:
+ *       200:
+ *         description: Upload bem-sucedido. Retorna o PDF atualmente vinculado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [pdfUrl, signedAt]
+ *               properties:
+ *                 pdfUrl:
+ *                   type: string
+ *                   example: '/uploads/contracts/55555555-5555-5555-5555-555555555555/abc.pdf'
+ *                 signedAt:
+ *                   type: string
+ *                   format: date-time
+ *       400:
+ *         description: |
+ *           Falha de upload/validação:
+ *           - `INVALID_FILE_TYPE` — mime não é `application/pdf` OU magic bytes não são `%PDF`.
+ *           - `FILE_TOO_LARGE` — excede `CONTRACT_PDF_MAX_BYTES` (default 15MB).
+ *           - `UNEXPECTED_FILE_FIELD` — campo do multipart diferente de `signedPdf`.
+ *           - `VALIDATION_ERROR` — campo `signedPdf` ausente.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Token ausente ou inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: Caller não é o landlord do contrato.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Contrato não encontrado (`NOT_FOUND`).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.put(
+  '/contracts/:id/signed-document',
+  contractDocumentUploadHandler,
+  contractController.uploadSignedDocument,
+);
 
 /**
  * @swagger
