@@ -180,6 +180,8 @@ model Property {
   area         Float        @default(0)
   isFurnished  Boolean      @default(false) @map("is_furnished")
   petsAllowed  Boolean      @default(false) @map("pets_allowed")
+  hasWifi      Boolean      @default(false) @map("has_wifi")
+  hasPool      Boolean      @default(false) @map("has_pool")
   latitude     Float?
   longitude    Float?
   nearSubway   Boolean      @default(false) @map("near_subway")
