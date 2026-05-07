@@ -278,6 +278,34 @@ export const conversationService = {
   },
 
   /**
+   * LL-015 — mark-all-as-read. Marca TODAS as mensagens da thread ainda não
+   * lidas cujo autor NÃO é o caller, retornando a lista de ids atingidos.
+   *
+   * Implementado com `UPDATE ... RETURNING` via `$queryRaw` (em vez do padrão
+   * select-then-updateMany do LL-012) por dois motivos: (1) casa a redação da
+   * PRD ("capture updated ids via RETURNING") byte-a-byte; (2) remove o SELECT
+   * intermediário, o que fecha a janela de race entre ler/gravar — a transição
+   * "unread → read" fica atômica numa única query. `updateMany` não expõe ids
+   * atualizados no Prisma atual; `RETURNING` é a única rota direta aqui.
+   *
+   * O caller (controller) já validou participação via o mesmo guard
+   * existence-hiding 404 de LL-012/LL-013; este método assume esse invariante e
+   * só se preocupa com a semântica do UPDATE. Retorna `[]` quando não há nada
+   * a marcar — o controller usa isso pra evitar emitir socket barulhento.
+   */
+  async markAllRead(conversationId: string, userId: string): Promise<string[]> {
+    const rows = await prisma.$queryRaw<{ id: string }[]>`
+      UPDATE "conversation_messages"
+      SET "read_at" = NOW()
+      WHERE "conversation_id" = ${conversationId}::uuid
+        AND "author_id" != ${userId}::uuid
+        AND "read_at" IS NULL
+      RETURNING "id"
+    `;
+    return rows.map((r) => r.id);
+  },
+
+  /**
    * LL-013 — Persiste uma mensagem nova na thread. Assume que o caller já
    * passou pelo guard do controller (existe a conversa + o caller é
    * participante); este método NÃO re-valida autorização para evitar um

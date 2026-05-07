@@ -51,6 +51,15 @@ export type CreateConversationMessageParams = z.infer<
   typeof createConversationMessageParamsSchema
 >;
 
+// Path params de POST /api/conversations/:id/read (LL-015 — mark-all-as-read).
+// Mesma regra de UUID no path; mantido separado dos schemas acima para não
+// acoplar a semântica de três endpoints diferentes no mesmo tipo. Não há body
+// (o cliente só dispara a intenção de marcar todo o backlog como lido).
+export const markConversationReadParamsSchema = z.object({
+  id: z.string().uuid(),
+});
+export type MarkConversationReadParams = z.infer<typeof markConversationReadParamsSchema>;
+
 // Body de POST /api/conversations/:id/messages. `content.min(1)` rejeita
 // strings vazias com 400 antes de tocar o banco — evita linhas vazias na
 // tabela que seriam inúteis para o leitor e ainda disparariam o emit socket

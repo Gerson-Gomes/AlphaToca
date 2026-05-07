@@ -10,6 +10,7 @@ import {
   listConversationMessagesQuerySchema,
   createConversationMessageParamsSchema,
   createConversationMessageBodySchema,
+  markConversationReadParamsSchema,
 } from '../utils/conversationValidation';
 
 export const conversationController = {
@@ -245,6 +246,71 @@ export const conversationController = {
       );
 
       return res.status(201).json(message);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * POST /api/conversations/:id/read
+   *
+   * Endpoint explícito de "marcar tudo como lido" — pensado para recuperação
+   * de sockets (o cliente perdeu conexão, reconecta, e quer sincronizar o
+   * estado de leitura sem pedir paginação de mensagens). Em operação normal,
+   * LL-012 (GET /messages) já marca como lidas as mensagens da página; este
+   * endpoint cobre o caso onde o cliente não vai re-buscar as páginas.
+   *
+   * Ordem dos guards (mesma invariante de LL-012/LL-013):
+   *   1. 401 se não autenticado.
+   *   2. 400 se path :id falha Zod.
+   *   3. 404 se conversa não existe OU caller não é participante
+   *      (existence-hiding — não distingue "ausente" de "proibido").
+   *   4. 200 { markedRead: number } — sempre sucesso quando chega aqui.
+   *
+   * Side-effect socket: quando existe pelo menos uma linha atualizada, emite
+   * `conversation:message_read` para o OUTRO participante via
+   * conversationSocketService. Pula o emit quando updatedIds é vazio — nada
+   * transicionou; um evento vazio seria puro ruído.
+   */
+  async markAllRead(req: Request, res: Response, next: NextFunction) {
+    try {
+      const localUser = req.localUser;
+      if (!localUser) {
+        return res.status(401).json({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          messages: [{ message: 'Authentication required.' }],
+        });
+      }
+
+      const { id } = markConversationReadParamsSchema.parse(req.params);
+
+      const conversation = await prisma.conversation.findUnique({
+        where: { id },
+        select: { landlordId: true, tenantId: true },
+      });
+      if (
+        !conversation ||
+        (conversation.landlordId !== localUser.id && conversation.tenantId !== localUser.id)
+      ) {
+        return res.status(404).json({
+          status: 404,
+          code: 'NOT_FOUND',
+          messages: [{ message: 'Conversation not found' }],
+        });
+      }
+
+      const updatedIds = await conversationService.markAllRead(id, localUser.id);
+
+      if (updatedIds.length > 0) {
+        conversationSocketService.emitMessagesRead(
+          { id, landlordId: conversation.landlordId, tenantId: conversation.tenantId },
+          localUser.id,
+          updatedIds,
+        );
+      }
+
+      return res.status(200).json({ markedRead: updatedIds.length });
     } catch (error) {
       next(error);
     }

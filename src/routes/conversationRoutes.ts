@@ -307,4 +307,67 @@ router.get('/conversations/:id/messages', conversationController.listMessages);
  */
 router.post('/conversations/:id/messages', conversationController.createMessage);
 
+/**
+ * @swagger
+ * /conversations/{id}/read:
+ *   post:
+ *     summary: Marca todas as mensagens não lidas do contraparte como lidas
+ *     description: |
+ *       Endpoint explícito de "mark-all-as-read". Pensado para quando o cliente
+ *       perdeu o socket e precisa re-sincronizar o estado de leitura sem
+ *       paginar pelo histórico inteiro (o GET `/messages` também marca, porém
+ *       só o que cai na página consultada).
+ *
+ *       Efeito: `UPDATE conversation_messages SET read_at = NOW()` onde
+ *       `conversation_id = :id AND author_id != localUser.id AND read_at IS NULL`,
+ *       retornando os ids atingidos via `RETURNING` para um único round-trip.
+ *       Quando pelo menos uma mensagem transiciona, dispara
+ *       `conversation:message_read` via Socket.IO ao OUTRO participante.
+ *
+ *       Autorização segue a regra **existence-hiding 404** de LL-012 e LL-013:
+ *       conversa inexistente E caller não-participante respondem 404 (nunca 403)
+ *       para fechar o oráculo de enumeração de ids.
+ *     tags: [Conversations]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       200:
+ *         description: Retorna o total de mensagens marcadas como lidas nesta chamada.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 markedRead:
+ *                   type: integer
+ *                   minimum: 0
+ *                   description: Quantidade de linhas transicionadas de unread para read.
+ *       400:
+ *         description: `id` não-UUID.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Token ausente ou inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Conversa não encontrada OU caller não é participante (existence-hiding).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.post('/conversations/:id/read', conversationController.markAllRead);
+
 export default router;
