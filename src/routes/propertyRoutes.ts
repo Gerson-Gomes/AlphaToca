@@ -412,7 +412,7 @@ router.put('/properties/:id/moderation', ...adminAuthStack, propertyController.m
  *           application/json:
  *             schema:
  *               type: object
- *               required: [period, status, updatedAt, updatedBy]
+ *               required: [period, status, amount, updatedAt, updatedBy]
  *               properties:
  *                 period:
  *                   type: string
@@ -421,6 +421,15 @@ router.put('/properties/:id/moderation', ...adminAuthStack, propertyController.m
  *                 status:
  *                   type: string
  *                   enum: [AWAITING, PAID, LATE]
+ *                 amount:
+ *                   type: number
+ *                   format: float
+ *                   nullable: true
+ *                   description: |
+ *                     Valor do aluguel em BRL, snapshot do Contract.monthlyRent
+ *                     ACTIVE no momento da gravação. `null` quando não há contrato
+ *                     ativo no write OU quando a linha pré-existia ao backfill
+ *                     best-effort (LL-003).
  *                 updatedAt:
  *                   type: string
  *                   format: date-time
@@ -502,7 +511,7 @@ router.get(
  *           application/json:
  *             schema:
  *               type: object
- *               required: [period, status, updatedAt, updatedBy]
+ *               required: [period, status, amount, updatedAt, updatedBy]
  *               properties:
  *                 period:
  *                   type: string
@@ -511,6 +520,15 @@ router.get(
  *                 status:
  *                   type: string
  *                   enum: [AWAITING, PAID, LATE]
+ *                 amount:
+ *                   type: number
+ *                   format: float
+ *                   nullable: true
+ *                   description: |
+ *                     Valor do aluguel em BRL, snapshot do Contract.monthlyRent
+ *                     ACTIVE no momento da gravação. `null` quando não há contrato
+ *                     ativo no write OU quando a linha pré-existia ao backfill
+ *                     best-effort (LL-003).
  *                 updatedAt:
  *                   type: string
  *                   format: date-time

@@ -498,6 +498,12 @@ model RentalPayment {
   propertyId String              @map("property_id")
   period     String              @db.VarChar(7) // formato 'YYYY-MM'
   status     RentalPaymentStatus @default(AWAITING)
+  // Valor do aluguel do mês, em BRL. Gravado no upsert a partir do
+  // Contract.monthlyRent ativo no momento. Nullable: a coluna foi adicionada
+  // após linhas já existirem e só é backfilled best-effort (ver migration
+  // header). Mantendo nullable também cobre o caso de imóvel sem contrato
+  // ativo no momento do write (LL-003).
+  amount     Decimal?            @db.Decimal(10, 2)
   updatedAt  DateTime            @updatedAt @map("updated_at")
   updatedBy  String?             @map("updated_by")
 

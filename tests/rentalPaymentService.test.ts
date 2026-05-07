@@ -6,6 +6,9 @@ vi.mock('../src/config/db', () => ({
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
+    contract: {
+      findFirst: vi.fn(),
+    },
   },
 }));
 
@@ -14,9 +17,12 @@ import { rentalPaymentService, currentPeriod } from '../src/services/rentalPayme
 
 const mockFindUnique = (prisma.rentalPayment.findUnique as any) as ReturnType<typeof vi.fn>;
 const mockUpsert = (prisma.rentalPayment.upsert as any) as ReturnType<typeof vi.fn>;
+const mockContractFindFirst = (prisma.contract.findFirst as any) as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: no active contract — amount is null in upsert unless explicitly set.
+  mockContractFindFirst.mockResolvedValue(null);
 });
 
 describe('currentPeriod()', () => {
@@ -43,6 +49,7 @@ describe('rentalPaymentService.getCurrent()', () => {
     expect(result).toEqual({
       period: '2026-05',
       status: 'AWAITING',
+      amount: null,
       updatedAt: null,
       updatedBy: null,
     });
@@ -57,6 +64,7 @@ describe('rentalPaymentService.getCurrent()', () => {
       select: {
         period: true,
         status: true,
+        amount: true,
         updatedAt: true,
         updatedBy: true,
       },
@@ -68,6 +76,7 @@ describe('rentalPaymentService.getCurrent()', () => {
     mockFindUnique.mockResolvedValue({
       period: '2026-05',
       status: 'PAID',
+      amount: '3200.00',
       updatedAt,
       updatedBy: '22222222-2222-2222-2222-222222222222',
     });
@@ -80,6 +89,7 @@ describe('rentalPaymentService.getCurrent()', () => {
     expect(result).toEqual({
       period: '2026-05',
       status: 'PAID',
+      amount: 3200,
       updatedAt: updatedAt.toISOString(),
       updatedBy: '22222222-2222-2222-2222-222222222222',
     });
@@ -89,6 +99,7 @@ describe('rentalPaymentService.getCurrent()', () => {
     mockFindUnique.mockResolvedValue({
       period: '2026-05',
       status: 'LATE',
+      amount: null,
       updatedAt: new Date('2026-05-05T10:00:00Z'),
       updatedBy: null,
     });
@@ -97,6 +108,7 @@ describe('rentalPaymentService.getCurrent()', () => {
 
     expect(result.status).toBe('LATE');
     expect(result.updatedBy).toBeNull();
+    expect(result.amount).toBeNull();
     expect(typeof result.updatedAt).toBe('string');
   });
 });
@@ -107,9 +119,11 @@ describe('rentalPaymentService.upsertCurrent()', () => {
 
   it('upserts using the compound-unique (propertyId, period) key and server-computed period', async () => {
     const updatedAt = new Date('2026-05-07T12:00:00Z');
+    mockContractFindFirst.mockResolvedValue({ monthlyRent: '3200.00' });
     mockUpsert.mockResolvedValue({
       period: '2026-05',
       status: 'PAID',
+      amount: '3200.00',
       updatedAt,
       updatedBy: USER_ID,
     });
@@ -124,6 +138,7 @@ describe('rentalPaymentService.upsertCurrent()', () => {
     expect(result).toEqual({
       period: '2026-05',
       status: 'PAID',
+      amount: 3200,
       updatedAt: updatedAt.toISOString(),
       updatedBy: USER_ID,
     });
@@ -138,15 +153,18 @@ describe('rentalPaymentService.upsertCurrent()', () => {
         propertyId: PROPERTY_ID,
         period: '2026-05',
         status: 'PAID',
+        amount: 3200,
         updatedBy: USER_ID,
       },
       update: {
         status: 'PAID',
+        amount: 3200,
         updatedBy: USER_ID,
       },
       select: {
         period: true,
         status: true,
+        amount: true,
         updatedAt: true,
         updatedBy: true,
       },
@@ -156,9 +174,11 @@ describe('rentalPaymentService.upsertCurrent()', () => {
 
   it('returns ISO-serialized updatedAt from the upsert result', async () => {
     const updatedAt = new Date('2026-11-15T09:30:00Z');
+    mockContractFindFirst.mockResolvedValue({ monthlyRent: '2500.00' });
     mockUpsert.mockResolvedValue({
       period: '2026-11',
       status: 'LATE',
+      amount: '2500.00',
       updatedAt,
       updatedBy: USER_ID,
     });
@@ -176,9 +196,11 @@ describe('rentalPaymentService.upsertCurrent()', () => {
   });
 
   it('ignores any period the caller might hint at — always uses currentPeriod(now)', async () => {
+    mockContractFindFirst.mockResolvedValue(null);
     mockUpsert.mockResolvedValue({
       period: '2026-01',
       status: 'AWAITING',
+      amount: null,
       updatedAt: new Date('2026-01-20T00:00:00Z'),
       updatedBy: USER_ID,
     });

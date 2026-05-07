@@ -13,9 +13,23 @@ export function currentPeriod(now: Date = new Date()): string {
 export type RentalPaymentView = {
   period: string;
   status: RentalPaymentStatus;
+  amount: number | null;
   updatedAt: string | null;
   updatedBy: string | null;
 };
+
+// Retorna o monthly_rent do contrato ACTIVE para o imóvel, ou `null` quando
+// não há contrato ativo no momento. Leitura no write time — histórico de
+// mudanças de rent NÃO é preservado (ver PRD §8 Q2 e o header da migration
+// 20260507210000_add_rental_payment_amount).
+async function getActiveMonthlyRent(propertyId: string): Promise<number | null> {
+  const contract = await prisma.contract.findFirst({
+    where: { propertyId, status: 'ACTIVE' },
+    select: { monthlyRent: true },
+    orderBy: { createdAt: 'desc' },
+  });
+  return contract ? Number(contract.monthlyRent) : null;
+}
 
 export const rentalPaymentService = {
   /**
@@ -34,6 +48,7 @@ export const rentalPaymentService = {
       select: {
         period: true,
         status: true,
+        amount: true,
         updatedAt: true,
         updatedBy: true,
       },
@@ -43,6 +58,7 @@ export const rentalPaymentService = {
       return {
         period,
         status: RentalPaymentStatus.AWAITING,
+        amount: null,
         updatedAt: null,
         updatedBy: null,
       };
@@ -51,6 +67,7 @@ export const rentalPaymentService = {
     return {
       period: row.period,
       status: row.status,
+      amount: row.amount === null ? null : Number(row.amount),
       updatedAt: row.updatedAt.toISOString(),
       updatedBy: row.updatedBy,
     };
@@ -63,7 +80,9 @@ export const rentalPaymentService = {
    *
    * `updatedBy` é o id do usuário autenticado (locador dono do imóvel). O
    * `updatedAt` é gerenciado pelo Prisma via `@updatedAt` em create/update.
-   * Retorna a mesma forma de `getCurrent` para o UI reutilizar o renderer.
+   * `amount` é fotografado a partir do Contract.monthlyRent ACTIVE no momento
+   * do write (LL-003); `null` quando não há contrato ativo. Retorna a mesma
+   * forma de `getCurrent` para o UI reutilizar o renderer.
    */
   async upsertCurrent(
     propertyId: string,
@@ -72,6 +91,7 @@ export const rentalPaymentService = {
     now: Date = new Date(),
   ): Promise<RentalPaymentView> {
     const period = currentPeriod(now);
+    const amount = await getActiveMonthlyRent(propertyId);
     const row = await prisma.rentalPayment.upsert({
       where: {
         rental_payments_property_period_key: { propertyId, period },
@@ -80,15 +100,18 @@ export const rentalPaymentService = {
         propertyId,
         period,
         status,
+        amount,
         updatedBy,
       },
       update: {
         status,
+        amount,
         updatedBy,
       },
       select: {
         period: true,
         status: true,
+        amount: true,
         updatedAt: true,
         updatedBy: true,
       },
@@ -97,6 +120,7 @@ export const rentalPaymentService = {
     return {
       period: row.period,
       status: row.status,
+      amount: row.amount === null ? null : Number(row.amount),
       updatedAt: row.updatedAt.toISOString(),
       updatedBy: row.updatedBy,
     };

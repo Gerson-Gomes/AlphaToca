@@ -12,6 +12,7 @@ Started: Thu May  7 04:25:36 PM -03 2026
 - Pre-existing test failures (21 tests in auth / ingestKnowledge / ragChainService / ragRetrieverService / userSync / visitValidation) are unrelated to LL-001 — confirmed by stash-and-rerun.
 - HTTP tests that need to exercise BOTH the 401 stub AND the real 403 from `requireRole` MUST use `vi.mock('../src/middlewares/authMiddleware', async (importOriginal) => { const actual = await importOriginal() as any; return { ...actual, checkJwt: ..., authSyncMiddleware: ... }; })` — i.e. preserve `requireRole` from the real module. The plain object-literal mock form (see `conversationResolve.test.ts`) shadows `requireRole` with a pass-through and makes 403 untestable. See `tests/adminSupportTicketsList.test.ts` for the importOriginal pattern.
 - Role-gated route mounts chain middlewares at the `app.use` level rather than spreading them per route: `app.use('/api', authStack, requireRole(Role.LANDLORD), landlordRoutes)`. Routes inside the router stay flat.
+- `@db.Decimal(10, 2)` columns emit `DECIMAL(10,2)` (not `NUMERIC(10,2)`) in Prisma-generated DDL. When PRD acceptance criteria call for `NUMERIC`, follow `prisma migrate diff` output instead — byte-for-byte match is the ACTUAL acceptance gate. Deserialize Decimal → number in the view with `Number(row.field)` (matches `contractService.getActiveContractByPropertyAndTenant`).
 
 ## 2026-05-07 - LL-001 — Profile view tracking table + increment hook
 - Added `ProfileView` Prisma model (landlordId, viewerId?, viewedAt) + inverse relation on `User` + `@@index([landlordId, viewedAt])` + onDelete Cascade.
@@ -45,4 +46,25 @@ Started: Thu May  7 04:25:36 PM -03 2026
   - Casting `prisma as any` at the call site of a not-yet-generated model (`(prisma as any).conversationMessage.count(...)`) lets the endpoint compile and exercise the P2021 fallback today, without waiting for LL-010's `prisma generate`. When LL-010 lands, drop the `as any`.
   - Testing 403 from `requireRole` requires the `importOriginal` mock variant — pattern now captured in the Codebase Patterns section above.
   - Mocking `../src/config/db` as a default-export object (`{ default: { profileView: { count: mockFn }, ... } }`) is the right shape for controllers that do `import prisma from '../config/db'`. Namespace-level model functions like `.count` can be driven per-test with `mockFn.mockResolvedValue(...)`.
+---
+
+## 2026-05-07 - LL-003 — Add RentalPayment.amount column + backfill migration
+- Added nullable `amount Decimal? @db.Decimal(10, 2)` to the `RentalPayment` model in `prisma/schema.prisma`.
+- Hand-authored `prisma/migrations/20260507210000_add_rental_payment_amount/migration.sql` — single `ALTER TABLE "rental_payments" ADD COLUMN "amount" DECIMAL(10,2);` + correlated UPDATE backfill pulling `contracts.monthly_rent` for each property's ACTIVE contract (LIMIT 1 per propertyId). Header comment matches PRD wording verbatim.
+- Verified byte-for-byte: `npx prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script` emits `"amount" DECIMAL(10,2),` inside the rental_payments CREATE TABLE — the ADD COLUMN in my migration matches that column declaration.
+- `npx prisma validate` + `npx prisma generate` both succeed.
+- Updated `src/services/rentalPaymentService.ts`:
+  - `RentalPaymentView` now carries `amount: number | null`.
+  - `getCurrent` selects `amount` and serializes Decimal → number via `Number(row.amount)`; default-shape (no row) returns `amount: null`.
+  - `upsertCurrent` calls a new `getActiveMonthlyRent(propertyId)` helper that queries `prisma.contract.findFirst({where: {propertyId, status: 'ACTIVE'}, orderBy: {createdAt: 'desc'}})` and returns `Number(monthlyRent)` or `null`. The snapshot goes into BOTH `create.amount` and `update.amount` so subsequent writes re-read the then-active rent (matches PRD §8 Q2 "no historical preservation").
+- Swagger JSDoc for `GET|PUT /properties/:id/payments/current` in `src/routes/propertyRoutes.ts` now documents the `amount` field (nullable float in BRL, snapshot-at-write semantics).
+- Files changed: `prisma/schema.prisma`, `prisma/migrations/20260507210000_add_rental_payment_amount/migration.sql`, `src/services/rentalPaymentService.ts`, `src/routes/propertyRoutes.ts`, `tests/rentalPaymentService.test.ts` (updated to match new select/shape + mock `prisma.contract.findFirst`), `tests/rentalPaymentAmount.test.ts` (new — 5 focused tests).
+- Tests: 25/25 pass across `rentalPaymentAmount.test.ts` (5) + `rentalPaymentService.test.ts` (10) + `rentalPaymentCurrent.test.ts` (10). The HTTP controller tests in `rentalPaymentCurrent.test.ts` mock the service layer, so they continue to pass unchanged — the amount field flows through the controller as-is.
+- `npx tsc --noEmit` clean. Full suite: 422/443 pass — the 21 failures are the same pre-existing set captured in the Codebase Patterns section (auth/userSync/ingestKnowledge/rag*/visitValidation), unchanged by this story.
+- **Learnings for future iterations:**
+  - Prisma Decimal columns round-trip as Decimal objects (not native number). In this codebase, views cast with `Number(row.field)` — consistent with `contractService.getActiveContractByPropertyAndTenant` (src/services/contractService.ts:249). `Number()` is null-safe only if you handle the null case separately (my code uses `row.amount === null ? null : Number(row.amount)`).
+  - `prisma migrate diff --from-empty --to-schema-datamodel` emits `DECIMAL(10,2)` for `@db.Decimal(10, 2)` fields. PRD drafts that specify `NUMERIC(10,2)` should be read as semantic intent — the byte-for-byte acceptance gate follows Prisma's output. NUMERIC and DECIMAL are synonyms in Postgres, but the migration string must match the diff.
+  - `upsertCurrent` now does one extra read (active-contract lookup) before the upsert. Acceptable because GET/PUT payments/current is one-property-at-a-time; the lookup is indexed on `contracts.property_id`. If future analytics endpoints SUM(amount) across many properties, they read the already-persisted snapshot — no N+1 on that path.
+  - When updating a service signature, the downstream HTTP test (rentalPaymentCurrent.test.ts) that mocks `rentalPaymentService.upsertCurrent` entirely keeps passing because the mock supplies the full response shape. But the *service-level* test (rentalPaymentService.test.ts) needed to be updated to mock the new `prisma.contract.findFirst` — without that mock, `upsertCurrent` throws `findFirst is not a function` during the active-rent lookup.
+  - Next migration timestamp should be `>= 20260507210001` to preserve strict lex order. Existing ceiling is now `20260507210000`.
 ---
