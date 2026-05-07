@@ -42,6 +42,17 @@ const options: swaggerJsdoc.Options = {
             createdAt: { type: 'string', format: 'date-time' },
           },
         },
+        PropertyImage: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', format: 'uuid' },
+            propertyId: { type: 'string', format: 'uuid' },
+            url: { type: 'string', example: '/uploads/550e8400-e29b-41d4-a716-446655440000/3fa85f64-5717-4562-b3fc-2c963f66afa6.jpg' },
+            isCover: { type: 'boolean', default: false },
+            caption: { type: 'string', nullable: true, example: 'Sala de Estar' },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+        },
         Property: {
           type: 'object',
           required: ['landlordId', 'title', 'description', 'price', 'address'],
@@ -68,6 +79,11 @@ const options: swaggerJsdoc.Options = {
             condoFee: { type: 'number', example: 500.00 },
             propertyTax: { type: 'number', example: 150.00 },
             createdAt: { type: 'string', format: 'date-time' },
+            images: {
+              type: 'array',
+              description: 'Fotos da propriedade. A primeira foto enviada é marcada como capa (isCover=true).',
+              items: { $ref: '#/components/schemas/PropertyImage' },
+            },
           },
         },
         WhatsAppPayload: {

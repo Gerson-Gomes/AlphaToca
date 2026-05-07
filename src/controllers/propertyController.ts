@@ -11,7 +11,8 @@ export const propertyController = {
   async create(req: Request, res: Response, next: NextFunction) {
     try {
       const validatedData = createPropertySchema.parse(req.body);
-      const property = await propertyService.createProperty(validatedData);
+      const files = req.files as Express.Multer.File[] | undefined;
+      const property = await propertyService.createProperty(validatedData, files);
       return res.status(201).json(property);
     } catch (error) {
       next(error);

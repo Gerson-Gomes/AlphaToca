@@ -1,102 +1,167 @@
 {
   "project": "I-Moveis",
-  "branchName": "ralph/fix-seed-uuid-consistency",
-  "description": "Fix Seed/Validator UUID Consistency - Demo seed in prisma/demoData.ts inserts human-readable ids (e.g. user-demo-landlord-1) that fail the backend's strict z.string().uuid() validators, so /users/me returns an identity the backend itself rejects on downstream filtered routes. Replace seed ids with canonical UUID v4 literals exposed as exported constants, keep validators strict, document the drop+re-seed flow, and add a regression test that exercises the real /users/me to /properties/search chain.",
+  "branchName": "ralph/property-photo-upload",
+  "description": "Property Photo Upload - Enable landlords to upload JPEG/PNG photos when creating a property via multipart/form-data on POST /properties. Photos are stored on the local filesystem at uploads/<propertyId>/<uuid>.<ext> and referenced by the existing property_images table. Up to 20 photos, 10MB each. First photo becomes the cover (isCover=true). Property + images creation is atomic: on any failure, database is rolled back AND files are removed from disk.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Create prisma/demoIds.ts with canonical UUID v4 constants",
-      "description": "As a backend developer, I need a single module exporting canonical UUID constants for every hardcoded demo entity so seed, tests, and docs share one source of truth.",
+      "title": "Install multer and type definitions",
+      "description": "As a developer, I need a multipart parser so Express can process binary file uploads in POST /properties requests.",
       "acceptanceCriteria": [
-        "New file prisma/demoIds.ts exports named string constants for every demo entity currently hardcoded in prisma/demoData.ts: 3 users (DEMO_LANDLORD_1_ID, DEMO_TENANT_1_ID, DEMO_ADMIN_ID), 5 properties (DEMO_PROPERTY_SP_1_ID, DEMO_PROPERTY_RJ_1_ID through DEMO_PROPERTY_RJ_4_ID), and 11 property image ids (DEMO_IMAGE_RJ_1_ID through DEMO_IMAGE_RJ_4_ID, DEMO_IMAGE_RJ2_1_ID through DEMO_IMAGE_RJ2_4_ID, DEMO_IMAGE_RJ3_1_ID, DEMO_IMAGE_RJ3_2_ID). Verify count with: grep -cE \"^\\s*id: '(user-demo|prop-demo|img-demo)\" prisma/demoData.ts before editing demoData.ts",
-        "Every exported constant is a hardcoded UUID v4 string literal (not crypto.randomUUID(), not runtime-generated) so ids stay stable across re-seeds, CI runs, and developer machines",
-        "Every exported constant passes z.string().uuid().safeParse(...).success === true, verified by a unit test at tests/demoIds.test.ts that imports all constants and asserts each one",
-        "tests/demoIds.test.ts passes: npx vitest run tests/demoIds.test.ts",
-        "Typecheck passes: npx tsc --noEmit",
-        "Tests pass: npx vitest run"
+        "Add 'multer' to dependencies in package.json (latest stable v1.x)",
+        "Add '@types/multer' to devDependencies in package.json",
+        "Run npm install so package-lock.json is updated and node_modules/multer exists",
+        "Import multer from 'multer' in a TypeScript file compiles without error",
+        "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Implemented prisma/demoIds.ts with 18 canonical UUID v4 literal constants (3 users, 5 properties, 10 images). Added tests/demoIds.test.ts with 38 assertions (presence, z.string().uuid(), strict v4 regex, uniqueness) — all pass. Typecheck clean. The 'verify count with grep' in AC returns 18 occurrences in demoData.ts (3+5+10). PRD prose said 11 image ids but enumerated list only lists 10 (RJ_1-4, RJ2_1-4, RJ3_1-2); followed the enumerated list which matches demoData.ts."
+      "notes": "Installed multer@^1.4.5-lts.2 (latest v1.x LTS) and @types/multer@^2.1.0. Note: npm emits a deprecation warning for multer 1.x recommending upgrade to 2.x. PRD explicitly requested v1.x, so this was honored; upgrading to multer@2 may be reconsidered in a follow-up for its security patches."
     },
     {
       "id": "US-002",
-      "title": "Rewrite prisma/demoData.ts to consume the UUID constants",
-      "description": "As a backend developer, I want prisma/demoData.ts to reference the constants from prisma/demoIds.ts so the seed stops inserting ids that fail the global UUID validators.",
+      "title": "Create multer upload middleware with validation",
+      "description": "As a developer, I need a pre-configured multer instance that enforces file type, size, and count limits for property photos.",
       "acceptanceCriteria": [
-        "prisma/demoData.ts imports every constant from ./demoIds and uses them for all id and cross-reference fields. After the change, zero occurrences of the legacy literals remain: grep -E \"(user-demo-|prop-demo-|img-demo-)\" prisma/demoData.ts returns no matches",
-        "Cross-references are updated consistently: every landlordId field in demoProperties references DEMO_LANDLORD_1_ID, and every propertyId field in demoPropertyImages references the matching DEMO_PROPERTY_* constant",
-        "demo user email fields stay intact (e.g. landlord1@demo.com) so identification of demo users via email + role still works. No slug or demoLabel field is added to the Prisma schema",
-        "firebaseUid env-var fallbacks (LANDLORD_FIREBASE_UID, TENANT_FIREBASE_UID, ADMIN_FIREBASE_UID) are unchanged - only the Prisma id PK fields change",
-        "prisma/schema.prisma is unchanged (still id String, no @db.Uuid, no @default(dbgenerated))",
-        "Typecheck passes: npx tsc --noEmit",
-        "Tests pass: npx vitest run"
+        "New file src/middlewares/uploadMiddleware.ts exports a multer instance named 'propertyPhotoUpload'",
+        "Uses multer.memoryStorage() so files are buffered in RAM and only written to disk after property creation succeeds",
+        "Sets limits: { fileSize: 10 * 1024 * 1024, files: 20 } (10MB per file, 20 files max)",
+        "fileFilter accepts only MIME types 'image/jpeg' and 'image/png' — rejects other types by calling cb() with an Error whose message is 'INVALID_FILE_TYPE' (no file is attached)",
+        "Exports a convenience handler using propertyPhotoUpload.array('photos', 20) so routes can import it directly",
+        "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 2,
       "passes": true,
-      "notes": "Rewrote prisma/demoData.ts to import 18 constants from ./demoIds and use them for every id/landlordId/propertyId field. grep -E '(user-demo-|prop-demo-|img-demo-)' prisma/demoData.ts returns zero matches (exit 1). Image URL strings were template-literal-ed to reference the property UUID constant (e.g. `http://10.0.2.2:3000/uploads/${DEMO_PROPERTY_RJ_1_ID}/0001.png`) and the on-disk upload directories were renamed to match (uploads/prop-demo-rj-1 → uploads/b0000001-0000-4000-8000-000000000001, etc). Email fields, firebaseUid env fallbacks, and prisma/schema.prisma all unchanged. Typecheck clean; full test suite 16 pre-existing failures / 206 passed — identical to the baseline documented in progress.txt."
+      "notes": "Created src/middlewares/uploadMiddleware.ts exporting propertyPhotoUpload (multer instance with memoryStorage, 10MB/20 file limits, JPEG/PNG-only fileFilter that rejects with Error('INVALID_FILE_TYPE')) and a convenience handler propertyPhotoUploadHandler = propertyPhotoUpload.array('photos', 20). Typecheck passes; pre-existing 16 test failures are Auth0 legacy tests unrelated to this change (confirmed by stashing and re-running)."
     },
     {
       "id": "US-003",
-      "title": "Run seed against clean local DB and document the re-seed command",
-      "description": "As a backend developer, I want to prove the new seed writes UUIDs end-to-end against the real local Postgres and document the drop+re-seed command so teammates can converge their envs.",
+      "title": "Create propertyImageStorageService for filesystem writes",
+      "description": "As a developer, I need a service that writes multer in-memory files to uploads/<propertyId>/ with safe UUID-based filenames and can clean up on failure.",
       "acceptanceCriteria": [
-        "Re-seed runs cleanly against local Docker DB (alphatoca_db on :5433, creds admin/admin_pwd, per Codebase Patterns in progress.txt). Use inline DATABASE_URL override; NEVER run migrate/seed against the production Supabase URL in .env",
-        "After re-seed, all user and property rows have canonical UUID ids. Ship a verification one-liner in the PR description, for example: DATABASE_URL=<local> npx tsx -e \"import prisma from './src/config/db'; prisma.user.findMany().then(us => { const re=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i; const bad=us.filter(u=>!re.test(u.id)); if(bad.length){console.error('NON-UUID',bad); process.exit(1);} console.log('OK',us.length); });\" exits 0",
-        "README.md gains a \"Re-seeding after the UUID migration\" section with the exact commands: npx prisma migrate reset --force (against local env) followed by npm run seed (or npx prisma db seed), plus the warning to never run migrate against the Supabase DATABASE_URL",
-        "No changes to prisma/seed.ts logic required - if the existing deleteMany() chain plus createMany() works unchanged, leave it alone",
-        "Typecheck passes: npx tsc --noEmit"
+        "New file src/services/propertyImageStorageService.ts exports async function savePropertyImages(propertyId: string, files: Express.Multer.File[]): Promise<{ url: string; isCover: boolean }[]>",
+        "Creates directory uploads/<propertyId>/ using fs/promises mkdir with { recursive: true }",
+        "Each file is saved as <crypto.randomUUID()>.<ext> where ext is derived from file.mimetype ('image/jpeg' -> 'jpg', 'image/png' -> 'png') — never uses file.originalname",
+        "Returns array in input order with url = '/uploads/<propertyId>/<uuid>.<ext>' and isCover=true only for index 0",
+        "Also exports async function cleanupPropertyImages(propertyId: string, urls: string[]): Promise<void> which deletes the given files (and the directory if empty), swallowing ENOENT errors",
+        "If any write fails mid-loop, the already-written files in that invocation are deleted before re-throwing the error",
+        "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 3,
       "passes": true,
-      "notes": "Ran `npm run seed` against the local Docker DB (`alphatoca_db` on 127.0.0.1:5433, user admin/admin_pwd, database `alphatoca`) via inline DATABASE_URL override. The existing deleteMany+createMany chain in prisma/seed.ts was left unchanged. After the re-seed, the verification one-liner (`npx tsx -e \"...Promise.all([prisma.user.findMany(), prisma.property.findMany()])...strict v4 regex...\"`) printed `OK users: 51 properties: 5` and exited 0. Spot-check via psql confirmed demo landlord id `11111111-1111-4111-8111-111111111111` and all five property ids (`a0000001-...`, `b0000001-...` through `b0000004-...`) match the DEMO_* constants. README.md gained a 'Re-seeding after the UUID migration' section with the drop+re-seed commands (both `prisma migrate reset --force` and the lighter `npm run seed`-only path) plus the warning to never run migrate against the Supabase DATABASE_URL. Typecheck clean; full suite still 16 pre-existing failures / 206 passed. Caveat: `prisma migrate reset --force` currently aborts on migration `20260505153136_add_rental_process_status_flow` because it is an exact byte-for-byte duplicate of `20260504204911_add_contract_logic` (both `CREATE TYPE \"ProposalStatus\"`), a pre-existing issue on main introduced in 45f7d1e — documented both commands in the README so devs whose schema is already up to date can skip the migrate step."
+      "notes": "Created src/services/propertyImageStorageService.ts. UPLOADS_ROOT resolves via path.join(__dirname, '../../uploads') — consistent with src/app.ts static-serving (__dirname/../uploads) so both dev (ts-node src/) and build (dist/) land at project-root uploads/. savePropertyImages early-returns [] when files is empty, derives ext strictly from MIME ('image/jpeg'->'jpg', 'image/png'->'png') via a lookup table (throws Error('INVALID_FILE_TYPE') if the filter is bypassed — belt-and-suspenders against US-002 regressions), mkdir {recursive:true}, then iterates writing files with randomUUID().ext filenames. On any writeFile failure, already-written files + the dir are cleaned up before rethrow. cleanupPropertyImages uses path.basename(url) to extract the filename (ignoring the URL prefix) and rmdir on the dir, swallowing ENOENT/ENOTEMPTY/EEXIST. Typecheck passes; test suite shows 16/212-passing with the same pre-existing Auth0 baseline — zero regressions since no existing code imports the new service yet."
     },
     {
       "id": "US-004",
-      "title": "Audit every z.string().uuid() validator and confirm none were loosened",
-      "description": "As a backend developer, I want written confirmation that every UUID validator stayed strict after the seed fix, so we don't silently ship a bypass.",
+      "title": "Update createPropertySchema to coerce multipart string values",
+      "description": "As a developer, I need the Zod schema to accept string inputs for numeric/boolean fields because multer populates req.body with strings in multipart requests.",
       "acceptanceCriteria": [
-        "New file tasks/audit-uuid-validators.md lists every z.string().uuid() call across these 6 files with file:line references, each marked strict/verified: src/utils/contractValidation.ts (propertyId, tenantId, landlordId), src/utils/proposalValidation.ts (propertyId, tenantId, landlordId and their optional variants), src/utils/visitValidation.ts (propertyId, tenantId, landlordId, rentalProcessId), src/utils/propertyValidation.ts (landlordId), src/utils/searchValidation.ts (landlordId, tenantId), src/utils/chatValidation.ts (sessionId, tenantId)",
-        "Grep guard: grep -rn \"z\\.string()\\.(min|nonempty)\" src/utils/ shows no occurrence that replaces a prior .uuid() on an id field (confirm no validator was downgraded to z.string().min(1) during this PRD)",
-        "If a genuine need to relax a validator is discovered, it is NOT silently changed - it is added to the Open Questions section of tasks/prd-fix-seed-uuid-consistency.md instead",
-        "Typecheck passes: npx tsc --noEmit"
+        "In src/utils/propertyValidation.ts, numeric fields (price, bedrooms, bathrooms, parkingSpots, area, latitude, longitude, views, condoFee, propertyTax) use z.coerce.number() (preserving existing .min/.max/.positive/etc constraints)",
+        "Boolean fields (isFurnished, petsAllowed, nearSubway, isFeatured) use z.coerce.boolean() or a preprocess that maps 'true'/'false' strings to booleans",
+        "Existing JSON requests (without file uploads) still pass validation — no regression",
+        "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 4,
       "passes": true,
-      "notes": "Wrote tasks/audit-uuid-validators.md cataloging all 20 z.string().uuid() calls across the 6 files (contractValidation 3, proposalValidation 5, visitValidation 7, propertyValidation 1, searchValidation 2, chatValidation 2). Every call is strict — none was downgraded to z.string().min(1) or .nonempty(). Grep guard `grep -rn 'z\\.string\\(\\)\\.(min|nonempty)' src/utils/` returned 8 hits, all on non-id fields (name, title, description, address, content) that predate this PRD. One PRD AC discrepancy documented in-line: the AC wording expected 6 proposalValidation.ts validators ('propertyId, tenantId, landlordId and their optional variants') but the file only has 5 — createProposalSchema omits landlordId (derived server-side from the property). No validator needed relaxing, so the Open Questions section of tasks/prd-fix-seed-uuid-consistency.md was left as-is. Typecheck clean."
+      "notes": "Rewrote createPropertySchema in src/utils/propertyValidation.ts. priceField switched from z.string().regex(...).transform(Decimal) to z.coerce.number().positive().transform(Decimal) — now accepts both multipart strings and JSON numbers. Added optional numeric fields (bedrooms/bathrooms/parkingSpots/views as int, area/latitude/longitude as float, condoFee/propertyTax as Decimal via optionalMoneyField helper) using z.coerce.number() with nonnegative/int constraints. Added type (PropertyType enum) as optional. Added boolean fields isFurnished/petsAllowed/nearSubway/isFeatured using a multipartBoolean preprocess helper that explicitly maps 'true'/'false' strings — z.coerce.boolean() was NOT used because it treats any non-empty string as truthy (so 'false' would become true, a silent data-corruption bug). Verified via smoke test that (1) JSON body with price as string '4500.00' and booleans as real booleans parses correctly, (2) multipart body with numeric strings and 'true'/'false' string booleans parses correctly, (3) negative price is rejected, (4) invalid boolean string ('nope') is rejected. Typecheck passes. Test baseline unchanged (16 pre-existing Auth0 failures / 212 pass)."
     },
     {
       "id": "US-005",
-      "title": "Add E2E regression test - authenticated landlord lists own properties",
-      "description": "As a backend developer, I want an automated test that exercises the full chain (/users/me returns id, GET /properties/search?landlordId={id} returns 200) so this class of seed/validator drift can't regress silently.",
+      "title": "Update propertyService.createProperty to persist images atomically",
+      "description": "As a developer, I need the create flow to run the property INSERT and property_images INSERTs in a single Prisma transaction, with filesystem cleanup on any failure.",
       "acceptanceCriteria": [
-        "New test file tests/seedUuidRegression.test.ts uses Supertest against the real Express app (follow the pattern of tests/visitController.test.ts or tests/webhookController.test.ts - NOT a fully mocked Prisma client)",
-        "Test 1: authenticated GET /users/me as the demo landlord returns 200, and the returned user.id passes z.string().uuid().safeParse(...).success",
-        "Test 2: GET /properties/search?landlordId={id extracted from /users/me} returns 200 (not 400) and the response data array length is >= 1",
-        "Test 3: GET /properties/search?landlordId=user-demo-landlord-1 (legacy format) returns 400 with code VALIDATION_ERROR - proving the validator stayed strict",
-        "Test file passes: npx vitest run tests/seedUuidRegression.test.ts",
-        "Full test suite still passes: npx vitest run",
-        "Typecheck passes: npx tsc --noEmit"
+        "propertyService.createProperty signature accepts an optional second parameter: files?: Express.Multer.File[]",
+        "If files is undefined or empty, behavior is identical to today (creates property only, no images)",
+        "If files is non-empty: (1) run prisma.$transaction that creates the Property; (2) inside the same transaction, call savePropertyImages(property.id, files) to write to disk; (3) inside the same transaction, call prisma.propertyImage.createMany with the returned url/isCover records (propertyId set to the new property.id)",
+        "If the transaction throws at any step, cleanupPropertyImages is called with any URLs already returned by savePropertyImages before the error is re-raised",
+        "Returns the created property with images relation included (prisma include: { images: true })",
+        "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 5,
       "passes": true,
-      "notes": "Added tests/seedUuidRegression.test.ts (3 cases, all pass). Uses Supertest against the real Express app via `import app from '../src/app'`. Mocks `../src/middlewares/authMiddleware` with a full-replacement stub (exports validateAuthConfig/checkJwt/authSyncMiddleware/requireRole) — checkJwt accepts `Bearer valid-landlord-token` and authSyncMiddleware attaches a synthesized localUser with id=DEMO_LANDLORD_1_ID. Also mocks `../src/services/propertyService.searchProperties` so the landlordId branch returns 2 demo-UUID properties without hitting Postgres — keeps Zod validation in the chain. Test 1: GET /api/users/me with Bearer token → 200, body.id passes `z.string().uuid().safeParse(...).success` AND the strict v4 regex AND === DEMO_LANDLORD_1_ID. Test 2: GET /api/properties/search?landlordId=<id from /users/me> → 200, data.length >= 1, mock called with landlordId=DEMO_LANDLORD_1_ID. Test 3: GET /api/properties/search?landlordId=user-demo-landlord-1 → 400 with code VALIDATION_ERROR (proves searchValidation.ts:39 stayed strict) and the mocked service was NOT called. `npx vitest run tests/seedUuidRegression.test.ts` → 3 passed. Full suite → 16 failed / 209 passed (baseline 16/206 + my 3). Typecheck clean."
+      "notes": "Updated propertyService.createProperty in src/services/propertyService.ts to accept optional files?: Express.Multer.File[] second parameter. Added PropertyWithImages return type alias (Property & { images: PropertyImage[] }). No-files branch short-circuits to a plain prisma.property.create with include:{images:true} (returns property with images:[], zero regression for JSON-only callers). Files-present branch runs inside prisma.$transaction(async (tx) => ...): (1) tx.property.create, (2) savePropertyImages (filesystem writes — inside the tx callback as PRD requires), (3) tx.propertyImage.createMany with the returned records, (4) tx.property.findUniqueOrThrow with images:true include. Outer try/catch tracks createdPropertyId and savedUrls so that on any throw (including downstream createMany failures after files were saved), cleanupPropertyImages is invoked with the URLs already returned by savePropertyImages, then the error is re-raised. Cleanup failures are swallowed but logged (don't mask the original error). Note: savePropertyImages already does internal cleanup if it throws mid-loop, so savedUrls stays [] in that case — cleanup runs only when createMany/findUniqueOrThrow fails AFTER a successful save. Typecheck passes; test baseline unchanged at 16 pre-existing Auth0 failures / 212 pass."
     },
     {
       "id": "US-006",
-      "title": "Update tests/seed.test.ts to assert UUID-shaped ids",
-      "description": "As a backend developer, I want the existing mocked seed unit test to assert that user.createMany received UUID-shaped ids, closing the gap that let the original bug through.",
+      "title": "Wire multer middleware into POST /properties route",
+      "description": "As a landlord, I want a single POST /properties request to create the property and upload photos together.",
       "acceptanceCriteria": [
-        "tests/seed.test.ts adds one assertion that every user id in the payload passed to prisma.user.createMany matches the UUID v4 regex /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i (or equals one of the DEMO_*_ID constants imported from ../prisma/demoIds)",
-        "A parallel assertion for prisma.property.createMany confirms every property.id and property.landlordId is UUID-shaped",
-        "Existing assertions (deleteMany called, createMany called, $executeRawUnsafe called) still pass unchanged",
-        "Test file passes: npx vitest run tests/seed.test.ts",
-        "Full test suite still passes: npx vitest run",
-        "Typecheck passes: npx tsc --noEmit"
+        "In src/routes/propertyRoutes.ts, POST /properties now applies propertyPhotoUpload.array('photos', 20) middleware before propertyController.create",
+        "propertyController.create reads req.files (typed as Express.Multer.File[] | undefined) and passes them as the second argument to propertyService.createProperty",
+        "Validation of req.body via createPropertySchema still runs first — if it fails, no files are written to disk (memoryStorage guarantees this)",
+        "Response 201 body includes the 'images' array populated with the created PropertyImage records",
+        "If req.files is undefined or empty, response 201 returns the property with images: [] — no regression from current JSON-only flow",
+        "Typecheck passes (npx tsc --noEmit)"
       ],
       "priority": 6,
       "passes": true,
-      "notes": "Rewrote tests/seed.test.ts to fix the long-standing @prisma/client mock gap and add UUID-shape assertions. Changed the mock from a factory-only `vi.mock('@prisma/client', () => ({ PrismaClient: class {...} }))` to the `vi.mock(import('@prisma/client'), async (importOriginal) => ({ ...actual, PrismaClient: class {...} }))` pattern so real enums (Role, PropertyType, PropertyStatus, ModerationStatus) flow through to prisma/demoData.ts's top-level `Role.LANDLORD`/`PropertyType.APARTMENT`/etc. references. Existing assertions (deleteMany/createMany/$executeRawUnsafe called) preserved unchanged in test 1. Added test 2: extracts user.createMany.mock.calls[0][0].data and asserts every user.id is either one of DEMO_{LANDLORD_1,TENANT_1,ADMIN}_ID or matches strict v4 regex /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i (random-generated landlord/tenant ids from generators.ts come via faker.string.uuid() which is v4). Added test 3: asserts every property.id AND property.landlordId in the property.createMany payload satisfy the same check. Also added propertyImage to the mocked client (prisma/seed.ts calls prisma.propertyImage.createMany which the old mock lacked — silent no-op before, now explicitly tracked). `npx vitest run tests/seed.test.ts` → 3/3 passed (was 0 passed / suite error on baseline). `npx tsc --noEmit` → clean. `npx vitest run` → 16 failed / 212 passed, versus the post-US-005 baseline of 16 failed / 209 passed: +3 passes, zero new failures, and tests/seed.test.ts is no longer in the failed-suites list (4 failed suites now instead of 5)."
+      "notes": "Added `import { propertyPhotoUploadHandler } from '../middlewares/uploadMiddleware'` to src/routes/propertyRoutes.ts and mounted it before propertyController.create on POST /properties (`router.post('/properties', propertyPhotoUploadHandler, propertyController.create)`). Updated propertyController.create to read `req.files as Express.Multer.File[] | undefined` and pass it as the second argument to `propertyService.createProperty(validatedData, files)`. TS's cast-via-`as` is needed because Express's base Request.files type is `{ [fieldname: string]: Express.Multer.File[] } | Express.Multer.File[] | undefined` — we know multer.array() gives us the array shape, so the narrower cast is safe. JSON-only callers (no multer-parsed files) still work unchanged — the service's no-files branch short-circuits and returns `images: []`. Typecheck passes; test baseline unchanged at 16 pre-existing Auth0 failures / 212 pass. Swagger JSDoc comment still documents the JSON-only request body — that's intentionally US-009's scope."
+    },
+    {
+      "id": "US-007",
+      "title": "Serve uploads/ directory statically via Express",
+      "description": "As a frontend, I need the returned URLs (/uploads/...) to be directly fetchable so <img src> tags can render the photos.",
+      "acceptanceCriteria": [
+        "In src/app.ts, register app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads'))) before the error handler",
+        "GET /uploads/<anyPropertyId>/<file>.jpg returns 200 with Content-Type image/jpeg when the file exists",
+        "GET /uploads/missing.jpg returns 404",
+        "Path traversal attempts (e.g., /uploads/../package.json) are blocked by express.static default behavior — return 404 or 403",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "Already implemented on main (src/app.ts:46) — `app.use('/uploads', express.static(path.join(__dirname, '../uploads')))` registered BEFORE the errorHandler at line 132. Deliberately used `path.join(__dirname, '../uploads')` rather than PRD's `path.resolve(process.cwd(), 'uploads')` — this is the established codebase pattern (progress.txt Codebase Patterns) and is more robust because `process.cwd()` changes based on where Node is launched from, whereas `__dirname` is always stable relative to the compiled/source file. Both resolve to the same project-root `uploads/` under ts-node and compiled `dist/`. Functional AC verified via a supertest smoke test (`src/__smoke_us007.ts`, removed after run): (1) GET /uploads/<propertyId>/0001.png → 200 image/png, (2) GET /uploads/missing.jpg → 404, (3) GET /uploads/../package.json (literal) → 404, (4) GET /uploads/..%2Fpackage.json (url-encoded traversal) → 404. Typecheck passes; test baseline unchanged at 16 pre-existing Auth0 failures / 212 pass."
+    },
+    {
+      "id": "US-008",
+      "title": "Handle multer and upload errors in the global error handler",
+      "description": "As an API consumer, I need multer errors to return 400 in the standard API error format ({ status, code, messages }), not raw stack traces.",
+      "acceptanceCriteria": [
+        "Global error handler middleware (wherever zod errors are handled today — inspect src/middlewares/ and src/app.ts to find it) detects instances of multer.MulterError and maps codes: LIMIT_FILE_SIZE -> { status: 400, code: 'FILE_TOO_LARGE', messages: [{ message: 'Arquivo excede 10MB' }] }; LIMIT_FILE_COUNT -> { status: 400, code: 'TOO_MANY_FILES', messages: [{ message: 'Máximo de 20 fotos por propriedade' }] }; LIMIT_UNEXPECTED_FILE -> { status: 400, code: 'UNEXPECTED_FILE_FIELD', messages: [{ message: 'Campo de arquivo inválido' }] }",
+        "Non-MulterError whose message === 'INVALID_FILE_TYPE' (thrown by fileFilter in US-002) returns { status: 400, code: 'INVALID_FILE_TYPE', messages: [{ message: 'Apenas JPEG ou PNG são aceitos' }] }",
+        "No stack traces are leaked in any of the above responses",
+        "Existing zod error handling continues to work unchanged — add a test or manual check that a zod validation error still returns the same body shape as before",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "Extended src/middlewares/errorHandler.ts with two new branches BEFORE the SyntaxError fallback: (1) `err instanceof multer.MulterError` maps `err.code` via MULTER_ERROR_MAP to the Portuguese-localized `{ code, message }` pairs mandated by the PRD (LIMIT_FILE_SIZE→FILE_TOO_LARGE / 'Arquivo excede 10MB'; LIMIT_FILE_COUNT→TOO_MANY_FILES / 'Máximo de 20 fotos por propriedade'; LIMIT_UNEXPECTED_FILE→UNEXPECTED_FILE_FIELD / 'Campo de arquivo inválido') with a safe `UPLOAD_ERROR` fallback for any future multer codes; (2) `err.message === 'INVALID_FILE_TYPE'` returns `{ status:400, code:'INVALID_FILE_TYPE', messages:[{ message:'Apenas JPEG ou PNG são aceitos' }] }` — this branch catches the plain `Error('INVALID_FILE_TYPE')` thrown by US-002's fileFilter AND the belt-and-suspenders throw in US-003's savePropertyImages. `ZodError` and `SyntaxError` branches are untouched — existing validation/JSON error shapes preserved. Stack traces are logged server-side via `logger.error` (pino) but never included in the JSON response body (response is strictly `{ status, code, messages }`). Smoke-tested via a throwaway `src/__smoke_us008.ts` (removed after run) that wired a minimal Express app, fired each of the 6 branches — MulterError ×3, INVALID_FILE_TYPE, ZodError regression, unknown-error fallback — and confirmed the exact response shape for each. Typecheck passes. Test baseline unchanged at 16 pre-existing Auth0 failures / 212 pass."
+    },
+    {
+      "id": "US-009",
+      "title": "Update Swagger docs for POST /properties multipart",
+      "description": "As an API consumer, I need the Swagger UI to document the multipart/form-data request shape and the new photos field.",
+      "acceptanceCriteria": [
+        "In src/routes/propertyRoutes.ts, the @swagger JSDoc for POST /properties is updated so requestBody.content includes 'multipart/form-data' with a schema that lists all existing property fields plus photos: { type: array, items: { type: string, format: binary }, maxItems: 20 }",
+        "The existing 'application/json' content entry is preserved so the endpoint still documents JSON-only callers",
+        "Response 201 schema references Property and explicitly shows the 'images' array property",
+        "Error responses documented: 400 with error body shape for validation AND upload errors (FILE_TOO_LARGE, TOO_MANY_FILES, INVALID_FILE_TYPE)",
+        "Swagger UI loads at /docs (or whatever path swagger is mounted on — check src/config/swagger.ts) without parsing errors",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "Two files updated. (1) src/config/swagger.ts — added new PropertyImage component schema (id/propertyId/url/isCover/caption/createdAt) and appended `images: { type:'array', items: $ref PropertyImage }` to the existing Property component so the Property schema now surfaces the relation consistently across every endpoint that references it. (2) src/routes/propertyRoutes.ts — rewrote the @swagger JSDoc for POST /properties: requestBody.content now documents BOTH application/json (preserved — same fields, plus added previously-missing condoFee/propertyTax for completeness) AND multipart/form-data (all Property fields plus `photos: { type:array, maxItems:20, items:{ type:string, format:binary } }`). Response 201 uses `allOf: [$ref Property, { properties: { images: array of PropertyImage } }]` so the images array is explicitly present. Response 400 references the ErrorResponse component and includes four worked examples (VALIDATION_ERROR, FILE_TOO_LARGE, TOO_MANY_FILES, INVALID_FILE_TYPE) matching the Portuguese message strings mandated by US-008. Response 500 also references ErrorResponse. Verified via three throwaway smoke tests (all removed before commit): (a) swagger-jsdoc parses routes/*.ts cleanly, (b) setupSwagger() runs without throwing and emits the PropertyImage $ref in the 201 response, (c) supertest GET /api-docs/ returns 200 with 'Swagger UI' in the HTML and swagger-ui-init.js references /properties. Note: swagger is mounted at /api-docs (not /docs) in src/server.ts — the PRD AC mentioned /docs 'or whatever path swagger is mounted on', so /api-docs is the correct endpoint. Typecheck passes. Test baseline unchanged at 16 pre-existing Auth0 failures / 212 pass."
+    },
+    {
+      "id": "US-010",
+      "title": "Add integration tests for POST /properties photo upload",
+      "description": "As a developer, I need automated tests covering the main upload scenarios so regressions are caught immediately.",
+      "acceptanceCriteria": [
+        "New test file tests/propertyPhotoUpload.test.ts uses supertest and the project's existing vitest setup (mirror patterns from existing tests/ directory)",
+        "Test: POST /properties with 3 small valid JPEG buffers attached as 'photos' returns 201, response.body.images has length 3, images[0].isCover === true, images[1].isCover === false, images[2].isCover === false",
+        "Test: POST /properties with no photos attached returns 201 and response.body.images is [] (regression guard)",
+        "Test: POST /properties with a non-image file (e.g., a text buffer attached with .txt filename/text mimetype) returns 400 with code 'INVALID_FILE_TYPE'",
+        "Test: POST /properties with a single image buffer > 10MB returns 400 with code 'FILE_TOO_LARGE'",
+        "Test: POST /properties with 21 small image buffers returns 400 with code 'TOO_MANY_FILES'",
+        "afterEach hook removes any uploads/<propertyId>/ directories created during tests (fs.rm recursive, force) so the repo stays tidy",
+        "npm test passes locally",
+        "Typecheck passes (npx tsc --noEmit)",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "Created tests/propertyPhotoUpload.test.ts with 5 supertest-driven scenarios covering the full happy + error matrix for POST /api/properties photo upload. Follows the existing seedUuidRegression.test.ts pattern: hoisted mocks, Firebase env vars stubbed pre-import, propertyService.createProperty mocked via vi.mock with a spread-preserving factory so other service methods remain intact. Tests: (1) 3 valid JPEGs attached as 'photos' returns 201 with images.length===3, images[0].isCover===true, images[1..2].isCover===false; (2) JSON body with no files returns 201 with images:[]; (3) a text/plain file attachment returns 400 code INVALID_FILE_TYPE and the service is never called; (4) a 10MB+1 byte JPEG returns 400 code FILE_TOO_LARGE; (5) 21 attachments returns 400 code TOO_MANY_FILES. afterEach sweeps any uploads/<propertyId>/ directories created during the test run via fs.rm({recursive,force}) so the repo stays clean even if the mock is ever bypassed. Key design decisions: (a) mocked the service layer (not prisma) because prisma.$transaction is hard to fake and the goal is to exercise the route+middleware+errorHandler pipeline, not the DB; (b) TINY_JPEG is a 4-byte SOI+EOI buffer — multer's fileFilter reads mimetype from the multipart part's Content-Type header, not the binary content, so this is sufficient; (c) reused the full src/app.ts via `import app from '../src/app'` so the real multer middleware and global errorHandler run end-to-end, matching the auth.test.ts and seedUuidRegression.test.ts integration style. Typecheck passes (`npx tsc --noEmit`, no errors). Full suite: 217 passed / 16 failed — the 5 new tests add to the previous 212 pass count, and the 16 failures are the documented pre-existing Auth0→Firebase migration baseline (userSync.test.ts and siblings). Zero regressions."
     }
   ]
 }

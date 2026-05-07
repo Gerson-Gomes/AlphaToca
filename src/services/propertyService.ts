@@ -1,20 +1,65 @@
 import prisma from '../config/db';
-import { ModerationStatus, Property, PropertyStatus, PropertyType, Prisma } from '@prisma/client';
+import { ModerationStatus, Property, PropertyImage, PropertyStatus, PropertyType, Prisma } from '@prisma/client';
 import { CreatePropertyInput, UpdatePropertyInput } from '../utils/propertyValidation';
 import { PropertySearchInput } from '../utils/searchValidation';
 import { pushNotificationService } from './pushNotificationService';
+import { cleanupPropertyImages, savePropertyImages } from './propertyImageStorageService';
 import { logger } from '../config/logger';
 
 // Re-exportado para compatibilidade com código anterior que importe diretamente deste módulo
 export type PropertySearchParams = PropertySearchInput;
 
+export type PropertyWithImages = Property & { images: PropertyImage[] };
+
 
 
 export const propertyService = {
-  async createProperty(data: CreatePropertyInput): Promise<Property> {
-    return prisma.property.create({
-      data,
-    });
+  async createProperty(
+    data: CreatePropertyInput,
+    files?: Express.Multer.File[],
+  ): Promise<PropertyWithImages> {
+    if (!files || files.length === 0) {
+      return prisma.property.create({
+        data,
+        include: { images: true },
+      });
+    }
+
+    let createdPropertyId: string | undefined;
+    let savedUrls: string[] = [];
+
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const property = await tx.property.create({ data });
+        createdPropertyId = property.id;
+
+        const saved = await savePropertyImages(property.id, files);
+        savedUrls = saved.map((s) => s.url);
+
+        await tx.propertyImage.createMany({
+          data: saved.map((s) => ({
+            propertyId: property.id,
+            url: s.url,
+            isCover: s.isCover,
+          })),
+        });
+
+        return tx.property.findUniqueOrThrow({
+          where: { id: property.id },
+          include: { images: true },
+        });
+      });
+    } catch (error) {
+      if (createdPropertyId && savedUrls.length > 0) {
+        await cleanupPropertyImages(createdPropertyId, savedUrls).catch((cleanupErr) => {
+          logger.error(
+            { err: cleanupErr, propertyId: createdPropertyId },
+            '[propertyService] Failed to cleanup uploaded images after transaction rollback',
+          );
+        });
+      }
+      throw error;
+    }
   },
 
   async listProperties(): Promise<Property[]> {
