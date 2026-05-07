@@ -1,226 +1,34 @@
 # Ralph Progress Log
-Started: Wed May  6 10:16:09 PM -03 2026
+Started: Thu May  7 12:11:39 PM -03 2026
 ---
 
 ## Codebase Patterns
-- Project uses npm (package-lock.json); run `npx tsc --noEmit` for typecheck and `npm test` (vitest) for tests.
-- Source lives under `src/` with subdirs `middlewares/`, `services/`, `routes/`, `controllers/`, `utils/`, `config/`; tests in `tests/`.
-- Prisma is the ORM (`@prisma/client` 6.4.1). Use `prisma.$transaction` for atomic multi-table writes.
-- Validation uses Zod; schemas live in `src/utils/` (e.g., `propertyValidation.ts`).
-- `npm install <pkg>` defaults to the absolute latest tag — pin to a version range (e.g. `@^1.4.5-lts.2`) when the PRD asks for a specific major line.
-- `npm install <pkg>` without `--save-dev` puts the package in `dependencies`, even for `@types/*`. Always pass `--save-dev` for type packages.
-- Test suite has 16 pre-existing failures from Auth0 → Firebase migration (tests reference removed `userService.upsertUserFromAuth0`). Not caused by recent stories; verify regressions by running `git stash -u && npm test` vs. current.
-- API error response shape across the codebase: `{ status: number, code: string, messages: [{ message: string }] }` (see `src/middlewares/authMiddleware.ts`). Stay consistent when adding new error branches.
-- Uploads directory lives at project root. `src/app.ts` uses `path.join(__dirname, '../uploads')`; services under `src/services/` should use `path.join(__dirname, '../../uploads')` so both ts-node (from `src/`) and compiled (from `dist/`) resolve to the same project-root `uploads/`.
-- `z.coerce.boolean()` is UNSAFE for multipart request bodies — it treats any non-empty string as truthy, so `"false"` becomes `true`. Always use a `z.preprocess` helper that explicitly maps `'true'`→true and `'false'`→false (pattern already in `src/utils/searchValidation.ts`).
-- `z.coerce.number()` is the right way to accept both multipart strings and JSON numbers in the same schema. Compose with `.int()`, `.nonnegative()`, `.positive()` as needed — those run AFTER coercion.
-- For Prisma `Decimal(10,2)` columns validated via Zod, pattern is `z.coerce.number().<constraint>.transform((v) => new Prisma.Decimal(v))`. Passing `Prisma.Decimal` to `prisma.property.create` works — Prisma also accepts number/string but Decimal avoids floating-point drift.
-- When a Zod schema uses `.parse(req.body)`, Zod's default object mode is "strip" — unknown keys are silently dropped from the output. Adding new OPTIONAL fields to an existing schema never breaks existing callers.
-- `prisma.$transaction(async (tx) => ...)` does NOT roll back non-DB side-effects (filesystem writes, external API calls). Wrap the call in an outer try/catch, track what state was created, and compensate in the catch. Inside the callback, use `tx`, never `prisma` — mixing them bypasses the transaction.
-- `express.static` auto-blocks path traversal (both literal `..` and URL-encoded forms) — returns 404 for anything resolving outside the static root. No extra guards needed when serving a fixed project-root directory.
-- Before implementing a PRD story, grep current code first — an AC may already be satisfied by an earlier unrelated PR. If so, verify behavior, document the deviation (if any), mark `passes:true` — DON'T regress existing code to match the PRD's literal wording.
-- Global error handler lives at `src/middlewares/errorHandler.ts` and is the ONLY place to add new error-class-to-API-shape mappings. It's registered LAST in `src/app.ts` via `app.use(errorHandler)`. When adding a new branch, place it BEFORE the `SyntaxError` catch-all (which is itself before the generic fallback) so more-specific matches win. Stack traces must be logged via `logger.error` (pino) but NEVER included in the JSON response body.
-- `multer.MulterError` has a `.code` string field — branch on `err instanceof multer.MulterError` then switch/lookup `err.code`. Known codes: `LIMIT_FILE_SIZE`, `LIMIT_FILE_COUNT`, `LIMIT_UNEXPECTED_FILE`, `LIMIT_PART_COUNT`, `LIMIT_FIELD_KEY`, `LIMIT_FIELD_VALUE`, `LIMIT_FIELD_COUNT`. Always include a safe fallback (e.g. `UPLOAD_ERROR`) for unmapped codes so future multer versions don't 500.
-- Swagger is configured in `src/config/swagger.ts` (components + swagger-jsdoc options) and mounted at `/api-docs` from `src/server.ts` via `setupSwagger(app)` — NOT from `src/app.ts`. If you add a new reusable component schema, add it under `components.schemas` in swagger.ts; JSDoc `@swagger` blocks inside `src/routes/*.ts` can then `$ref` it. Use `allOf: [$ref Base, { properties: { extraField: ... } }]` when you need to extend a referenced schema for a specific response (e.g., response shape = Property + populated `images` array).
-- `swagger-jsdoc` is permissive — an invalid JSDoc block fails SILENTLY (drops the path from the spec) rather than throwing. After editing a `@swagger` block, verify by running a throwaway smoke: `swaggerJsdoc({ apis: ['./src/routes/*.ts'] })` and asserting your path/method survived. Better: supertest GET `/api-docs/swagger-ui-init.js` and grep for the path — confirms swagger-ui-express successfully loaded the spec.
-- When integration-testing a route that depends on the full app pipeline (middleware + errorHandler + validation), import `../src/app` and drive it with `supertest(app)`. Stub Firebase env vars BEFORE the import (see `tests/seedUuidRegression.test.ts`) since `src/config/firebase.ts` runs at module load. Mock the service layer (not Prisma) via `vi.mock('../src/services/...', async (importOriginal) => { const actual = await importOriginal(); return { ...actual, service: { ...actual.service, method: mockFn } }; })` — that preserves untouched methods while letting tests control the one under exercise. For multer upload tests specifically, `.attach(field, buffer, { filename, contentType })` on supertest is what lets you set the multipart part's MIME type — multer's fileFilter reads that header, NOT the binary content, so a 4-byte SOI+EOI buffer is a valid JPEG for filter purposes.
+- Seed IDs: random seeds use `crypto.randomUUID()` (not `faker.string.uuid()`); stable demo IDs live in `prisma/demoIds.ts` as canonical UUIDv4 constants — don't replace those constants with `randomUUID()` calls because they're referenced by tests and Firebase UID mappings.
+- UUID validation: routes use `z.string().uuid()`; any seed id you introduce must match `/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i`.
+- Test runner: `npx vitest run` (vitest config in `vitest.config.ts`). Many pre-existing tests fail due to an unfinished Auth0→Firebase migration (`userService.upsertUserFromAuth0` missing, `tests/auth.test.ts`, `tests/ingestKnowledge.test.ts`) — treat those as baseline noise, not regressions.
+- Grep scope for "seed" lookups: include `prisma/` (generators.ts, demoData.ts, demoIds.ts, seed.ts) — seeds are not under `src/` in this repo.
+- Typecheck: `npx tsc --noEmit` — must pass before commit.
 
 ---
 
-## 2026-05-06 - US-001
-- Installed `multer@^1.4.5-lts.2` (latest stable v1.x LTS line) as a runtime dependency.
-- Installed `@types/multer@^2.1.0` as a devDependency.
-- Verified `import multer from 'multer'` compiles cleanly via a temporary smoke file inside `src/` (removed after verification); project-wide `npx tsc --noEmit` passes.
-- Files changed: `package.json`, `package-lock.json`.
+## [2026-05-07] - US-001 - Seeds use canonical UUIDs for all entities
+- Switched `prisma/generators.ts` to use `crypto.randomUUID()` instead of `faker.string.uuid()` for all random id fields (users, properties, chat sessions, messages, knowledge docs).
+- Re-enabled the previously-commented `generateProperties` generator (was imported by `tests/generators.test.ts`) and aligned its `status` enum values with the Prisma schema (`AVAILABLE | NEGOTIATING | RENTED`).
+- `prisma/demoIds.ts` left unchanged — constants already valid canonical UUIDv4 and must stay stable so Firebase UID mappings and test fixtures keep referencing a known id.
+- Replaced the `user-demo-landlord-1` literal in `tests/seedUuidRegression.test.ts` with `not-a-canonical-uuid`; preserves the negative-path coverage (non-UUID → 400 VALIDATION_ERROR) while satisfying "grep -r 'user-demo-' src/ prisma/ tests/ returns nothing".
+- Files changed:
+  - prisma/generators.ts
+  - tests/seedUuidRegression.test.ts
+- Verification:
+  - `npx tsc --noEmit` → exit 0
+  - `npx vitest run tests/seedUuidRegression.test.ts tests/seed.test.ts tests/demoIds.test.ts tests/generators.test.ts` → 50/50 pass
+  - `npx prisma validate` → schema valid
+  - Full suite before this story: 16 failing / 217 passing. After: 15 failing / 218 passing. No new regressions; remaining failures are pre-existing Auth0→Firebase migration gaps.
+  - DB-level verification (`prisma migrate reset --force && prisma db seed`) not executed — no Postgres available in this sandbox; must be rerun by a reviewer with a live DB before closing the story.
 - **Learnings for future iterations:**
-  - `npm install <pkg>` defaults to the latest tag. When PRD pins a major line (e.g. v1.x), install with an explicit range like `multer@^1.4.5-lts.2`.
-  - `npm install` without `--save-dev` adds the package to `dependencies`. `@types/*` packages should always use `--save-dev`.
-  - npm warns that multer 1.x has known vulnerabilities and recommends 2.x. The PRD explicitly requested v1.x; a future hardening pass may want to upgrade.
-  - To smoke-test an import compiles, drop a throwaway `.ts` file under `src/` (not `/tmp`) so project-level module resolution applies, then remove it after `tsc --noEmit` exits 0.
-  - Project typecheck invocation: `npx tsc --noEmit` (no package.json script shortcut for typecheck).
----
-
-## 2026-05-06 - US-002
-- Created `src/middlewares/uploadMiddleware.ts` exporting:
-  - `propertyPhotoUpload` — a multer instance using `multer.memoryStorage()`, limits `{ fileSize: 10 * 1024 * 1024, files: 20 }`, and a `fileFilter` that accepts only `image/jpeg` / `image/png` and otherwise calls `cb(new Error('INVALID_FILE_TYPE'))` (no file attached, per PRD wording).
-  - `propertyPhotoUploadHandler` — convenience handler equal to `propertyPhotoUpload.array('photos', 20)` so routes can import and mount it directly in US-006.
-- Typecheck (`npx tsc --noEmit`) passes with no errors.
-- Full test run shows 16 failures, but all pre-exist on this branch (verified via `git stash -u && npm test`) — they come from leftover Auth0 tests in `tests/userSync.test.ts` and related files that still call `userService.upsertUserFromAuth0`, which was replaced by the Firebase flow. No regressions introduced by this story.
-- Files changed: `src/middlewares/uploadMiddleware.ts` (new).
-- **Learnings for future iterations:**
-  - `@types/multer@2.1.0` is compatible with `multer@1.4.5-lts.2` at our use level; `FileFilterCallback` is re-exported from the multer types entry. Importing it directly avoids having to hand-roll the callback signature.
-  - Per PRD, `fileFilter` rejects with `cb(new Error('INVALID_FILE_TYPE'))` — do NOT pass `false` as the second arg when rejecting, that would silently drop the file without surfacing the error to the global error handler (US-008 depends on this Error bubbling up).
-  - When adding a new middleware file, verify there are no regressions by running `git stash -u && npm test` before and after — the suite currently has 16 pre-existing Auth0-migration failures, so "16 failed" is the baseline, not a new regression.
-  - `propertyPhotoUpload.array('photos', 20)` in US-002 defines field name `photos` and max count 20 — US-006 and US-010 must reference the same field name or uploads will route to `LIMIT_UNEXPECTED_FILE`.
----
-
-## 2026-05-06 - US-003
-- Created `src/services/propertyImageStorageService.ts`.
-- Exports `savePropertyImages(propertyId, files)`:
-  - Early-returns `[]` when files is empty so callers can branch without guards.
-  - `mkdir(uploads/<propertyId>/, { recursive: true })`, then sequentially writes each file as `<randomUUID()>.<ext>` where `ext` is derived strictly from `file.mimetype` via a lookup table (`image/jpeg`→`jpg`, `image/png`→`png`) — unknown MIME throws `Error('INVALID_FILE_TYPE')` as a belt-and-suspenders defense if US-002's filter is ever bypassed.
-  - `file.originalname` is never used, so malicious/weird filenames can't poison the filesystem.
-  - Returns `{ url: '/uploads/<propertyId>/<uuid>.<ext>', isCover: i === 0 }[]`.
-  - On any writeFile failure mid-loop, `Promise.all`-deletes the already-written files, `rmdir`s the (now-empty) dir, and rethrows the original error.
-- Exports `cleanupPropertyImages(propertyId, urls)`:
-  - Uses `path.basename(url)` to extract the filename segment (ignoring the `/uploads/<propertyId>/` prefix), then `rm` per-file.
-  - ENOENT on individual file deletes is swallowed; all other errors rethrow.
-  - Finally attempts `rmdir` of the property dir; ENOENT/ENOTEMPTY/EEXIST are swallowed (matches PRD "deletes the directory if empty").
-- UPLOADS_ROOT resolution: `path.join(__dirname, '../../uploads')` — mirrors `src/app.ts`'s `path.join(__dirname, '../uploads')` pattern so it lands at project-root `uploads/` both under ts-node (src/services/) and compiled (dist/services/).
-- Typecheck (`npx tsc --noEmit`) passes. Test suite still 16 failed / 212 passed — same pre-existing Auth0-migration baseline (the new service is not imported anywhere yet, so zero regressions were possible).
-- Files changed: `src/services/propertyImageStorageService.ts` (new).
-- **Learnings for future iterations:**
-  - For fs-touching services under `src/services/`, use `path.join(__dirname, '../../uploads')`. `app.ts` uses `../uploads` because it lives one directory above services. Both resolve to the same project-root `uploads/` at dev (ts-node reads `src/`) and prod (compiled `dist/`) — this is the pattern in the codebase, don't use `process.cwd()` ad-hoc.
-  - `crypto.randomUUID()` is globally available in Node 18+ (Node 20 is the project target) — no need to import from `crypto` in modern code, but importing `{ randomUUID } from 'crypto'` makes it explicit and is harmless.
-  - `fs.rmdir` (non-recursive) throws `ENOTEMPTY` when the directory has contents and `ENOENT` when it's missing. Both should typically be swallowed for "delete if empty" semantics. `fs.rm(path, { recursive: true, force: true })` is the nuclear option but violates the PRD's "directory if empty" contract here.
-  - Deriving file extensions from `file.mimetype` rather than `file.originalname` is the secure default — never trust the client's filename. Keep a MIME→ext lookup table in the service even though the multer `fileFilter` should have already blocked unknown types; it's belt-and-suspenders and also gives a semantic `.jpg`/`.png` (not `.jpeg`).
-  - US-002's `fileFilter` rejects bad MIME types with `Error('INVALID_FILE_TYPE')` — reuse the same error message string here so US-008's global handler only needs one match.
-  - When `npm test` fails, check the pre-existing baseline before blaming your change. Current baseline: 4 files / 16 tests failed (all Auth0 migration leftovers in `userSync.test.ts` and siblings calling the removed `userService.upsertUserFromAuth0`).
----
-
-## 2026-05-06 - US-004
-- Rewrote `createPropertySchema` in `src/utils/propertyValidation.ts` so the same schema accepts JSON bodies and multipart bodies.
-  - `priceField` switched from `z.string().regex(...).transform(Decimal)` to `z.coerce.number().positive().transform(Decimal)` — now works for both `"4500.00"` (multipart) and `4500` (JSON).
-  - Added missing numeric fields that exist on the Prisma Property model (`bedrooms`, `bathrooms`, `parkingSpots`, `views` as int; `area`, `latitude`, `longitude` as float; `condoFee`, `propertyTax` via `optionalMoneyField` → `Prisma.Decimal`) all optional, all via `z.coerce.number()`.
-  - Added `type` (PropertyType enum) as optional.
-  - Added boolean fields (`isFurnished`, `petsAllowed`, `nearSubway`, `isFeatured`) via a local `multipartBoolean` preprocess helper that maps the strings `"true"`/`"false"` explicitly. Deliberately did NOT use `z.coerce.boolean()` — it treats `"false"` as truthy.
-- Smoke-tested via a temporary `src/__smoke_us004.ts` (removed after run) that confirmed: JSON with real numbers/booleans parses, multipart with stringified numbers/booleans parses, negative price is rejected, invalid boolean string is rejected.
-- Typecheck passes. `npm test` unchanged at 16 pre-existing failures / 212 pass — zero regressions.
-- Files changed: `src/utils/propertyValidation.ts` (only).
-- **Learnings for future iterations:**
-  - `z.coerce.boolean()` is a trap in multipart flows — `"false"` becomes `true`. Use `z.preprocess((v) => v === 'true' ? true : v === 'false' ? false : v, z.boolean())` instead. `src/utils/searchValidation.ts` already had this pattern for URL query strings; we now have a matching variant for multipart bodies. If more endpoints get multipart support, lift `multipartBoolean` into a shared util.
-  - `z.coerce.number()` combined with `.int()`, `.nonnegative()`, `.positive()` is safe — constraints run AFTER coercion so the check is against the final number.
-  - `updatePropertySchema` in the same file still uses the old `z.string().regex` priceField and still lacks the extended fields. US-004 only changed the create path per PRD scope. If landlord PATCH via multipart is ever added, `updatePropertySchema` will need the same treatment.
-  - When extending a Zod schema that's called via `.parse(req.body)`, new optional fields never break existing JSON callers — Zod's default object behavior strips unknown keys rather than rejecting them.
-  - Smoke-testing a Zod schema at runtime is cheap and catches the `z.coerce.boolean()` footgun that tsc alone will NOT: both `z.boolean()` and `z.coerce.boolean()` have the same TypeScript output type (`boolean`), so only runtime parsing reveals the semantic bug.
----
-
-## 2026-05-06 - US-005
-- Updated `propertyService.createProperty` in `src/services/propertyService.ts` to accept an optional `files?: Express.Multer.File[]` as its second argument, and return a new `PropertyWithImages` alias (`Property & { images: PropertyImage[] }`).
-- No-files branch: short-circuits to a plain `prisma.property.create({ data, include: { images: true } })`. For JSON-only callers this is functionally unchanged (property is created), with the sole visible difference that the response now has `images: []` — which is exactly what US-006 AC requires ("no regression from current JSON-only flow"). No existing caller (propertyController, adminController, whatsappWorker) relied on `images` being absent from the response.
-- Files-present branch: wraps everything in `prisma.$transaction(async (tx) => { ... })`:
-  1. `tx.property.create({ data })` creates the DB row.
-  2. `savePropertyImages(property.id, files)` writes buffers to disk — called INSIDE the transaction callback per PRD acceptance criteria, so a DB rollback after this point still triggers filesystem cleanup via the outer catch.
-  3. `tx.propertyImage.createMany({ data: saved.map(...) })` inserts the image rows.
-  4. `tx.property.findUniqueOrThrow({ where: { id }, include: { images: true } })` returns the full property-with-images payload as the transaction's return value.
-- Failure-atomicity: `createdPropertyId` and `savedUrls` are captured on each step that succeeds. On any throw from the transaction, the outer catch calls `cleanupPropertyImages(createdPropertyId, savedUrls)`. A failure INSIDE `savePropertyImages` itself (mid-loop write error, or an INVALID_FILE_TYPE belt-and-suspenders throw) is already self-cleaned by that service — `savedUrls` stays `[]` because the assignment only runs after `await` resolves successfully, so the outer cleanup doesn't run twice.
-- Cleanup failures are caught and logged via `logger.error`, never thrown — we must not mask the original error with a cleanup error.
-- Typecheck: `npx tsc --noEmit` passes with zero errors.
-- Tests: `npm test` shows 16 failed / 212 passed — identical to the pre-existing Auth0-migration baseline. No regressions. (Controller still calls `createProperty(validatedData)` with a single arg; TS allows the new param to be omitted since it's optional.)
-- Files changed: `src/services/propertyService.ts` (only).
-- **Learnings for future iterations:**
-  - Prisma's interactive transaction callback (`prisma.$transaction(async (tx) => {...})`) is the right tool when you need non-DB side-effects (filesystem writes) interleaved with DB writes — BUT the side-effects are NOT automatically rolled back. You must do cleanup yourself in an outer catch. The callback receiving `tx` gives you a scoped client; all DB calls inside should use `tx`, never `prisma` (mixing them would bypass the transaction).
-  - `findUniqueOrThrow` is preferable to `findUnique` as the final statement in a create-transaction — the record must exist (we just created it in the same transaction), so `null` would indicate a serious invariant violation rather than a normal "not found" case. Throwing is the correct signal.
-  - When a service accepts an optional trailing parameter (here `files?`), existing callers need NO changes because TypeScript allows omitting optional parameters. This is the safe path for US-006 to wire multer into the controller — the signature change is backward-compatible.
-  - `Property & { images: PropertyImage[] }` is the pragmatic return type for an `include: { images: true }` Prisma query. `Prisma.PropertyGetPayload<{ include: { images: true } }>` is more formally correct but adds verbosity; both are equivalent at runtime.
-  - Ordering of state-capture variables matters: `createdPropertyId = property.id` must come BEFORE `await savePropertyImages(...)` so that a filesystem failure still leaves `createdPropertyId` set — but `savedUrls = saved.map(...)` must come AFTER the await resolves, so a throw from savePropertyImages keeps `savedUrls = []` (savePropertyImages handles its own cleanup in that case). This ordering avoids double-cleanup bugs.
-  - Cleanup errors in the catch block should be swallowed (or logged at error level) and the ORIGINAL error re-thrown. `cleanupPropertyImages(...).catch(...)` achieves this without a nested try/catch.
----
-
-## 2026-05-06 - US-006
-- Wired multer middleware into the POST /properties route. In `src/routes/propertyRoutes.ts` imported `propertyPhotoUploadHandler` from `../middlewares/uploadMiddleware` and mounted it before `propertyController.create`: `router.post('/properties', propertyPhotoUploadHandler, propertyController.create)`.
-- In `src/controllers/propertyController.ts` the `create` handler now reads `req.files as Express.Multer.File[] | undefined` and forwards it as the second argument to `propertyService.createProperty(validatedData, files)`. The optional second parameter landed in US-005, so TS allows both the old one-arg and the new two-arg shape.
-- Order of operations matches PRD: multer runs first (populating req.files from memory), then Zod validates req.body, then the service runs the transaction. Because multer uses memoryStorage, NO disk writes happen until `propertyService.createProperty` decides to call `savePropertyImages` — a Zod validation failure leaves no files on disk, satisfying AC "if validation fails, no files are written to disk".
-- Typecheck: `npx tsc --noEmit` passes with zero errors.
-- Tests: `npm test` shows 16 failed / 212 passed — identical pre-existing Auth0-migration baseline. No regressions.
-- Files changed: `src/routes/propertyRoutes.ts`, `src/controllers/propertyController.ts`.
-- **Learnings for future iterations:**
-  - Express's `req.files` is typed as `{ [fieldname: string]: Express.Multer.File[] } | Express.Multer.File[] | undefined` in `@types/multer` — the union covers both `upload.array()` (array) and `upload.fields()` (dict) cases. Since we specifically use `.array('photos', 20)`, narrowing via `as Express.Multer.File[] | undefined` is safe and keeps the service signature simple.
-  - The Swagger JSDoc block above `router.post('/properties', ...)` is INTENTIONALLY left documenting `application/json` only — updating it to document `multipart/form-data` is US-009's scope. Don't touch it here.
-  - When adding middleware to a route, middleware runs in the order passed to `router.post(path, ...handlers)`. `propertyPhotoUploadHandler` must come BEFORE `propertyController.create` so `req.body` and `req.files` are populated by the time the controller runs. This ordering also means a multer error (LIMIT_FILE_SIZE, etc.) short-circuits before the controller — those flow into the global error handler directly via `next(err)`. US-008 will map those MulterError codes to the API error shape.
-  - The convenience `propertyPhotoUploadHandler` export (= `propertyPhotoUpload.array('photos', 20)`) defined in US-002 is what lets this be a single-line import — if US-002 had only exported the multer instance, each route would have to call `.array('photos', 20)` inline, duplicating the field name and max count. Good pattern for future upload endpoints: export both the raw instance AND a pre-bound handler.
-  - `req.body` in a multipart request is populated by multer (from the non-file text fields), NOT by express.json(). Express's body-parser sees a `multipart/form-data` Content-Type and passes the body through untouched; multer's handler then parses it. This is why US-004's `z.coerce.*` schema changes were mandatory — multer hands us string values even for "numeric" fields.
----
-
-## 2026-05-06 - US-007
-- No source changes required. `app.use('/uploads', express.static(path.join(__dirname, '../uploads')))` is already present at `src/app.ts:46`, registered BEFORE the global `errorHandler` at `src/app.ts:132`. It landed on `main` via an earlier PR (the seed-images work — commit `f429f34`) and has been serving the seed fixtures at `uploads/b0000001-.../0001.png` etc. since then.
-- Deliberately kept `path.join(__dirname, '../uploads')` — the PRD AC literally writes `path.resolve(process.cwd(), 'uploads')`, but the `__dirname`-relative form is the documented Codebase Pattern (progress.txt line 14) and is strictly more robust. `process.cwd()` depends on where Node is launched from (e.g., running `node dist/app.js` from a sibling directory would break `process.cwd()`-based paths), whereas `__dirname` is always the directory of the compiled `app.js`. Both forms resolve to the same project-root `uploads/` in the happy path.
-- Verified the four functional acceptance criteria via a temporary supertest smoke file (`src/__smoke_us007.ts`, removed after run, ran through `ts-node`):
-  1. `GET /uploads/b0000001-0000-4000-8000-000000000001/0001.png` → **200** with `Content-Type: image/png`.
-  2. `GET /uploads/missing.jpg` → **404**.
-  3. `GET /uploads/../package.json` (literal traversal) → **404** — Express/`serve-static` normalizes `..` before file resolution, so the request never escapes the `/uploads` root.
-  4. `GET /uploads/..%2Fpackage.json` (URL-encoded traversal) → **404** — same normalization applies after URL decoding.
-- Typecheck: `npx tsc --noEmit` passes with zero errors.
-- Tests: `npm test` — 16 failed / 212 passed, matching the pre-existing Auth0-migration baseline. No regressions.
-- Files changed: NONE (no source changes). Only `scripts/ralph/prd.json` (`passes:true` + notes) and `scripts/ralph/progress.txt` (this entry).
-- **Learnings for future iterations:**
-  - Before implementing a story, ALWAYS grep the current codebase for the feature first — US-007's static-serving line was already in place from a prior unrelated PR. If an AC turns out to already be satisfied (ideally by a superior pattern), the right move is to verify behavior, document the deviation, and mark it done — NOT to regress the existing code to match the PRD's exact wording. The PRD is a target spec, not a literal diff.
-  - `express.static` (backed by the `serve-static` package) handles path-traversal protection by default: both literal `..` segments and URL-encoded `%2E%2E` / `%2F` forms are normalized before the file lookup, and any path that resolves outside the static root returns 404. You don't need to add your own traversal guards when using `express.static` with a fixed root directory.
-  - `serve-static`'s 404 behavior: for a missing file, it calls `next()` (not `next(err)`), which lets the request fall through to subsequent handlers. In this codebase, the errorHandler is the last `.use()`, so a missing `/uploads/...` request hits the default 404 pathway (no route matched). The response is an empty 404 with the default Express body — if API consumers need a JSON 404 for missing assets, a dedicated `app.use('/uploads/*', (_req, res) => res.status(404).json({...}))` AFTER the static middleware would be needed. Not in scope for US-007.
-  - `path.join(__dirname, '../uploads')` vs `path.resolve(process.cwd(), 'uploads')`: the first is always stable relative to the file's location (works under ts-node, `node dist/`, or any other invocation). The second depends on the current working directory at the moment Node started — fragile for CLI/cron/systemd invocations where CWD might not be the project root. Prefer `__dirname`-relative resolution for files that live at fixed project-root locations.
-  - To smoke-test a route without writing a full vitest suite, drop a throwaway `src/__smoke_*.ts` that imports the real `app` and uses `supertest(app)`, then run via `npx ts-node src/__smoke_*.ts`. Keep `// @ts-nocheck` at the top if `@types/supertest` isn't installed (it's not, in this repo — only runtime `supertest` is). Remove the file before committing.
----
-
-## 2026-05-06 - US-008
-- Extended `src/middlewares/errorHandler.ts` with two new branches (placed BEFORE the existing `SyntaxError` catch-all so more-specific matches win, AFTER the ZodError branch so validation keeps precedence):
-  1. `err instanceof multer.MulterError` — maps `err.code` through a `MULTER_ERROR_MAP` lookup table to the PRD-mandated Portuguese error shapes:
-     - `LIMIT_FILE_SIZE` → `{ code: 'FILE_TOO_LARGE', message: 'Arquivo excede 10MB' }`
-     - `LIMIT_FILE_COUNT` → `{ code: 'TOO_MANY_FILES', message: 'Máximo de 20 fotos por propriedade' }`
-     - `LIMIT_UNEXPECTED_FILE` → `{ code: 'UNEXPECTED_FILE_FIELD', message: 'Campo de arquivo inválido' }`
-     - Safe fallback: any unmapped MulterError code becomes `{ code: 'UPLOAD_ERROR', message: err.message }` so future multer versions (e.g., LIMIT_PART_COUNT, LIMIT_FIELD_VALUE) don't regress to 500.
-  2. `err.message === 'INVALID_FILE_TYPE'` (plain `Error`, thrown by US-002's fileFilter and US-003's belt-and-suspenders MIME check) → `{ status: 400, code: 'INVALID_FILE_TYPE', messages: [{ message: 'Apenas JPEG ou PNG são aceitos' }] }`.
-- Status codes: all upload-related branches set `response.status = 400`, matching the PRD. Response shape is the project-wide `{ status, code, messages: [{ message }] }` — identical to `authMiddleware` and `ZodError` branches.
-- Stack-trace leakage: the existing `logger.error({ err, path, method }, ...)` call runs FIRST (server-side pino log — stack goes to stdout/log aggregator). Nothing from the `err` object is included in the JSON response body — we construct the response from hardcoded strings / `err.message` / `err.code` only, never `err.stack`. Verified by the smoke test's response-body assertions.
-- Existing branches preserved: `ZodError` still returns `{ status: 400, code: 'VALIDATION_ERROR', messages: [{ path, message }] }`. `SyntaxError` still returns `{ status: 400, code: 'BAD_REQUEST', ... }`. Generic fallback still returns `{ status: 500, code: 'INTERNAL_SERVER_ERROR', messages: [{ message: err.message }] }`. Smoke-tested both regressions explicitly.
-- Smoke test: created throwaway `src/__smoke_us008.ts` that stood up a minimal Express app with one route per branch, fired each via supertest, asserted the exact response shape, and then exited. All 6 branches pass (LIMIT_FILE_SIZE, LIMIT_FILE_COUNT, LIMIT_UNEXPECTED_FILE, INVALID_FILE_TYPE, ZodError regression, unknown-error fallback). File removed before commit.
-- Typecheck: `npx tsc --noEmit` passes with zero errors.
-- Tests: `npm test` shows 16 failed / 212 passed — identical to the pre-existing Auth0-migration baseline. No regressions.
-- Files changed: `src/middlewares/errorHandler.ts` (only).
-- **Learnings for future iterations:**
-  - Ordering of branches in `errorHandler` matters: `instanceof` class checks (ZodError, multer.MulterError) should come BEFORE message-string checks (INVALID_FILE_TYPE) and generic `.name` sniffing (SyntaxError). Most-specific first, generic-fallback last. When adding a new branch, pick the spot that preserves this gradient — don't just append.
-  - `multer.MulterError` is a class exported from the top-level `multer` import, and `err.code` is a union of string literals (`'LIMIT_FILE_SIZE'`, etc.). Prefer a lookup table over a long switch — it keeps the handler declarative and easy to extend when multer adds new codes.
-  - Always include a fallback inside an instanceof branch (`mapped?.code ?? 'UPLOAD_ERROR'`). A multer minor-version upgrade could introduce a new `err.code` that isn't in the map; without a fallback the branch would crash into `response.messages = [{ message: undefined }]` and confuse clients. Defensive mapping costs one line.
-  - When testing error-handler response shapes WITHOUT a network stack, supertest on a bare `express()` app with synthetic `next(err)` routes is the cleanest approach. No need to wire up real multer or real routes to verify the mapping — just construct the error class directly: `new multer.MulterError('LIMIT_FILE_SIZE', 'photos')`. That's faster than sending actual >10MB buffers through a real upload.
-  - For internationalization: the PRD mandates Portuguese message strings for multer errors (`'Arquivo excede 10MB'`, etc.). If this API ever adds a locale layer, these strings should move to a message catalog keyed by `code`. For now, inline is fine — all other API error messages in this codebase are also hardcoded.
----
-
-## 2026-05-06 - US-009
-- Updated Swagger/OpenAPI docs for POST /properties to document the new multipart upload flow. Two files touched:
-  1. `src/config/swagger.ts` — added a new `PropertyImage` component schema (id/propertyId/url/isCover/caption/createdAt) and appended `images: { type: 'array', items: $ref PropertyImage }` to the existing `Property` component. This upgrade is codebase-wide: every endpoint that already `$ref`s `Property` (GET /properties/:id, PUT /properties/:id, GET /properties/search) now surfaces the images relation in its documented response without any per-route change.
-  2. `src/routes/propertyRoutes.ts` — rewrote the `@swagger` JSDoc block for POST /properties. `requestBody.content` now has TWO entries:
-     - `application/json` — the existing JSON-only shape, preserved verbatim (all original fields) plus two fields that were missing from the JSDoc but already accepted by the Zod schema (`condoFee`, `propertyTax`) for completeness.
-     - `multipart/form-data` — all Property fields plus `photos: { type: 'array', maxItems: 20, items: { type: 'string', format: 'binary' } }` with description explaining the 20-file/10MB/JPEG-or-PNG rules and that the first photo becomes the cover.
-- Response `201`: uses `allOf: [$ref Property, { properties: { images: array of PropertyImage } }]` — this is the canonical OpenAPI idiom for "extend a referenced schema". Since I also added `images` to the Property component itself, this is belt-and-suspenders — any consumer grabbing Property alone OR the inline 201 schema sees `images`.
-- Response `400`: references `$ref ErrorResponse` (the existing component) and includes four worked `examples` (VALIDATION_ERROR, FILE_TOO_LARGE, TOO_MANY_FILES, INVALID_FILE_TYPE) each with the exact Portuguese message strings produced by the US-008 error handler. Swagger UI renders these as selectable dropdown examples — useful for API consumers debugging without hitting the server.
-- Response `500`: also now references `$ref ErrorResponse` (previously just a free-text description) for consistency.
-- Verified via three throwaway `src/__smoke_us009*.ts` files (all removed before commit):
-  1. `swagger-jsdoc` successfully parses `./src/routes/*.ts` after the edit — POST /properties survives, both content types present, `photos` field has the correct shape, 201 references Property, 400 documents all four error codes.
-  2. `setupSwagger(app)` runs without throwing and the merged spec contains the `#/components/schemas/PropertyImage` $ref in the 201 response body.
-  3. `supertest.get('/api-docs/').redirects(1)` returns 200 with "Swagger UI" in the HTML; `/api-docs/swagger-ui-init.js` contains the `/properties` path — confirms swagger-ui-express loaded the full spec successfully (no silent parsing drops).
-- Typecheck: `npx tsc --noEmit` passes with zero errors.
-- Tests: `npm test` shows 16 failed / 212 passed — identical to the pre-existing Auth0-migration baseline. Zero regressions.
-- Swagger mount path is `/api-docs` in `src/server.ts` (NOT `/docs` as the PRD AC loosely mentioned). The PRD said "or whatever path swagger is mounted on" — this is the correct canonical path.
-- Files changed: `src/config/swagger.ts`, `src/routes/propertyRoutes.ts`.
-- **Learnings for future iterations:**
-  - Swagger is mounted at `/api-docs` via `setupSwagger(app)` called from `src/server.ts` (NOT `src/app.ts`). This means Swagger UI is NOT available when importing just the `app` module for tests — only the server entrypoint wires it up. When writing integration tests that want to assert on Swagger output, you must either call `setupSwagger(app)` in the test or spin up `src/server.ts` directly.
-  - `swagger-jsdoc` parses JSDoc comments permissively: a malformed `@swagger` block does NOT throw at startup — it silently drops the path from the final spec. Always verify changes by running a smoke test that asserts the path survived (`spec.paths['/properties'].post` should be defined, not undefined). Without this check, a typo in indentation could quietly wipe your endpoint from the docs.
-  - For multi-content-type request bodies (JSON + multipart), duplicate the whole schema block — OpenAPI 3.0 has no "shared body schema" mechanism across content types. `allOf`/`$ref` can reduce the duplication if the JSON and multipart shapes are truly identical, but they rarely are (e.g., multipart has the extra `photos` file field). Inlining both is the pragmatic approach.
-  - `format: binary` (NOT `format: byte`) is the correct OpenAPI 3.x tag for actual file upload fields in multipart/form-data. `format: byte` is base64-encoded content in JSON, which is a different use case. Swagger UI uses `format: binary` to render a native file picker in its "Try it out" panel.
-  - The `examples` map on a response object (keyed by user-friendly name, each with `summary` + `value`) renders in Swagger UI as a dropdown selector — much better UX than a single example. Use it when the same response code can represent multiple distinct failure modes (e.g., our 400 covers both validation and upload errors).
-  - `allOf: [$ref X, { properties: { extra: ... } }]` is the OpenAPI way to say "same as X but with these extra/overridden properties". OpenAPI 3.1 adds better composition primitives, but 3.0 (what this project uses) requires `allOf`.
-  - When adding a new schema to `components.schemas` in `swagger.ts`, every existing JSDoc block that `$ref`s a parent schema gets the update for free. Example: adding `images` to `Property` means GET /properties/:id, PUT /properties/:id, GET /properties/search all now document the images relation without any per-route JSDoc change. Prefer extending the shared component over inline schemas.
----
-
-## 2026-05-06 - US-010
-- Created `tests/propertyPhotoUpload.test.ts` with 5 supertest-driven scenarios covering POST /api/properties photo upload end-to-end through the real multer middleware + global error handler. Mirrors the integration-test pattern in `tests/seedUuidRegression.test.ts`: hoisted mocks via `vi.hoisted`, Firebase/Auth0 env vars stubbed BEFORE `import app from '../src/app'` (because `src/config/firebase.ts` runs at module load), and the `propertyService` is mocked via `vi.mock('../src/services/propertyService', async (importOriginal) => ({ ...actual, propertyService: { ...actual.propertyService, createProperty: mockCreateProperty } }))` so untouched service methods still work.
-- Tests implemented:
-  1. **3 valid JPEGs** → 201, `response.body.images.length === 3`, `images[0].isCover === true`, `images[1..2].isCover === false`.
-  2. **No photos (JSON body)** → 201, `response.body.images === []`. Regression guard proving JSON-only callers still work.
-  3. **Non-image file** (text/plain .txt) → 400 `{ code: 'INVALID_FILE_TYPE' }`, service NEVER called (multer fileFilter rejected before the controller).
-  4. **10MB+1 byte JPEG** → 400 `{ code: 'FILE_TOO_LARGE' }`, service never called. Real `Buffer.alloc(10 * 1024 * 1024 + 1, 0xff)` — exercises multer's actual byte-counting limit, not a spy.
-  5. **21 JPEGs** → 400 `{ code: 'TOO_MANY_FILES' }`, service never called. multer's `files: 20` limit raises `LIMIT_FILE_COUNT` on the 21st part.
-- `afterEach` hook collects property IDs returned by the mock into a `Set<string>` and calls `fs.rm(uploads/<id>, { recursive: true, force: true })` for each, swallowing errors. Belt-and-suspenders — the mock never actually writes to disk, but if a regression ever routes through the real service in CI, the cleanup stops the repo from filling up.
-- `TINY_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xd9])` — 4 bytes, just SOI+EOI. multer's fileFilter reads `file.mimetype` from each multipart part's Content-Type header (populated by supertest's `.attach(..., { contentType: 'image/jpeg' })`), NOT the binary content, so this minimal buffer is enough to exercise the happy path without bloating the test file with a real JPEG fixture. This also keeps the too-many-files test fast (21×4 bytes ≈ 84 bytes of payload, no MB-scale I/O).
-- Mock return shape: `createProperty` inspects the incoming `files?` arg and synthesizes `images` with `isCover: i === 0` so the assertion on index 0 being the cover directly verifies the controller→service handoff preserves file ordering. A real property ID is generated via `randomUUID()` each call and cached for the cleanup hook.
-- Typecheck: `npx tsc --noEmit` passes with zero errors.
-- Tests: `npm test` — **217 passed / 16 failed**. The 16 failures are the documented pre-existing Auth0→Firebase migration baseline (`userSync.test.ts` and siblings still calling the removed `userService.upsertUserFromAuth0`). The new count is exactly 212 (prior baseline) + 5 (new tests), confirming zero regressions.
-- Files changed: `tests/propertyPhotoUpload.test.ts` (new).
-- **Learnings for future iterations:**
-  - For integration tests that need to exercise middleware + errorHandler, import the full `app` from `src/app.ts` and drive it with `supertest(app)`. Bypassing by building a minimal Express in the test misses the order-dependent `app.use(errorHandler)` mounting that exists in the real app.
-  - When mocking a service module that's imported as `{ propertyService }` (object export, not individual named functions), the `vi.mock` factory MUST preserve the other methods or unrelated routes will break mid-test. Pattern: `const actual = await importOriginal(); return { ...actual, propertyService: { ...actual.propertyService, createProperty: mockFn } }`. Spreading just the outer module (without the inner object spread) leaves the other service methods undefined.
-  - supertest's `.attach(field, buffer, options)` accepts `{ filename, contentType }` as the third arg — the `contentType` is what multer's fileFilter sees. Without setting it explicitly, supertest defaults the Content-Type to `application/octet-stream`, which would make the happy-path tests 400 with INVALID_FILE_TYPE instead of 201.
-  - Mocking via `vi.mock` + `vi.hoisted` is the right tool for this kind of test. `vi.spyOn` WOULD NOT work here because propertyService.createProperty is called via a live import inside the controller — by the time the test file runs, the controller has already bound the un-spied reference.
-  - Firebase env-var stubbing order matters: `process.env.FIREBASE_* = ...` must run BEFORE `import app from '../src/app'`, otherwise `src/config/firebase.ts` will warn at module load. Vitest evaluates top-level `process.env` assignments in file order, so place them at the very top (above `vi.hoisted` too, since that's also evaluated early).
-  - Passing `files: 20` in multer limits yields a `MulterError` with code `LIMIT_FILE_COUNT` on the 21st file — not the 20th (the 20th still succeeds and the 21st triggers it). If a future test wants to verify exactly 20 is accepted, use `.attach(...)` 20 times and assert 201.
-  - Test names for integration tests: describe the route and method as the outer describe (`POST /api/properties — photo upload`), then use imperative-sentence `it` blocks that state BOTH the input condition AND the expected response. Mirrors the `describe('visitController.create')` → `it('returns 201 and the created visit on success')` pattern already established in `tests/visitController.test.ts`.
+  - `prisma/` holds the seed code (generators.ts, demoData.ts, demoIds.ts, seed.ts). `src/scripts/` is for runtime scripts (ingestion, eval), not seeds.
+  - `demoIds.ts` is consumed by `prisma/demoData.ts`, `tests/demoIds.test.ts`, `tests/seed.test.ts`, and `tests/seedUuidRegression.test.ts`. Changing an id there ripples through all four.
+  - The seed mock in `tests/seed.test.ts` swaps `@prisma/client`'s `PrismaClient` — so any future seed tweak must keep the same deleteMany/createMany call surface or that test snaps.
+  - `tests/seedUuidRegression.test.ts` mocks both `authMiddleware` and `propertyService.searchProperties` and proves the chain `/users/me → /properties/search?landlordId=<id>` returns 200 for a canonical UUID and 400 for a non-UUID. This is the regression baseline.
+  - Pre-existing failing tests (auth, userSync, ingestKnowledge, generators.test.ts before this story) are noise from an incomplete Auth0→Firebase migration — not our concern unless a story explicitly touches them.
 ---

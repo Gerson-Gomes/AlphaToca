@@ -1,0 +1,197 @@
+# Ralph Progress Log
+Started: Tue Apr 21 11:19:46 PM -03 2026
+---
+
+## Codebase Patterns
+- Prisma client singleton lives in `src/config/db.ts` (reuse via `import prisma from "../config/db"`) — do NOT instantiate a second `PrismaClient`.
+- Tests use `vitest` (config at `vitest.config.ts`). Test files live in `tests/` at repo root, not colocated.
+- `npx tsc --noEmit` should be clean end-to-end (no known noise). If a new error appears, it came from your changes — do NOT treat it as pre-existing. (Prior `seed-knowledge.ts` error was fixed in US-003 by switching to `@langchain/textsplitters`.)
+- `KnowledgeDocument.embedding` is `Unsupported("vector(1536)")` in Prisma — writes/reads must use `$executeRawUnsafe` / `$queryRawUnsafe` with `::vector` casts. Never interpolate user input.
+- `langchain@^1.3.3` is the v1 API — use LCEL `RunnableSequence` / `ChatPromptTemplate`, NOT the deprecated `ConversationalRetrievalChain`.
+- Project uses `dotenv` for secrets; fail-fast on missing keys at boot rather than returning `undefined` deep in a call chain.
+- `.env` `DATABASE_URL` points to Supabase (production) — NEVER run `prisma migrate dev` with default env. Use local Docker DB (`alphatoca_db` on :5433, creds `admin`/`admin_pwd`) via inline env overrides.
+- `prisma migrate dev` refuses to run non-interactively in this harness. Use this two-step workaround: (1) `prisma migrate diff --from-migrations ./prisma/migrations --to-schema-datamodel ./prisma/schema.prisma --shadow-database-url <local_shadow> --script` to emit SQL; (2) write it to `prisma/migrations/<TS>_<name>/migration.sql`; (3) `prisma migrate deploy` with local env overrides to apply.
+- Shadow DB (`alphatoca_shadow`) exists on the local Docker postgres for migration diffs; pgvector extension already enabled on both local DBs.
+- `KnowledgeDocument` now has ingestion-tracking fields: `sourcePath`, `chunkIndex`, `contentHash`, `createdAt`, `updatedAt`. Compound unique index on `(sourcePath, chunkIndex)` — use this for upserts. Index on `contentHash` for hash-skip lookups.
+- The existing `prisma/seed.ts` + `prisma/generators.ts` insert `KnowledgeDocument` rows via `$executeRawUnsafe` without the new NOT NULL columns — they will fail at runtime post-migration. US-003 did NOT fix this (the real RAG ingestion path is `npm run ingest:knowledge`); the generator path is still broken. If anyone runs `npm run seed`, update `prisma/generators.ts::generateKnowledgeDocuments` to supply `source_path` / `chunk_index` / `content_hash` / `updated_at`, then match in `prisma/seed.ts`.
+- Text splitting is served by `@langchain/textsplitters` (separate package, added as a dep in US-003). `langchain@^1.3.3` no longer re-exports `RecursiveCharacterTextSplitter` from `langchain/text_splitter`. Import from `"@langchain/textsplitters"` everywhere.
+- Ingestion script pattern: keep a pure `runIngestion(deps)` function (deps object with `{ prisma, embedder, splitter, listMarkdownFiles, readFile }`) + a thin CLI wrapper that constructs real `OpenAIEmbeddings` / `RecursiveCharacterTextSplitter` / prisma singleton. Makes the hash-skip / insert / update / delete logic trivial to unit-test with mocked deps, and mirrors how US-004+ retriever/chain services should be structured.
+- Vector literals for pgvector go in as a string of the form `"[v1,v2,...]"` passed to `$executeRawUnsafe` with `$N::vector` cast — never interpolate the array directly into the SQL string.
+- Retrieval uses `$queryRawUnsafe` with the cosine-distance operator `embedding <=> $1::vector`. Compute similarity as `1 - distance` (pgvector returns distance, NOT similarity). `score >= SIMILARITY_THRESHOLD` is the gate for "trust the LLM answer" vs. "hand off to a human".
+- Services that need LLM/embedding clients should cache the constructed client in a module-level `let defaultDepsCache = null` + `getDefaultDeps()` helper. That way the module can be imported in tests without requiring `OPENAI_API_KEY`, but production callers still get a warm singleton.
+- Prisma raw returns of numeric columns (e.g. pgvector distance) can come back as JS `number` OR as `string` depending on the driver — always coerce with `typeof x === "string" ? parseFloat(x) : x` at the boundary.
+- To load the "last N" messages ordered ASC in a single call: use `orderBy: { timestamp: "desc" }, take: N` then `.slice().reverse()` in JS. `orderBy: asc, take: N` loads the FIRST N (oldest), not the most recent.
+- `@langchain/core` message classes (`HumanMessage`, `AIMessage`, `SystemMessage`) have a `.content` field that can be `string` OR an array of content blocks (e.g. `[{ type: "text", text: "..." }, ...]`) — always normalize LLM output through a helper that handles both shapes before returning user-facing strings.
+- Business-plan tone rules live in `documentation/buisness_plan.md` §6 — any chatbot-facing prompt should encode: profissional/acolhedor/confiável, base-apenas-no-contexto, handoff em litígios/exceções, PT-BR, respostas breves para WhatsApp.
+- `whatsappService.sendMessage(to, text)` now ONLY sends to Meta and returns the raw response (`SendMessageResponse` with `messages[0].id`). It no longer persists the outbound Message or looks up user/session. All persistence is owned by the worker (`handleWhatsappMessage`). If you add a new caller, you must persist the outbound yourself.
+- `whatsappWorker.ts` exports a pure `handleWhatsappMessage(payload, deps)` function (deps = `{ prisma, sendMessage, generateAnswer }`) plus the BullMQ `Worker` wrapper. Test the handler directly with mocked deps; tests must also `vi.mock('ioredis')` and `vi.mock('bullmq')` because the module constructs `new IORedis` + `new Worker` at import time for the production path.
+- Session lookup order in the worker: find the *latest* `ChatSession` for the tenant regardless of status (`orderBy: startedAt desc`). If none, create ACTIVE_BOT. Always persist the inbound Message. If the session's status is not ACTIVE_BOT (i.e. WAITING_HUMAN or RESOLVED), return early without calling the RAG chain or sending anything. This is how the human-handoff mode keeps working even after the bot flipped the flag.
+- LangChain v1 structured output: call `new ChatAnthropic({...}).withStructuredOutput(zodSchema, { name: "..." })` — returns a `Runnable<BaseLanguageModelInput, z.infer<typeof schema>>`. Invoke with a `BaseMessage[]` (SystemMessage + HumanMessage). Zod is already installed at repo root. This replaces the old "ask for JSON in prompt then JSON.parse" pattern.
+- `AiExtractedInsight` has no `@@unique` on `(rentalProcessId, insightKey)` — cannot use prisma `.upsert({ where: ... })` on it. Pattern: `findFirst({ where: { rentalProcessId, insightKey } })` -> `update({ where: { id } })` if found, `create(...)` otherwise. Skip the update when `existing.insightValue === newValue` so you don't bump `extractedAt` unnecessarily.
+- "Open RentalProcess for tenant" = `findFirst({ where: { tenantId, status: { not: "CLOSED" } }, orderBy: { createdAt: "desc" } })`. Only create a new TRIAGE process if this returns null — don't filter to just TRIAGE, since a tenant mid-VISIT_SCHEDULED should still have their insights attached to the same process, not a fresh TRIAGE one.
+- Worker-side fire-and-forget hook pattern: accept a `scheduleMicrotask?: (task: () => void) => void` in the deps object; default to the global `queueMicrotask`. Tests replace it with a queue they can drain manually (`scheduledMicrotasks.push; runScheduledMicrotasks()`). Avoid hooking via a real `queueMicrotask` in tests — timing races make assertions flaky.
+- When wiring a post-reply task like lead extraction, gate on `!ragError` so apologies don't feed garbage into the extractor. The handoff case (low score, valid user message) DOES still extract — only actual chain errors skip.
+- For one-shot CLI eval/smoke-test scripts (no unit tests), you can call `generateAnswer` with a synthetic sessionId like `eval-${Date.now()}-${rand}`. `prisma.message.findMany` with a non-existent sessionId returns `[]` — no need to create a throwaway ChatSession row. Don't forget `await prisma.$disconnect()` in `.finally()` or the node process hangs.
+
+---
+
+## 2026-04-21 - US-001
+- Implemented `src/config/rag.ts` with typed constants: `EMBEDDING_MODEL`, `EMBEDDING_DIMS`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `RETRIEVER_K`, `SIMILARITY_THRESHOLD`.
+- Added `getOpenAIApiKey()`, `getAnthropicApiKey()`, and `assertRagSecrets()` — each throws with a clear message if the env var is missing/empty.
+- Files changed: `src/config/rag.ts` (new), `scripts/ralph/prd.json` (new), `scripts/ralph/progress.txt` (this file).
+- **Learnings for future iterations:**
+  - The repo already has `@langchain/openai`, `@langchain/anthropic`, `@langchain/core`, and `langchain` v1.3.3 installed — no need to add deps for US-003 through US-008.
+  - `src/config/` currently holds `db.ts` (Prisma singleton) and `swagger.ts`. Adding `rag.ts` there follows the existing pattern.
+  - Constants are exported as `as const` literal types so downstream consumers get narrow types (e.g., the exact embedding model string).
+  - Fail-fast secret accessors are functions (not module-level throws) so importing `src/config/rag.ts` in a test file does NOT require the env vars to be set. Call `assertRagSecrets()` at worker boot / script entry only.
+  - Full test suite (43 tests across 7 files) runs in ~3.4s via `npm test`.
+---
+
+## 2026-04-21 - US-002
+- Extended `KnowledgeDocument` in `prisma/schema.prisma` with `sourcePath`, `chunkIndex`, `contentHash`, `createdAt` (default now), `updatedAt` (@updatedAt). Added `@@unique([sourcePath, chunkIndex])` and `@@index([contentHash])`.
+- Generated migration `prisma/migrations/20260422022358_add_rag_ingestion_tracking/migration.sql` via `prisma migrate diff` (since `migrate dev` can't run non-interactively in this harness).
+- Applied migration via `prisma migrate deploy` against local Docker DB (`alphatoca_db` at :5433). Verified columns + indexes via `\d knowledge_documents`.
+- `npx prisma generate` produces clean client; `npx tsc --noEmit` has only the pre-existing `seed-knowledge.ts` error; all 43 tests still pass.
+- Files changed: `prisma/schema.prisma`, `prisma/migrations/20260422022358_add_rag_ingestion_tracking/migration.sql` (new), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `prisma migrate dev` fails with "non-interactive environment" error in this harness even with `--create-only`. Workaround: `prisma migrate diff --from-migrations ... --to-schema-datamodel ... --shadow-database-url <local_shadow> --script` → write SQL to a timestamped migration dir → `prisma migrate deploy`. Needed a pre-existing shadow DB (`alphatoca_shadow`) with pgvector enabled.
+  - The local Docker Postgres (`alphatoca_db` on :5433, creds `admin`/`admin_pwd`, DB `alphatoca`) starts empty — needed `CREATE EXTENSION IF NOT EXISTS vector;` before the init migration will apply.
+  - The Supabase `DATABASE_URL` in `.env` is production — always override to local via inline `DATABASE_URL=... DIRECT_URL=...` when running migration commands.
+  - `prisma migrate diff` emits a redundant `CREATE EXTENSION IF NOT EXISTS "vector";` at the top of cross-migration diffs; safe to drop from the final migration file since the init migration already creates it.
+  - The existing `prisma/seed.ts` / `prisma/generators.ts` path inserts knowledge docs via `$executeRawUnsafe` without the new NOT NULL columns — the seed will break at runtime until US-003 updates it (or supplies dummy values). No typecheck impact because the path uses raw SQL, not the typed Prisma client.
+---
+
+## 2026-04-21 - US-003
+- Implemented `src/scripts/ingestKnowledge.ts`:
+  - Walks `documentation/` recursively, collects all `.md` files (sorted, deterministic order).
+  - Splits each file with `RecursiveCharacterTextSplitter` from `@langchain/textsplitters` (new dep) using `CHUNK_SIZE` / `CHUNK_OVERLAP` from `src/config/rag.ts`.
+  - Computes `sha256(content)` per chunk as `content_hash`.
+  - Upserts by `(source_path, chunk_index)`: insert if missing, skip if hash matches, update if hash differs. Deletes rows whose `(source_path, chunk_index)` key no longer appears.
+  - Embeddings written via `$executeRawUnsafe` with `$N::vector` cast (vector literal `[v1,v2,...]`).
+  - Exports a pure `runIngestion(deps)` + `hashContent` / `listMarkdownFiles` / `buildChunksForFile` so the CLI wrapper at the bottom is thin and the core logic is unit-testable.
+  - Logs summary line `files=X inserted=Y updated=Z skipped=W deleted=V`.
+- Added npm script: `"ingest:knowledge": "ts-node src/scripts/ingestKnowledge.ts"`.
+- New unit test `tests/ingestKnowledge.test.ts` covers: hash-skip when DB already matches, insert-all when DB empty, update-on-hash-delta, delete-stale, and a mixed insert/update/skip/delete run — all with mocked embedder + mocked Prisma (only `$queryRawUnsafe` and `$executeRawUnsafe` surfaces used). 50 tests green (was 43).
+- Fixed pre-existing typecheck error in `src/scripts/seed-knowledge.ts` by pointing the import at `@langchain/textsplitters` (the old `langchain/text_splitter` path was removed in langchain v1). `npx tsc --noEmit` is now clean.
+- Files changed: `src/scripts/ingestKnowledge.ts` (new), `src/scripts/seed-knowledge.ts` (import fix), `tests/ingestKnowledge.test.ts` (new), `package.json` (dep + script), `package-lock.json`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `langchain@^1.3.3` dropped the `langchain/text_splitter` module path. Text splitters live in the standalone `@langchain/textsplitters` package now — `RecursiveCharacterTextSplitter`, `MarkdownTextSplitter`, `CharacterTextSplitter`, etc. are all exported from its root.
+  - The OpenAIEmbeddings constructor in `@langchain/openai` v1 accepts `{ apiKey, model }` (old `openAIApiKey` / `modelName` are deprecated aliases but still work).
+  - For unit-testing ingestion/chain code, structure the module as a pure `runX(deps)` function with an explicit deps object instead of importing the singleton `prisma` + real LLM clients inside the logic. Then the CLI wrapper at module bottom builds the real deps and calls `runX`. Reuse this pattern for US-004 (retriever) and US-005 (chain).
+  - Vector-column writes via Prisma raw: pass the array as a string literal `"[v1,v2,...]"` and cast with `$N::vector` in the SQL. Do NOT use `$executeRaw` tagged-template with a `number[]` — it will not coerce correctly.
+  - When mocking `$queryRawUnsafe` in vitest, cast the `vi.fn` back to the Prisma method type (`as unknown as IngestDeps["prisma"]["$queryRawUnsafe"]`) so `strict: true` TS compilation passes despite the generic.
+  - The ingestion script is idempotent: second run on unchanged files yields `inserted=0 updated=0 skipped=N deleted=0` — verified by the `skips chunks whose contentHash matches` test. If US-008's eval script ever wants a "fresh" ingestion, have it delete by `source_path` first rather than relying on re-runs doing something.
+---
+
+## 2026-04-21 - US-004
+- Implemented `src/services/ragRetrieverService.ts`:
+  - Exports `retrieveRelevantChunks(query, overrideDeps?): Promise<RetrievedChunk[]>` where `RetrievedChunk = { id, content, title, score }`.
+  - Embeds the query via `OpenAIEmbeddings` using the same `EMBEDDING_MODEL` as ingestion.
+  - Single `$queryRawUnsafe` against `knowledge_documents` using pgvector cosine: `SELECT id, content, title, (embedding <=> $1::vector) AS distance ... WHERE embedding IS NOT NULL ORDER BY embedding <=> $1::vector ASC LIMIT $2`.
+  - Score is `1 - distance` (distance → similarity). Blank/empty-string queries short-circuit to `[]` without embedding or hitting the DB.
+  - Exposes a `RetrieverDeps` interface (`{ prisma, embedder, k? }`) with `QueryEmbedder` = `{ embedQuery(text) }` for easy mocking; default deps (real OpenAI client + prisma singleton) are lazily built and cached so importing the module does NOT require `OPENAI_API_KEY`.
+- Unit test `tests/ragRetrieverService.test.ts` (7 new cases) verifies:
+  - Blank query returns `[]` without touching embedder/prisma.
+  - Query embedding is forwarded; SQL contains `embedding IS NOT NULL`, `ORDER BY embedding <=>`, `LIMIT`.
+  - Vector literal param is the `[v1,v2,...]` string and default K is `RETRIEVER_K`.
+  - Ordering returned by the SQL query is preserved and scores are descending (since distance asc).
+  - K limit is honored and a per-call `k` override via deps works.
+  - String distances from the pgvector driver are coerced via `parseFloat`.
+- Files changed: `src/services/ragRetrieverService.ts` (new), `tests/ragRetrieverService.test.ts` (new), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- Typecheck (`npx tsc --noEmit`) is clean; `npm test` green at 57 tests across 9 files (was 50 across 8).
+- **Learnings for future iterations:**
+  - Repo already had `@langchain/openai` installed — `OpenAIEmbeddings` exposes `embedQuery(text)` for single strings (distinct from `embedDocuments(texts)` which is batch). US-005 should reuse the same `QueryEmbedder` shape if it needs to embed the session's last user turn.
+  - Prefer `$queryRawUnsafe` with two explicit params (vector literal as `$1`, K as `$2`) over tagged-template `$queryRaw`: pgvector needs `$1::vector` casts and the tagged template won't emit the cast cleanly. Safe because both params are non-user-controlled (vector comes from OpenAI, K is a numeric constant).
+  - Place the `WHERE embedding IS NOT NULL` filter BEFORE the `ORDER BY embedding <=> $1::vector` so the planner can skip null rows; also guards against ingestion-in-flight rows where embedding hasn't been written yet.
+  - For US-005: the retriever returns chunks in descending-score order, so checking `chunks[0].score >= SIMILARITY_THRESHOLD` is sufficient for the handoff gate — no need to sort or max-scan.
+  - US-005's chain service should follow the same deps-injection + cached-default pattern so its unit tests can mock both the retriever AND the Claude LLM without env vars.
+---
+
+## 2026-04-21 - US-005
+- Implemented `src/services/ragChainService.ts`:
+  - Exports `generateAnswer({ sessionId, userMessage }, overrideDeps?): Promise<{ answer, handoff, topScore, usedChunkIds }>`.
+  - Calls `retrieveRelevantChunks` (via injected `Retriever`) and gates: if `chunks.length === 0 || chunks[0].score < SIMILARITY_THRESHOLD`, returns the Portuguese fallback + `handoff: true` WITHOUT calling the LLM.
+  - Loads the last N (default 10) messages for the session via `prisma.message.findMany({ orderBy: { timestamp: "desc" }, take: 10 })` then `.reverse()` — yields ASC chronological order in the final prompt. Uses `select: { senderType, content }` to stay lean.
+  - Formats history: BOT -> `AIMessage`, TENANT/LANDLORD -> `HumanMessage`.
+  - Builds a Portuguese system prompt encoding §6 of `documentation/buisness_plan.md`: profissional/acolhedor/confiável, base-apenas-no-contexto, handoff em litígios/exceções, PT-BR, respostas breves. Retrieved chunks are concatenated into the system prompt with `[#N — title (score=X.XXX)]` headers via `formatContext`.
+  - Constructs `ChatAnthropic` with `model: "claude-sonnet-4-6"` and `temperature: 0.2`. Deps-injection + lazy `getDefaultDeps()` cache so the module imports cleanly in tests without `ANTHROPIC_API_KEY`.
+  - Handles both string- and content-block-array LLM responses via `extractTextContent` helper.
+- New unit test `tests/ragChainService.test.ts` (13 cases) covers: no-chunk handoff, low-score handoff, high-score LLM path, history inclusion + ASC ordering, history limit query shape (desc + take 10), context injected in system prompt, array-content-block LLM response parsing, per-call `similarityThreshold` override, plus `formatContext` / `buildSystemPrompt` / `historyToMessages` helpers. 70 tests green (was 57).
+- `npx tsc --noEmit` clean; `npm test` green.
+- Files changed: `src/services/ragChainService.ts` (new), `tests/ragChainService.test.ts` (new), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `@langchain/core/messages` exports `AIMessage`, `HumanMessage`, `SystemMessage` (and the `BaseMessage` type). Their `.content` field may be a plain string or an array of content blocks like `[{ type: "text", text: "..." }]` — always normalize via a helper. Array-shape responses are common from Anthropic when thinking/tool-use is involved, even when you don't ask for it.
+  - `ChatAnthropic` constructor takes `{ apiKey, model, temperature }`. Model IDs: `claude-sonnet-4-6` is the current Sonnet for this project (PRD spec). Do NOT default to `claude-sonnet-4-5-20250929` from the langchain docs examples.
+  - `prisma.message.findMany` with `orderBy: asc` + `take: N` gives the FIRST N messages (oldest), NOT the last N. To get "last N in ASC order" use `orderBy: desc` + `take: N` + `.slice().reverse()`. The acceptance criteria in US-005 specifically said "last 10 ordered ASC".
+  - When mocking a Prisma delegate (`prisma.message.findMany`) in vitest, narrow the `ChainDeps["prisma"]` type to `Pick<PrismaClient, "message">` and cast the test-only mock object via `as unknown as ChainDeps["prisma"]`. Full `PrismaClient` shape is too big to satisfy with a literal mock.
+  - For US-006 (wiring into worker): the chain already handles retrieval + LLM + prompt construction. The worker only needs to: persist inbound Message (TENANT), call `generateAnswer`, persist outbound Message (BOT), send via `whatsappService`, and if `handoff === true` flip `ChatSession.status` to `WAITING_HUMAN`. No need to touch retrieval, prompts, or history loading — it's all inside `generateAnswer`.
+  - For US-007 (lead extraction): reuse the same deps-injection pattern + `ChatAnthropic` setup, but with `temperature: 0` and LangChain structured output (`.withStructuredOutput(zodSchema)`). The structured-output call path is separate from `generateAnswer` — run it in a microtask/separate BullMQ job AFTER the reply is sent.
+---
+
+## 2026-04-21 - US-006
+- Refactored `src/services/whatsappService.ts`:
+  - `sendMessage(to, text)` now ONLY posts to the Meta Graph API and returns `SendMessageResponse` (`{ messages: [{ id }], ... }`). Removed the baked-in outbound persistence + session/user lookup — the worker now owns all session/message state, avoiding the double-persist race that would have landed once US-006 wired the worker's own `prisma.message.create` for outbound.
+  - `prisma` import is dropped from this module (it's now pure I/O to Meta).
+- Rewrote `src/workers/whatsappWorker.ts`:
+  - Extracted the job body into a pure `handleWhatsappMessage(payload, deps)` exported function with `WhatsappHandlerDeps = { prisma, sendMessage, generateAnswer }`. Matches the deps-injection pattern from ingestKnowledge / ragRetrieverService / ragChainService.
+  - Flow: parse payload → dup wamid check → `prisma.user.upsert({ where: phoneNumber })` → find latest `ChatSession` by `tenantId` (any status, `orderBy: startedAt desc`) → create new ACTIVE_BOT if none → persist inbound `Message` (TENANT) → if session.status !== ACTIVE_BOT return `{ success, reason: 'session_<status>' }` without replying → call `generateAnswer({ sessionId, userMessage })` (try/catch) → call `sendMessage(phoneNumber, answer)` → persist outbound `Message` (BOT, wamid captured from Meta response) → if `handoff === true` `prisma.chatSession.update({ status: 'WAITING_HUMAN' })`.
+  - RAG errors: caught, replaced with `RAG_ERROR_FALLBACK` Portuguese apology, forced `handoff: true`, still sent + persisted + flipped session.
+  - `sendMessage` failures: logged but non-fatal — outbound Message is still persisted (wamid: null) and handoff flip still runs.
+  - BullMQ `Worker` at bottom is a thin wrapper that calls `handleWhatsappMessage` with the real deps (prisma singleton, real `sendMessage`, real `generateAnswer`).
+- Rewrote `tests/whatsappWorker.test.ts`:
+  - `vi.mock('ioredis')` with a fake class + `vi.mock('bullmq')` with a fake `Worker` so importing the worker module does not require a live Redis.
+  - `vi.hoisted(() => { process.env.TOKEN_ACCES_WHATSAPP = ...; process.env.PHONE_NUMBER_ID = ...; process.env.REDIS_URL = ... })` satisfies the two modules' boot-time guards.
+  - Tests cover: sendMessage (Meta happy path + 130497 + generic API error + network error), empty-payload / not-message / duplicate-wamid short-circuits, happy path (ACTIVE_BOT reuse, grounded answer, session stays ACTIVE), new-session creation, handoff path (fallback from low-score retriever → WAITING_HUMAN), WAITING_HUMAN early-return, RESOLVED early-return, RAG-error apology → WAITING_HUMAN, and sendMessage-failure with outbound still persisted (wamid: null).
+- Files changed: `src/services/whatsappService.ts`, `src/workers/whatsappWorker.ts`, `tests/whatsappWorker.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- Typecheck (`npx tsc --noEmit`) clean. `npm test` green at 75 tests across 10 files (was 70 across 10). No browser/UI surface to test manually — worker is queue-driven.
+- **Learnings for future iterations:**
+  - The OLD `whatsappService.sendMessage` silently persisted the outbound message by looking up `User` by phoneNumber + `ChatSession` by `status: ACTIVE_BOT`. This is fine as long as the worker doesn't ALSO persist, but once you need session-aware logic (handoff flip, pointer to the same session object the worker used), the in-service persistence hides a race: `sendMessage`'s session lookup could return a DIFFERENT session than the one `handleWhatsappMessage` has in hand (e.g. if multiple sessions exist, or if the handoff happened mid-flight). Move persistence to the worker and keep `sendMessage` single-purpose.
+  - BullMQ `Worker` + `IORedis` construct network-y resources at module import time. To unit-test a module that exports both a handler function and `new Worker(...)` at top level, mock both packages in `vi.mock`. Do NOT try to refactor to lazy-init the Worker — production code wants it eagerly running.
+  - Session lookup in the worker is `findFirst({ where: { tenantId }, orderBy: { startedAt: 'desc' } })` — NOT filtered by `status: 'ACTIVE_BOT'`. If you filter on ACTIVE_BOT, you'd miss a WAITING_HUMAN session and accidentally create a parallel ACTIVE_BOT session alongside it, causing the bot to start replying again while a human is also handling the same tenant. Fetch latest regardless of status, then branch on status.
+  - Dep-inject `generateAnswer` into the worker rather than calling the module-level one directly — otherwise the test file has to also set up `ANTHROPIC_API_KEY` + `OPENAI_API_KEY` and mock `@langchain/anthropic` / `@langchain/openai`. The ragChainService's cached-default-deps handles production; the worker's test uses `vi.fn()`.
+  - Outbound wamid capture pattern: `const r = await sendMessage(phone, answer); const outboundWamid = r.messages?.[0]?.id ?? null;` then `prisma.message.create({ data: { wamid: outboundWamid, ... } })`. Use `null` (not undefined / not a thrown error) when `sendMessage` fails so the Message row still writes and subsequent status-update webhooks for that wamid simply no-op in `messageStatusService`.
+  - For US-007 (lead extraction): hook into the worker AFTER `await deps.sendMessage(...)` and AFTER the outbound `message.create`. Use `queueMicrotask` (or a new BullMQ queue) so extraction failures don't block the user-facing reply. The handler already has `user`, `chatSession`, and `messageText` in scope — pass them to `extractInsights({ sessionId, userMessage })`.
+  - For US-008 (eval script): it does NOT go through the worker — just calls `generateAnswer` directly with a synthetic sessionId. No need to stand up BullMQ or set `REDIS_URL`.
+---
+
+## 2026-04-21 - US-007
+- Implemented `src/services/leadExtractionService.ts`:
+  - Exports `extractInsights({ sessionId, userMessage }, overrideDeps?): Promise<{ insights, rentalProcessId, upsertedKeys, handoff }>`.
+  - Zod schema `InsightsSchema`: `{ budget?, neighborhood?, bedrooms?, pets_allowed?, intent }` where `intent` is `"search" | "schedule_visit" | "contract_question" | "human_handoff" | "other"` (required).
+  - Uses `new ChatAnthropic({ apiKey, model: "claude-sonnet-4-6", temperature: 0 }).withStructuredOutput(InsightsSchema, { name: "extract_lead_insights" })`. Portuguese system prompt explaining each field + the five intent values; user message is the second message in the prompt.
+  - Flow: `prisma.chatSession.findUnique({ where: { id } })` (throws if missing) → LLM structured call → find open RentalProcess (`status != CLOSED`, latest by `createdAt desc`), create TRIAGE row if none → loop over `budget / neighborhood / bedrooms / pets_allowed / intent`, skip null/undefined, `findFirst` by `(rentalProcessId, insightKey)`, create if missing, update if value differs, no-op if unchanged → if `intent === "human_handoff"` and session is not already WAITING_HUMAN, flip it.
+  - Deps-injection + lazy cached default deps (same pattern as retriever/chain services) so the module imports cleanly in tests without `ANTHROPIC_API_KEY`.
+- Wired into `src/workers/whatsappWorker.ts`:
+  - Added `extractInsights: ExtractInsightsFn` and `scheduleMicrotask?: (task) => void` to `WhatsappHandlerDeps`.
+  - After the outbound `message.create` and session-handoff-flip, schedules `extractInsights({ sessionId, userMessage })` via `queueMicrotask` (default) with error-catch so failures don't affect the user-facing reply. Gated on `!ragError` so apology messages don't feed the extractor with noise.
+  - Production `Worker` wrapper wires `defaultExtractInsights` from the new service.
+- Tests: new `tests/leadExtractionService.test.ts` (13 cases) covers: schema accept/reject, prompt-builder shape, primitive serialization, missing-session throws, TRIAGE creation + 5-field upsert in one pass, process reuse (second call reuses the row), null/undefined skip, second-call updates existing insight row (doesn't duplicate), no-op when value unchanged, human_handoff → WAITING_HUMAN flip, no-re-flip when already WAITING_HUMAN, user message forwarded verbatim to LLM. Extended `tests/whatsappWorker.test.ts` with: happy-path schedules extraction (asserts not-yet-invoked before draining microtasks, then invoked with correct args after), extraction-failure swallowed (doesn't throw out of handler), and RAG-error path does NOT schedule extraction.
+- Files changed: `src/services/leadExtractionService.ts` (new), `src/workers/whatsappWorker.ts`, `tests/leadExtractionService.test.ts` (new), `tests/whatsappWorker.test.ts`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- Typecheck (`npx tsc --noEmit`) clean. `npm test` green at 92 tests across 11 files (was 75 across 10).
+- **Learnings for future iterations:**
+  - `withStructuredOutput(zodSchema, { name })` returns a Runnable that takes `BaseMessage[]` (or any `BaseLanguageModelInput`) and resolves to the typed parsed object. Anthropic implements it via tool-calling under the hood. Response is pre-validated against the schema by LangChain, but defensive `InsightsSchema.parse(result)` at the boundary is cheap insurance against upstream SDK changes.
+  - `AiExtractedInsight` has no compound unique index — you CANNOT use `prisma.aiExtractedInsight.upsert`. Do `findFirst` + branch. Adding a `@@unique([rentalProcessId, insightKey])` to the schema in a future iteration would enable `.upsert` and remove the two-step pattern, but would require a migration.
+  - Don't filter open-process lookup to `status: 'TRIAGE'` — a tenant mid-VISIT_SCHEDULED should still have new insights written to their existing process, not a brand-new TRIAGE one. Filter `status: { not: 'CLOSED' }` instead.
+  - Worker-side fire-and-forget: inject `scheduleMicrotask?: (task) => void` with a `queueMicrotask` default. In tests, replace it with a queue array that tests drain explicitly. Makes timing deterministic — `await handleWhatsappMessage(...); await deps.runScheduledMicrotasks();` works cleanly instead of relying on real-time microtask ordering.
+  - Gate post-reply hooks on `!ragError`. The RAG-error apology path doesn't represent the user's real intent — extracting insights from that interaction just pollutes the lead record. The low-score handoff path (generic fallback, valid user message, `handoff: true`) IS still extractable — only actual chain exceptions skip.
+  - For US-008 (eval script): it only needs `generateAnswer` + a throwaway sessionId. No need to set up the extraction hook or touch the worker path.
+---
+
+## 2026-04-21 - US-008
+- Implemented `src/scripts/evalRag.ts`:
+  - 8 hard-coded Portuguese test questions spanning the PRD-specified topics: triagem (screening), documentação (documents), agendar visita (schedule visit), pagamento (payment), pets, rescisão (contract termination), taxas/IPTU (fees/property tax), e cobrança inicial (upfront charges).
+  - For each question: calls `retrieveRelevantChunks(question)` to surface the top chunk's title + similarity score, then calls `generateAnswer({ sessionId, userMessage })` against a synthetic `sessionId = eval-${Date.now()}-${rand}`. Prisma `message.findMany` against a non-existent sessionId just returns `[]`, so no throwaway ChatSession row is needed.
+  - Prints `question / top chunk / similarity (retriever + chain) / handoff / answer (truncated to 500 chars with whitespace normalized)` per question.
+  - Retriever and chain calls are wrapped in try/catch per question so a single failure doesn't abort the run.
+  - `assertRagSecrets()` at `main()` entry so both `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are required before any LLM call.
+  - `prisma.$disconnect()` in the `.finally()` block, matching the CLI shutdown pattern from `ingestKnowledge.ts`.
+- Added npm script `"eval:rag": "ts-node src/scripts/evalRag.ts"`.
+- Files changed: `src/scripts/evalRag.ts` (new), `package.json` (script), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- Typecheck (`npx tsc --noEmit`) clean. `npm test` green at 92 tests across 11 files (no new tests — PRD only requires typecheck for US-008).
+- **Learnings for future iterations:**
+  - For eval/smoke scripts, skip the deps-injection + unit-test pattern — the script itself is the test. Direct imports of `generateAnswer` + `retrieveRelevantChunks` keep the script readable and the only thing that matters is that it runs.
+  - A synthetic `sessionId` avoids the need to set up a User + ChatSession per run. `prisma.message.findMany` doesn't error on a missing session, so the chain just builds a prompt with no history — exactly what you want for a cold-start eval.
+  - Output format: printing similarity from BOTH the standalone retriever AND the chain's `topScore` lets you verify they agree. They should be identical (the chain calls the retriever internally with the same query), but a divergence would flag a bug in either path.
+  - For future eval work: consider piping the output to a file + diffing across runs to detect regressions, or extending the script to compute mean similarity and handoff rate across the question set. Out of scope for US-008.
+  - This is the final story — all 8 user stories now pass.
+---

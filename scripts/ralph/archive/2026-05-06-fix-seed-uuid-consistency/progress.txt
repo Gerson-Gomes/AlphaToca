@@ -1,0 +1,5 @@
+# Ralph Progress Log
+Started: Wed May  6 2026 (feature: property-photo-upload)
+---
+
+## Codebase Patterns

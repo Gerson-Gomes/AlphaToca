@@ -1,0 +1,146 @@
+{
+  "project": "AlphaToca-Backend",
+  "branchName": "rag-implementation",
+  "description": "RAG Implementation with LangChain for WhatsApp Chatbot - Adds a Retrieval-Augmented Generation pipeline built on LangChain that ingests Markdown docs, retrieves relevant chunks, generates grounded answers, extracts lead insights, and hands off to humans when confidence is low.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Define ingestion pipeline shape and config",
+      "description": "As a developer, I want a single config module that centralizes the embedding model, chunking strategy, and retrieval parameters so the rest of the RAG code reads them from one place.",
+      "acceptanceCriteria": [
+        "New file src/config/rag.ts exports typed constants: EMBEDDING_MODEL = \"text-embedding-3-small\", EMBEDDING_DIMS = 1536, CHUNK_SIZE = 800, CHUNK_OVERLAP = 120, RETRIEVER_K = 4, SIMILARITY_THRESHOLD = 0.72",
+        "Reads OPENAI_API_KEY and ANTHROPIC_API_KEY from process.env, fails fast with a clear error at boot if either is missing",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Completed 2026-04-21. Created src/config/rag.ts with typed constants and fail-fast secret accessors (getOpenAIApiKey, getAnthropicApiKey, assertRagSecrets)."
+    },
+    {
+      "id": "US-002",
+      "title": "Extend KnowledgeDocument with ingestion-tracking fields",
+      "description": "As a developer, I want to track the source file, chunk index, and content hash per row so re-ingestion can skip unchanged chunks.",
+      "acceptanceCriteria": [
+        "Add to KnowledgeDocument: sourcePath String, chunkIndex Int, contentHash String, createdAt DateTime @default(now()), updatedAt DateTime @updatedAt",
+        "Add compound unique index on (sourcePath, chunkIndex) so upserts are deterministic",
+        "Add index on contentHash for fast skip lookups",
+        "Prisma migration generated and applied against a local DB (npx prisma migrate dev --name add_rag_ingestion_tracking)",
+        "npx prisma generate runs cleanly",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Completed 2026-04-21. Added sourcePath, chunkIndex, contentHash, createdAt, updatedAt to KnowledgeDocument in prisma/schema.prisma with compound unique index on (sourcePath, chunkIndex) and index on contentHash. Migration 20260422022358_add_rag_ingestion_tracking generated via `prisma migrate diff` (non-interactive workaround for migrate dev) and applied cleanly to local DB via `prisma migrate deploy`. prisma generate and typecheck pass; 43 tests green."
+    },
+    {
+      "id": "US-003",
+      "title": "Build the ingestion CLI script",
+      "description": "As a developer, I want npm run ingest:knowledge to walk documentation/, chunk every .md file, embed new/changed chunks, and upsert them into KnowledgeDocument.",
+      "acceptanceCriteria": [
+        "New script src/scripts/ingestKnowledge.ts reads all *.md files under documentation/ recursively",
+        "Splits each file with LangChain RecursiveCharacterTextSplitter using CHUNK_SIZE / CHUNK_OVERLAP from src/config/rag.ts",
+        "Computes sha256(content) per chunk as contentHash",
+        "Upserts by (sourcePath, chunkIndex): insert if missing, skip if contentHash matches, update if differs",
+        "Deletes rows whose (sourcePath, chunkIndex) no longer exists in the file",
+        "Writes embeddings via raw SQL ($executeRaw) with ::vector casts",
+        "Logs a summary: N files, X inserted, Y updated, Z skipped, W deleted",
+        "New npm script: \"ingest:knowledge\": \"ts-node src/scripts/ingestKnowledge.ts\"",
+        "Running the script twice produces 0 inserted, 0 updated, N skipped on second run",
+        "Unit test covers the hash-skip logic with mocked embeddings + mocked Prisma client",
+        "Typecheck passes; tests pass (npm test)"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Completed 2026-04-21. Created src/scripts/ingestKnowledge.ts with pure `runIngestion(deps)` core + thin CLI wrapper, using RecursiveCharacterTextSplitter from @langchain/textsplitters (new dep) with CHUNK_SIZE/CHUNK_OVERLAP from src/config/rag.ts. sha256 content hash per chunk; upsert-by-(source_path, chunk_index) with skip-if-hash-matches; delete rows whose keys no longer exist. Embeddings written via $executeRawUnsafe with ::vector cast. Added `ingest:knowledge` npm script. Unit test (tests/ingestKnowledge.test.ts) covers insert-all, skip-on-match, update-on-hash-delta, delete-stale, and mixed paths with mocked embedder + mocked Prisma; 50 tests green. Also fixed pre-existing typecheck error in src/scripts/seed-knowledge.ts by pointing import at @langchain/textsplitters."
+    },
+    {
+      "id": "US-004",
+      "title": "Implement the pgvector retriever",
+      "description": "As a developer, I want a LangChain VectorStoreRetriever that queries KnowledgeDocument by cosine similarity and returns the top K chunks plus their similarity scores.",
+      "acceptanceCriteria": [
+        "New module src/services/ragRetrieverService.ts exports retrieveRelevantChunks(query: string): Promise<RetrievedChunk[]> where RetrievedChunk = { id, content, title, score }",
+        "Generates the query embedding with the same EMBEDDING_MODEL used for ingestion",
+        "Runs a single raw SQL query using the pgvector cosine operator (<=> for distance or 1 - (embedding <=> $1) for similarity), ORDER BY embedding <=> $1 ASC LIMIT K",
+        "Rows with embedding IS NULL are excluded",
+        "Unit test with a seeded in-memory fixture (or mocked Prisma) verifies ordering and K limit",
+        "Typecheck passes; tests pass"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "Completed 2026-04-21. Created src/services/ragRetrieverService.ts exporting retrieveRelevantChunks(query, overrideDeps?) -> Promise<RetrievedChunk[]> with { id, content, title, score }. Embeds the query via OpenAIEmbeddings (same EMBEDDING_MODEL as ingestion), then runs one $queryRawUnsafe against knowledge_documents using pgvector cosine distance (<=>), ORDER BY ASC LIMIT K, WHERE embedding IS NOT NULL. Score is computed as 1 - distance. Uses the deps-injection pattern from ingestKnowledge so tests can mock prisma + embedder. Blank queries short-circuit to []. Default deps are cached (lazy OpenAI client init) so importing the module does NOT require env vars. New unit test tests/ragRetrieverService.test.ts (7 tests) verifies: blank-query no-op, embedding is forwarded, SQL includes embedding IS NOT NULL + ORDER BY + LIMIT, vector literal param shape, default K = RETRIEVER_K, ordering is preserved, K limit honored, per-call k override, and string-distance parsing. 57 tests green; typecheck clean."
+    },
+    {
+      "id": "US-005",
+      "title": "Build the conversational RAG chain",
+      "description": "As a developer, I want a single function that, given a user message and a ChatSession.id, produces a grounded Portuguese reply.",
+      "acceptanceCriteria": [
+        "New module src/services/ragChainService.ts exports generateAnswer(input: { sessionId: string; userMessage: string })",
+        "Loads the last 10 Messages for the session (ordered by timestamp ASC) and formats them as LangChain HumanMessage / AIMessage history",
+        "Calls retrieveRelevantChunks(userMessage) and concatenates chunk text into a context string",
+        "If no chunk exceeds SIMILARITY_THRESHOLD, returns { answer: <fallback>, handoff: true } without calling the LLM",
+        "Builds a Portuguese system prompt encoding tone rules from documentation/buisness_plan.md section 6",
+        "Calls Claude Sonnet 4.6 via @langchain/anthropic with temperature: 0.2",
+        "Returns { answer: string, handoff: boolean, topScore: number, usedChunkIds: string[] }",
+        "Unit test with mocked LLM + mocked retriever verifies low-score handoff path, high-score LLM path, and that chat history is included in the prompt",
+        "Typecheck passes; tests pass"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Completed 2026-04-21. Created src/services/ragChainService.ts exporting generateAnswer({ sessionId, userMessage }, overrideDeps?) -> { answer, handoff, topScore, usedChunkIds }. Loads the last N (default 10) messages for the session via prisma.message.findMany (orderBy timestamp desc + reverse -> ASC in final prompt). Calls retrieveRelevantChunks and gates on topScore >= SIMILARITY_THRESHOLD: if below (or zero chunks) returns Portuguese fallback + handoff=true WITHOUT calling the LLM. Builds a Portuguese system prompt encoding tone rules from documentation/buisness_plan.md §6 (profissional/acolhedor/confiável, base-apenas-no-contexto, handoff em litígios, PT-BR, breve). Calls ChatAnthropic with model claude-sonnet-4-6 and temperature 0.2. Deps-injection + cached-default-deps pattern (matches retriever service) so tests don't need ANTHROPIC_API_KEY. Handles string- and content-block-array LLM responses. Unit tests (tests/ragChainService.test.ts) cover: low-score handoff path, high-score LLM path, chat history inclusion + ASC ordering, historyLimit (take+desc+reverse), context injection in system prompt, content-block parsing, similarityThreshold override, formatContext/buildSystemPrompt/historyToMessages helpers. 70 tests green (was 57); typecheck clean."
+    },
+    {
+      "id": "US-006",
+      "title": "Wire the RAG chain into whatsappWorker.ts",
+      "description": "As a user on WhatsApp, when I send a message the bot should reply with a grounded answer and persist both sides of the conversation.",
+      "acceptanceCriteria": [
+        "whatsappWorker.ts job handler: finds-or-creates User by phoneNumber",
+        "Finds active ChatSession (status ACTIVE_BOT) or creates one",
+        "If session status is WAITING_HUMAN or RESOLVED, persist inbound Message and return (no auto-reply)",
+        "Persists inbound Message with senderType: TENANT",
+        "Calls generateAnswer({ sessionId, userMessage })",
+        "Persists outbound Message with senderType: BOT",
+        "If handoff is true, updates ChatSession.status to WAITING_HUMAN",
+        "Sends answer via existing whatsappService outbound call",
+        "Errors from RAG chain are caught; worker sends generic Portuguese apology and flips session to WAITING_HUMAN",
+        "Integration-style unit test with mocked Prisma + whatsappService + generateAnswer covers happy path, handoff path, and already-WAITING_HUMAN path",
+        "Typecheck passes; tests pass"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Completed 2026-04-21. Refactored `src/services/whatsappService.ts` to only send to Meta (removed the baked-in outbound-message persistence + session lookup — the worker now owns all session/message state). Extracted the worker body into `handleWhatsappMessage(payload, deps)` in `src/workers/whatsappWorker.ts` with a deps-injection object `{ prisma, sendMessage, generateAnswer }` (same pattern as US-003/US-004/US-005). Handler flow: finds-or-creates `User` by phoneNumber; finds most recent `ChatSession` (any status) ordered by startedAt desc and creates a new ACTIVE_BOT session if none; persists inbound `Message` (TENANT); if session.status !== ACTIVE_BOT returns `{ success: true, reason: 'session_<status>' }` without replying; otherwise calls `generateAnswer({ sessionId, userMessage })`, sends via `whatsappService.sendMessage` (captures outbound wamid), persists outbound `Message` (BOT), and flips session to WAITING_HUMAN when `handoff === true`. RAG errors are caught and emit a Portuguese apology + handoff flip. `sendMessage` failures are logged but the outbound message is still persisted (wamid null) and the handoff/status update still runs. Tests in `tests/whatsappWorker.test.ts` rewritten to cover: empty payload/no-message/duplicate wamid, happy path (ACTIVE_BOT reuse + new session creation), handoff path, WAITING_HUMAN + RESOLVED early-return paths, RAG-error apology path, and sendMessage-failure persistence. Module top-level `new IORedis`/`new Worker` are mocked via `vi.mock('ioredis')` and `vi.mock('bullmq')` so the test file can import the worker module without a live Redis. 75 tests green (was 70); typecheck clean."
+    },
+    {
+      "id": "US-007",
+      "title": "Extract structured lead insights",
+      "description": "As an operator, I want the chatbot to capture the tenant's rental preferences (budget, neighborhood, bedrooms, pets, intent) into the database so a human can follow up with real listings.",
+      "acceptanceCriteria": [
+        "New module src/services/leadExtractionService.ts exports extractInsights(input: { sessionId: string; userMessage: string }): Promise<ExtractedInsights>",
+        "Uses LangChain structured output with a Zod schema: { budget?, neighborhood?, bedrooms?, pets_allowed?, intent: \"search\"|\"schedule_visit\"|\"contract_question\"|\"human_handoff\"|\"other\" }",
+        "Runs against Claude Sonnet 4.6; temperature: 0",
+        "Invoked from whatsappWorker.ts AFTER the reply is sent (queueMicrotask or separate BullMQ job)",
+        "Finds-or-creates a RentalProcess for the tenant with status TRIAGE (one open process per tenant)",
+        "For each non-null extracted key, upserts an AiExtractedInsight row; updates existing rows rather than duplicating",
+        "If intent === \"human_handoff\", flips ChatSession to WAITING_HUMAN",
+        "Unit test with mocked LLM verifies insights are parsed, RentalProcess created once per tenant, insights upserted (second call with new budget updates, doesn't insert new row)",
+        "Typecheck passes; tests pass"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "Completed 2026-04-21. Created src/services/leadExtractionService.ts exporting extractInsights({ sessionId, userMessage }, overrideDeps?) -> { insights, rentalProcessId, upsertedKeys, handoff }. Uses LangChain withStructuredOutput with a Zod InsightsSchema ({ budget?, neighborhood?, bedrooms?, pets_allowed?, intent }) against ChatAnthropic (claude-sonnet-4-6, temperature 0). Flow: look up ChatSession (error if missing) -> call structured LLM on a Portuguese system prompt + userMessage -> findFirst on open RentalProcess (status != CLOSED, orderBy createdAt desc); create TRIAGE one if none -> for each non-null insight field, findFirst AiExtractedInsight by (rentalProcessId, insightKey) + create or update (value-delta-aware: no update if unchanged) -> if intent === 'human_handoff' and session.status !== WAITING_HUMAN, flip session to WAITING_HUMAN. Deps-injection + cached-default-deps (lazy ChatAnthropic init) matches the pattern from retriever/chain services. Hooked into whatsappWorker.handleWhatsappMessage after the outbound reply + outbound Message.create via queueMicrotask (swappable via deps.scheduleMicrotask in tests). Skipped on RAG-error paths so the apology case doesn't produce misleading lead insights. Failures inside the microtask are caught + logged, never propagate. Updated whatsappWorker + tests to include extractInsights in the deps (WhatsappHandlerDeps). Tests: tests/leadExtractionService.test.ts (13 new cases: schema validation, prompt builder, value serializer, session-missing error, new-process creation + 5-field upsert, process reuse, null-field skip, second-call-updates, no-op on unchanged value, human_handoff flip, no-re-flip if already WAITING_HUMAN, user message forwarded to LLM). tests/whatsappWorker.test.ts extended with happy-path extraction-scheduled, extraction-failure-swallowed, and RAG-error-no-extraction cases. 92 tests green (was 75); typecheck clean."
+    },
+    {
+      "id": "US-008",
+      "title": "Seed script for smoke testing",
+      "description": "As a developer, I want an evaluation fixture so I can spot-check RAG quality without touching WhatsApp.",
+      "acceptanceCriteria": [
+        "New script src/scripts/evalRag.ts reads a hard-coded array of ~8 Portuguese test questions (triagem, visita, documentação, rescisão, pagamento)",
+        "For each question, calls generateAnswer with a throwaway ChatSession and prints: question, top chunk title, similarity score, handoff flag, final answer",
+        "New npm script \"eval:rag\": \"ts-node src/scripts/evalRag.ts\"",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "Completed 2026-04-21. Created src/scripts/evalRag.ts with 8 hard-coded Portuguese test questions covering triagem, documentação, agendamento de visita, pagamento, pets, rescisão, taxas/IPTU, e cobrança inicial. For each question the script (a) calls retrieveRelevantChunks to get the top chunk's title + similarity score, (b) calls generateAnswer with a throwaway synthetic sessionId (eval-<timestamp>-<rand>) so no ChatSession/User row is needed — prisma.message.findMany against a non-existent sessionId returns [] cleanly, (c) prints question, top chunk title, similarity score (from both the retriever and the chain's topScore), handoff flag, and the truncated final answer. Retriever and chain errors are caught per-question so one bad row doesn't abort the whole run. assertRagSecrets() is called at main() entry to fail fast if OPENAI_API_KEY or ANTHROPIC_API_KEY is missing. prisma.$disconnect() is called in the finally block (same CLI shutdown pattern as ingestKnowledge.ts). Added npm script `eval:rag`: `ts-node src/scripts/evalRag.ts`. Typecheck clean; 92 tests still green (no new tests — PRD only requires typecheck for this story)."
+    }
+  ]
+}

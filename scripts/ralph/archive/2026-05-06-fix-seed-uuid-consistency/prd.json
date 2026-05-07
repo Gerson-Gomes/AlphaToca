@@ -1,0 +1,167 @@
+{
+  "project": "I-Moveis",
+  "branchName": "ralph/property-photo-upload",
+  "description": "Property Photo Upload - Enable landlords to upload JPEG/PNG photos when creating a property via multipart/form-data on POST /properties. Photos are stored on the local filesystem at uploads/<propertyId>/<uuid>.<ext> and referenced by the existing property_images table. Up to 20 photos, 10MB each. First photo becomes the cover (isCover=true). Property + images creation is atomic: on any failure, database is rolled back AND files are removed from disk.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Install multer and type definitions",
+      "description": "As a developer, I need a multipart parser so Express can process binary file uploads in POST /properties requests.",
+      "acceptanceCriteria": [
+        "Add 'multer' to dependencies in package.json (latest stable v1.x)",
+        "Add '@types/multer' to devDependencies in package.json",
+        "Run npm install so package-lock.json is updated and node_modules/multer exists",
+        "Import multer from 'multer' in a TypeScript file compiles without error",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Create multer upload middleware with validation",
+      "description": "As a developer, I need a pre-configured multer instance that enforces file type, size, and count limits for property photos.",
+      "acceptanceCriteria": [
+        "New file src/middlewares/uploadMiddleware.ts exports a multer instance named 'propertyPhotoUpload'",
+        "Uses multer.memoryStorage() so files are buffered in RAM and only written to disk after property creation succeeds",
+        "Sets limits: { fileSize: 10 * 1024 * 1024, files: 20 } (10MB per file, 20 files max)",
+        "fileFilter accepts only MIME types 'image/jpeg' and 'image/png' — rejects other types by calling cb() with an Error whose message is 'INVALID_FILE_TYPE' (no file is attached)",
+        "Exports a convenience handler using propertyPhotoUpload.array('photos', 20) so routes can import it directly",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Create propertyImageStorageService for filesystem writes",
+      "description": "As a developer, I need a service that writes multer in-memory files to uploads/<propertyId>/ with safe UUID-based filenames and can clean up on failure.",
+      "acceptanceCriteria": [
+        "New file src/services/propertyImageStorageService.ts exports async function savePropertyImages(propertyId: string, files: Express.Multer.File[]): Promise<{ url: string; isCover: boolean }[]>",
+        "Creates directory uploads/<propertyId>/ using fs/promises mkdir with { recursive: true }",
+        "Each file is saved as <crypto.randomUUID()>.<ext> where ext is derived from file.mimetype ('image/jpeg' -> 'jpg', 'image/png' -> 'png') — never uses file.originalname",
+        "Returns array in input order with url = '/uploads/<propertyId>/<uuid>.<ext>' and isCover=true only for index 0",
+        "Also exports async function cleanupPropertyImages(propertyId: string, urls: string[]): Promise<void> which deletes the given files (and the directory if empty), swallowing ENOENT errors",
+        "If any write fails mid-loop, the already-written files in that invocation are deleted before re-throwing the error",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Update createPropertySchema to coerce multipart string values",
+      "description": "As a developer, I need the Zod schema to accept string inputs for numeric/boolean fields because multer populates req.body with strings in multipart requests.",
+      "acceptanceCriteria": [
+        "In src/utils/propertyValidation.ts, numeric fields (price, bedrooms, bathrooms, parkingSpots, area, latitude, longitude, views, condoFee, propertyTax) use z.coerce.number() (preserving existing .min/.max/.positive/etc constraints)",
+        "Boolean fields (isFurnished, petsAllowed, nearSubway, isFeatured) use z.coerce.boolean() or a preprocess that maps 'true'/'false' strings to booleans",
+        "Existing JSON requests (without file uploads) still pass validation — no regression",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Update propertyService.createProperty to persist images atomically",
+      "description": "As a developer, I need the create flow to run the property INSERT and property_images INSERTs in a single Prisma transaction, with filesystem cleanup on any failure.",
+      "acceptanceCriteria": [
+        "propertyService.createProperty signature accepts an optional second parameter: files?: Express.Multer.File[]",
+        "If files is undefined or empty, behavior is identical to today (creates property only, no images)",
+        "If files is non-empty: (1) run prisma.$transaction that creates the Property; (2) inside the same transaction, call savePropertyImages(property.id, files) to write to disk; (3) inside the same transaction, call prisma.propertyImage.createMany with the returned url/isCover records (propertyId set to the new property.id)",
+        "If the transaction throws at any step, cleanupPropertyImages is called with any URLs already returned by savePropertyImages before the error is re-raised",
+        "Returns the created property with images relation included (prisma include: { images: true })",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Wire multer middleware into POST /properties route",
+      "description": "As a landlord, I want a single POST /properties request to create the property and upload photos together.",
+      "acceptanceCriteria": [
+        "In src/routes/propertyRoutes.ts, POST /properties now applies propertyPhotoUpload.array('photos', 20) middleware before propertyController.create",
+        "propertyController.create reads req.files (typed as Express.Multer.File[] | undefined) and passes them as the second argument to propertyService.createProperty",
+        "Validation of req.body via createPropertySchema still runs first — if it fails, no files are written to disk (memoryStorage guarantees this)",
+        "Response 201 body includes the 'images' array populated with the created PropertyImage records",
+        "If req.files is undefined or empty, response 201 returns the property with images: [] — no regression from current JSON-only flow",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Serve uploads/ directory statically via Express",
+      "description": "As a frontend, I need the returned URLs (/uploads/...) to be directly fetchable so <img src> tags can render the photos.",
+      "acceptanceCriteria": [
+        "In src/app.ts, register app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads'))) before the error handler",
+        "GET /uploads/<anyPropertyId>/<file>.jpg returns 200 with Content-Type image/jpeg when the file exists",
+        "GET /uploads/missing.jpg returns 404",
+        "Path traversal attempts (e.g., /uploads/../package.json) are blocked by express.static default behavior — return 404 or 403",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Handle multer and upload errors in the global error handler",
+      "description": "As an API consumer, I need multer errors to return 400 in the standard API error format ({ status, code, messages }), not raw stack traces.",
+      "acceptanceCriteria": [
+        "Global error handler middleware (wherever zod errors are handled today — inspect src/middlewares/ and src/app.ts to find it) detects instances of multer.MulterError and maps codes: LIMIT_FILE_SIZE -> { status: 400, code: 'FILE_TOO_LARGE', messages: [{ message: 'Arquivo excede 10MB' }] }; LIMIT_FILE_COUNT -> { status: 400, code: 'TOO_MANY_FILES', messages: [{ message: 'Máximo de 20 fotos por propriedade' }] }; LIMIT_UNEXPECTED_FILE -> { status: 400, code: 'UNEXPECTED_FILE_FIELD', messages: [{ message: 'Campo de arquivo inválido' }] }",
+        "Non-MulterError whose message === 'INVALID_FILE_TYPE' (thrown by fileFilter in US-002) returns { status: 400, code: 'INVALID_FILE_TYPE', messages: [{ message: 'Apenas JPEG ou PNG são aceitos' }] }",
+        "No stack traces are leaked in any of the above responses",
+        "Existing zod error handling continues to work unchanged — add a test or manual check that a zod validation error still returns the same body shape as before",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Update Swagger docs for POST /properties multipart",
+      "description": "As an API consumer, I need the Swagger UI to document the multipart/form-data request shape and the new photos field.",
+      "acceptanceCriteria": [
+        "In src/routes/propertyRoutes.ts, the @swagger JSDoc for POST /properties is updated so requestBody.content includes 'multipart/form-data' with a schema that lists all existing property fields plus photos: { type: array, items: { type: string, format: binary }, maxItems: 20 }",
+        "The existing 'application/json' content entry is preserved so the endpoint still documents JSON-only callers",
+        "Response 201 schema references Property and explicitly shows the 'images' array property",
+        "Error responses documented: 400 with error body shape for validation AND upload errors (FILE_TOO_LARGE, TOO_MANY_FILES, INVALID_FILE_TYPE)",
+        "Swagger UI loads at /docs (or whatever path swagger is mounted on — check src/config/swagger.ts) without parsing errors",
+        "Typecheck passes (npx tsc --noEmit)"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Add integration tests for POST /properties photo upload",
+      "description": "As a developer, I need automated tests covering the main upload scenarios so regressions are caught immediately.",
+      "acceptanceCriteria": [
+        "New test file tests/propertyPhotoUpload.test.ts uses supertest and the project's existing vitest setup (mirror patterns from existing tests/ directory)",
+        "Test: POST /properties with 3 small valid JPEG buffers attached as 'photos' returns 201, response.body.images has length 3, images[0].isCover === true, images[1].isCover === false, images[2].isCover === false",
+        "Test: POST /properties with no photos attached returns 201 and response.body.images is [] (regression guard)",
+        "Test: POST /properties with a non-image file (e.g., a text buffer attached with .txt filename/text mimetype) returns 400 with code 'INVALID_FILE_TYPE'",
+        "Test: POST /properties with a single image buffer > 10MB returns 400 with code 'FILE_TOO_LARGE'",
+        "Test: POST /properties with 21 small image buffers returns 400 with code 'TOO_MANY_FILES'",
+        "afterEach hook removes any uploads/<propertyId>/ directories created during tests (fs.rm recursive, force) so the repo stays tidy",
+        "npm test passes locally",
+        "Typecheck passes (npx tsc --noEmit)",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

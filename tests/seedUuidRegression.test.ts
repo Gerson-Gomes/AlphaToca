@@ -116,10 +116,10 @@ describe('Seed/Validator UUID regression — /users/me → /properties/search ch
     );
   });
 
-  it('GET /api/properties/search?landlordId=user-demo-landlord-1 (legacy id) returns 400 VALIDATION_ERROR', async () => {
+  it('GET /api/properties/search?landlordId=<non-uuid> returns 400 VALIDATION_ERROR', async () => {
     const response = await request(app)
       .get('/api/properties/search')
-      .query({ landlordId: 'user-demo-landlord-1' });
+      .query({ landlordId: 'not-a-canonical-uuid' });
 
     expect(response.status).toBe(400);
     expect(response.body).toHaveProperty('code', 'VALIDATION_ERROR');

@@ -17,8 +17,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "Implemented: generators.ts now uses crypto.randomUUID(); demoIds.ts already contains canonical UUIDv4 constants (kept stable for Firebase UID mapping + deterministic tests); removed 'user-demo-landlord-1' literal from seedUuidRegression.test.ts (replaced with generic non-UUID string); grep -r 'user-demo-' src/ prisma/ tests/ now returns no matches; typecheck passes; related tests (seed, seedUuidRegression, demoIds, generators) all pass."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",
