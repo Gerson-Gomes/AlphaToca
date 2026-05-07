@@ -95,8 +95,8 @@
         "Typecheck passes: npx tsc --noEmit"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Rewrote tests/seed.test.ts to fix the long-standing @prisma/client mock gap and add UUID-shape assertions. Changed the mock from a factory-only `vi.mock('@prisma/client', () => ({ PrismaClient: class {...} }))` to the `vi.mock(import('@prisma/client'), async (importOriginal) => ({ ...actual, PrismaClient: class {...} }))` pattern so real enums (Role, PropertyType, PropertyStatus, ModerationStatus) flow through to prisma/demoData.ts's top-level `Role.LANDLORD`/`PropertyType.APARTMENT`/etc. references. Existing assertions (deleteMany/createMany/$executeRawUnsafe called) preserved unchanged in test 1. Added test 2: extracts user.createMany.mock.calls[0][0].data and asserts every user.id is either one of DEMO_{LANDLORD_1,TENANT_1,ADMIN}_ID or matches strict v4 regex /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i (random-generated landlord/tenant ids from generators.ts come via faker.string.uuid() which is v4). Added test 3: asserts every property.id AND property.landlordId in the property.createMany payload satisfy the same check. Also added propertyImage to the mocked client (prisma/seed.ts calls prisma.propertyImage.createMany which the old mock lacked — silent no-op before, now explicitly tracked). `npx vitest run tests/seed.test.ts` → 3/3 passed (was 0 passed / suite error on baseline). `npx tsc --noEmit` → clean. `npx vitest run` → 16 failed / 212 passed, versus the post-US-005 baseline of 16 failed / 209 passed: +3 passes, zero new failures, and tests/seed.test.ts is no longer in the failed-suites list (4 failed suites now instead of 5)."
     }
   ]
 }
