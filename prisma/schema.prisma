@@ -572,11 +572,31 @@ model Conversation {
   property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
   landlord User     @relation("LandlordConversations", fields: [landlordId], references: [id], onDelete: Cascade)
   tenant   User     @relation("TenantConversations", fields: [tenantId], references: [id], onDelete: Cascade)
+  messages ConversationMessage[]
 
   @@unique([propertyId, landlordId, tenantId], name: "conversations_property_landlord_tenant_key")
   @@index([landlordId], name: "conversations_landlord_idx")
   @@index([tenantId], name: "conversations_tenant_idx")
   @@map("conversations")
+}
+
+// Mensagens do canal in-app entre landlord e tenant (epic LL — chat).
+// Kept distinct from `messages(session_id)` because that table services the
+// WhatsApp/RAG ChatSession flow; fusing would force nullable FKs and confuse
+// the RAG worker (src/workers/*). LL-011/LL-012/LL-013 expose list/messages/post.
+model ConversationMessage {
+  id             String    @id @default(uuid())
+  conversationId String    @map("conversation_id")
+  authorId       String    @map("author_id")
+  content        String    @db.Text
+  createdAt      DateTime  @default(now()) @map("created_at")
+  readAt         DateTime? @map("read_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt], name: "conversation_messages_conversation_created_idx")
+  @@index([conversationId, readAt], name: "conversation_messages_conversation_read_idx")
+  @@map("conversation_messages")
 }
 
 // Registro de aberturas do perfil público de um landlord. Usado pelo card
