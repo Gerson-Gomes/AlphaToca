@@ -379,7 +379,7 @@ router.patch('/contracts/:id/status', contractController.updateStatus);
  *                   type: string
  *                   enum: [PENDING_DOCUMENTS, AWAITING_SIGNATURE, APPROVED]
  *       400:
- *         description: `documentStatus` ausente ou fora do enum.
+ *         description: "`documentStatus` ausente ou fora do enum."
  *         content:
  *           application/json:
  *             schema:

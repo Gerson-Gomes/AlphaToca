@@ -65,7 +65,7 @@ const router = Router();
  *                   linkedPropertyId: { type: string, format: uuid }
  *                   linkedTenantId: { type: string, format: uuid }
  *       400:
- *         description: `unreadOnly` fora de 'true'|'false'.
+ *         description: "`unreadOnly` fora de 'true'|'false'."
  *         content:
  *           application/json:
  *             schema:
@@ -214,7 +214,7 @@ router.get('/conversations/resolve', conversationController.resolve);
  *                   createdAt: { type: string, format: date-time }
  *                   readAt: { type: string, format: date-time, nullable: true }
  *       400:
- *         description: `id` não-UUID, `before` não-UUID, ou `limit` fora de [1..100].
+ *         description: "`id` não-UUID, `before` não-UUID, ou `limit` fora de [1..100]."
  *         content:
  *           application/json:
  *             schema:
@@ -289,7 +289,7 @@ router.get('/conversations/:id/messages', conversationController.listMessages);
  *                 createdAt: { type: string, format: date-time }
  *                 readAt: { type: string, format: date-time, nullable: true }
  *       400:
- *         description: `id` não-UUID, body ausente, `content` vazio ou acima de 4000.
+ *         description: "`id` não-UUID, body ausente, `content` vazio ou acima de 4000."
  *         content:
  *           application/json:
  *             schema:
@@ -352,7 +352,7 @@ router.post('/conversations/:id/messages', conversationController.createMessage)
  *                   minimum: 0
  *                   description: Quantidade de linhas transicionadas de unread para read.
  *       400:
- *         description: `id` não-UUID.
+ *         description: "`id` não-UUID."
  *         content:
  *           application/json:
  *             schema:

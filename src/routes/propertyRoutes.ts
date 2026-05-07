@@ -755,7 +755,7 @@ router.put(
  *                     format: date-time
  *                     nullable: true
  *       400:
- *         description: `propertyId` (path) ou `tenantId` (query) inválidos/ausentes.
+ *         description: "`propertyId` (path) ou `tenantId` (query) inválidos/ausentes."
  *         content:
  *           application/json:
  *             schema:
