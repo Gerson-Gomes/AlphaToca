@@ -51,8 +51,8 @@
         "Tests pass (npx vitest run)"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added `supportTicketService.listForUser(userId)` with Prisma findMany filtering by userId, orderBy createdAt DESC, select-only projection (id/code/title/description/createdAt/status). Added `supportTicketController.listForUser` that pulls req.localUser.id and forwards to the service. Wired `GET /support/tickets` in src/routes/supportRoutes.ts above the existing admin routes; mounted under authStack via the existing `app.use('/api', authStack, supportRoutes)` line in src/app.ts — no app.ts change needed. Exported `SupportTicketUserView` type. tests/supportTicketsList.test.ts adds 8 cases using the `importOriginal` authMiddleware mock pattern: happy-path with 2 tickets, empty list, shape-with-no-admin-fields assertion, user A isolation, user B isolation, landlord role path, 401 missing header, 401 invalid header. Typecheck clean. Full suite: 23 failing / 626 passing (+8 new passing vs baseline 618) in the same 6 pre-existing files (auth/rag/ingest/userSync/visitValidation) — zero regression."
     },
     {
       "id": "US-004",

@@ -11,6 +11,8 @@ Started: Thu May  7 2026 (backend-gaps-finais)
 - **PropertyImage.url format is inconsistent by origin**: `propertyImageStorageService.savePropertyImages` writes RELATIVE URLs (`/uploads/<propertyId>/<uuid>.png`), but `prisma/demoData.ts` seeds ABSOLUTE URLs (`http://10.0.2.2:3000/uploads/<propertyId>/NNNN.png`). Frontend `absoluteImageUrl()` + `_normalizeLocalHost()` handle both. Keep it in mind when adding new image endpoints.
 - **CORS + static ordering in src/app.ts**: `app.use(cors())` is at line 40, BEFORE `app.use('/uploads', express.static(...))` at line 50. `/uploads/*` responses include `Access-Control-Allow-Origin: *`. Do NOT move static before cors.
 - **Pre-existing test failures (baseline)**: On `ralph/backend-gaps-finais`, `npx vitest run` reports **23 failing / 618 passing / 65 files** with a CLEAN working tree. The 6 failing files are: `tests/auth.test.ts`, `tests/ingestKnowledge.test.ts`, `tests/ragChainService.test.ts`, `tests/ragRetrieverService.test.ts`, `tests/userSync.test.ts`, `tests/visitValidation.test.ts`. These pre-date this rollout (RAG/ingest/auth plumbing drift) and are unrelated to `/uploads`, CORS, or the P4 user stories. Future stories should treat this count as the baseline — a story is non-regressive if it leaves 23 or fewer failures in these same 6 files.
+- **Support ticket shape split (admin vs user view)**: `supportTicketService` now exposes two list shapes — `SupportTicketAdminView` (with `user`, `assignedTo`, `resolution`, `updatedAt`) for `GET /admin/support/tickets`, and `SupportTicketUserView` (just `id`, `code`, `title`, `description`, `createdAt`, `status`) for `GET /support/tickets`. Keep them separate: the user view intentionally hides triage metadata from the ticket's own opener. When adding new fields, decide which view(s) need them and update the relevant `select:` or `toAdminView` builder — don't merge the two.
+- **Support routes mount**: `src/routes/supportRoutes.ts` is mounted once via `app.use('/api', authStack, supportRoutes)` in src/app.ts. Every route defined in this file (including `/support/tickets`, `/admin/support/tickets`) is therefore behind `authStack` (checkJwt + authSyncMiddleware). Admin-only routes layer `requireRole('ADMIN')` inside the router itself. When adding a new support endpoint, do NOT re-mount the router in app.ts — add the route in supportRoutes.ts and (if it needs admin) gate with `adminOnly`.
 
 ---
 
@@ -121,4 +123,32 @@ The real placeholder-of-house symptom lives in the Flutter repo (`_normalizeLoca
 - When a prior investigation story definitively rejects all hypotheses, the follow-up "apply fix" story is a closure action, not an invented change. Don't introduce code churn to "look busy" — no-op + audit trail is the correct outcome.
 - The 23 pre-existing test failures are TRUE baseline on this branch. Future stories should diff against this count, not against zero. Do NOT attempt to "fix" `tests/userSync.test.ts`'s `upsertUserFromAuth0 is not a function` or the RAG mocks as a side-task — those are separate upstream refactors.
 - Before spending 6-8s booting the full stack (DB + Redis + Firebase + Socket.IO + BullMQ) for a re-verification curl, check `git diff HEAD` on the relevant files. If the surface under test is byte-identical to when the evidence was collected, the prior curl result is still valid.
+---
+
+## 2026-05-07 - US-003 (GET /api/support/tickets — user lists own tickets)
+
+### Implemented
+- `supportTicketService.listForUser(userId)` — Prisma `findMany` with `where: { userId }`, `orderBy: createdAt DESC`, and a narrow `select:` projecting only the 6 fields the AC asks for (id, code, title, description, createdAt, status). Returns `SupportTicketUserView[]` (new type exported alongside `SupportTicketAdminView`).
+- `supportTicketController.listForUser` — pulls `req.localUser.id` (guards 401 if somehow missing) and forwards to the service. Returns a bare JSON array (not a paginated envelope — the user-side volume is low and the frontend already caches the list locally).
+- `GET /api/support/tickets` route in `src/routes/supportRoutes.ts` with Swagger doc. No `app.ts` change needed — the router was already mounted under `authStack` at `/api`.
+- `tests/supportTicketsList.test.ts` — 8 cases using the `importOriginal` authMiddleware mock pattern: happy path (2 tickets ordered DESC), empty list, shape assertion (required fields present + admin-only fields absent), user A isolation, user B isolation, landlord role uses own id, 401 missing header, 401 invalid header.
+
+### Files changed
+- `src/services/supportTicketService.ts` — added `listForUser` method + `SupportTicketUserView` export
+- `src/controllers/supportTicketController.ts` — added `listForUser` controller method
+- `src/routes/supportRoutes.ts` — added `router.get('/support/tickets', ...)` with Swagger doc
+- `tests/supportTicketsList.test.ts` — new file (8 cases)
+- `scripts/ralph/prd.json` — flip US-003 `passes: true` with implementation notes
+- `scripts/ralph/progress.txt` — this entry + 2 new Codebase Patterns
+
+### Results
+- Typecheck: clean (`npx tsc --noEmit`, no output)
+- Targeted: `npx vitest run tests/supportTicketsList.test.ts` → 8 passed
+- Full suite: 23 failed / 626 passed. That's +8 passing vs the 618 baseline, with the same 6 pre-existing failing files — **zero regression**.
+
+### Learnings for future iterations
+- The admin list test file (`tests/adminSupportTicketsList.test.ts`) already uses the `importOriginal` auth mock pattern that keeps `requireRole` real. That's the template to copy when writing tests for new support endpoints — not the simpler stub pattern in `supportTicketCreate.test.ts`, which fully replaces `requireRole` with a passthrough.
+- Prisma `select:` with only the fields you need is faster and also type-narrows the result, so TypeScript catches you trying to read `r.updatedAt` when you didn't select it. Useful for projection views like `SupportTicketUserView`.
+- `supportRoutes.ts` has a single mount point (`app.use('/api', authStack, supportRoutes)` in app.ts). All new routes go inside the router — do NOT add a new `app.use` line unless you specifically need a different middleware stack.
+- For user-facing list endpoints with low per-user volume (expected <100), return a bare array (not a paginated envelope). Reserve envelopes for admin panels where `total` is needed and volume is unbounded.
 ---

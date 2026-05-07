@@ -155,6 +155,46 @@ export const supportTicketService = {
   },
 
   /**
+   * Lista os tickets abertos pelo próprio usuário autenticado (US-003).
+   *
+   * Filtra estritamente por `userId = author.id` — nunca mistura tickets de
+   * outros usuários, mesmo para ADMIN. Admins que quiserem o painel de triage
+   * devem usar `GET /api/admin/support/tickets` (vide `list`).
+   *
+   * Ordem: `createdAt DESC` (alinhado com o contrato do admin list — mais
+   * recente primeiro, o que também bate com a forma que o cache local do
+   * frontend já armazena a tela /support).
+   *
+   * Shape: campos mínimos que o frontend precisa para reconstituir a lista
+   * (`id`, `code`, `title`, `description`, `createdAt`, `status`). Campos
+   * admin-only (`user`, `assignedTo`, `resolution`, `userRole`, `updatedAt`)
+   * ficam de fora — ruído para o próprio dono do ticket.
+   */
+  async listForUser(userId: string): Promise<SupportTicketUserView[]> {
+    const rows = await prisma.supportTicket.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        code: true,
+        title: true,
+        description: true,
+        createdAt: true,
+        status: true,
+      },
+    });
+
+    return rows.map((r) => ({
+      id: r.id,
+      code: r.code,
+      title: r.title,
+      description: r.description,
+      createdAt: r.createdAt.toISOString(),
+      status: r.status,
+    }));
+  },
+
+  /**
    * Admin-only update (US-020). Atualiza status / resolution / assignedToId.
    *
    * Validações de negócio:
@@ -283,4 +323,17 @@ export type UpdateSupportTicketForAdminPayload = {
   status?: SupportTicketStatus;
   resolution?: string;
   assignedToId?: string;
+};
+
+// Shape retornada pelo GET /api/support/tickets (US-003). Campos mínimos que
+// o dono do ticket precisa na tela /support — sem info de admin (assignee,
+// resolution, updatedAt, etc.). `createdAt` é ISO string para evitar
+// diferenças de serialização JSON vs Date entre controllers.
+export type SupportTicketUserView = {
+  id: string;
+  code: string;
+  title: string;
+  description: string;
+  createdAt: string;
+  status: SupportTicketStatus;
 };

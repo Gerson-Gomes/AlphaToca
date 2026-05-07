@@ -85,6 +85,58 @@ router.post('/support/tickets', supportTicketController.create);
 
 /**
  * @swagger
+ * /support/tickets:
+ *   get:
+ *     summary: Listar meus tickets de suporte (US-003)
+ *     description: |
+ *       Retorna a lista de tickets abertos pelo próprio usuário autenticado,
+ *       ordenados por `createdAt DESC` (mais recente primeiro).
+ *
+ *       Este endpoint é pareado com `POST /support/tickets`: ele dá ao
+ *       frontend a fonte de verdade para a tela `/support`, substituindo o
+ *       fallback de cache local que existia antes deste rollout.
+ *
+ *       O filtro por `userId = req.localUser.id` é aplicado no service. Um
+ *       usuário NUNCA vê tickets de outro usuário por este endpoint, mesmo
+ *       que seja ADMIN — admins devem usar `GET /admin/support/tickets` para
+ *       triage.
+ *
+ *       A shape é enxuta (sem `user`, `assignedTo`, `resolution`) porque o
+ *       dono do ticket já sabe quem o abriu e a tela não mostra os dados de
+ *       triage interno.
+ *     tags: [Support]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Lista dos tickets do usuário (pode ser vazia).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 required: [id, code, title, description, createdAt, status]
+ *                 properties:
+ *                   id: { type: string, format: uuid }
+ *                   code:
+ *                     type: string
+ *                     pattern: '^SUP-\d{6}-[A-Z0-9]{4}$'
+ *                   title: { type: string }
+ *                   description: { type: string }
+ *                   createdAt: { type: string, format: date-time }
+ *                   status: { type: string, enum: [OPEN, RESOLVED] }
+ *       401:
+ *         description: Token ausente ou inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get('/support/tickets', supportTicketController.listForUser);
+
+/**
+ * @swagger
  * /admin/support/tickets:
  *   get:
  *     summary: Listar tickets de suporte (admin-only triage)

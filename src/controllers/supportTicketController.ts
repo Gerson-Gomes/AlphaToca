@@ -99,6 +99,35 @@ export const supportTicketController = {
   },
 
   /**
+   * GET /api/support/tickets
+   *
+   * Lista os tickets do próprio usuário autenticado (US-003). O filtro por
+   * `userId = req.localUser.id` é aplicado no service — o controller apenas
+   * extrai o user do req e devolve o array ordenado por createdAt DESC.
+   *
+   * Resposta: array simples (não o envelope paginado do admin list), porque
+   * o volume esperado por usuário é baixo (<100 tickets) e o frontend já
+   * tem cache local da tela /support.
+   */
+  async listForUser(req: Request, res: Response, next: NextFunction) {
+    try {
+      const localUser = req.localUser;
+      if (!localUser) {
+        return res.status(401).json({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          messages: [{ message: 'Authentication required.' }],
+        });
+      }
+
+      const tickets = await supportTicketService.listForUser(localUser.id);
+      return res.status(200).json(tickets);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
    * GET /api/admin/support/tickets
    *
    * Lista tickets de suporte para triage do admin. Requer role ADMIN — o
