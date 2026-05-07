@@ -224,8 +224,8 @@
         "Tests pass"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "GET /api/conversations/resolve ships as src/routes/conversationRoutes.ts mounted under authStack at app.ts. Zod validates propertyId/tenantId as UUIDs (400 otherwise). Controller orders guards 401→400→404→403: anonymous callers never touch DB; landlord and tenant from the query can both resolve; outsiders get 403; missing property gets 404 before any authorization check. landlordId is derived server-side from Property.landlordId — NEVER accepted from query (prevents forging threads with a wrong landlord). Service uses prisma.conversation.upsert on conversations_property_landlord_tenant_key — idempotent and race-safe via US-011 unique constraint. messages is synthesized as [] in the service (not a DB column). 16 new tests: tests/conversationService.test.ts (5 unit) + tests/conversationResolve.test.ts (11 HTTP). Full suite: 296 pass / 15 fail (same pre-existing Auth0→Firebase baseline)."
     },
     {
       "id": "US-013",
