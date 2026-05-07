@@ -25,30 +25,65 @@ export type PropertySearchParams = PropertySearchInput;
 
 export type PropertyWithImages = Property & { images: PropertyImage[] };
 
-export type CurrentTenant = { id: string; name: string } | null;
+// LL-017 estende o shape do currentTenant com os campos de verificação de
+// identidade — o chip "selo verificado" no card do inquilino depende deles.
+// `identityVerifiedAt` é exposto como ISO-8601 (string) no JSON da API.
+export type CurrentTenant =
+  | {
+      id: string;
+      name: string;
+      isIdentityVerified: boolean;
+      identityVerifiedAt: string | null;
+    }
+  | null;
 export type PropertyWithCurrentTenant = Property & {
   images?: PropertyImage[];
   currentTenant: CurrentTenant;
 };
 
 // Seleção reutilizada nas queries que expõem currentTenant: somente o contrato
-// ACTIVE mais recente e, dele, só { id, name } do tenant. Evita vazar PII extra
-// na resposta e garante que `include` produza no máximo 1 linha de contrato
-// por property (mesmo se dois ACTIVE coexistirem por um bug transitório).
+// ACTIVE mais recente e, dele, { id, name, isIdentityVerified, identityVerifiedAt }
+// do tenant. Evita vazar PII extra na resposta e garante que `include` produza
+// no máximo 1 linha de contrato por property (mesmo se dois ACTIVE coexistirem
+// por um bug transitório).
 const CURRENT_TENANT_CONTRACT_SELECT = {
   where: { status: 'ACTIVE' as const },
   select: {
-    tenant: { select: { id: true, name: true } },
+    tenant: {
+      select: {
+        id: true,
+        name: true,
+        isIdentityVerified: true,
+        identityVerifiedAt: true,
+      },
+    },
   },
   take: 1,
   orderBy: { createdAt: 'desc' as const },
 };
 
+type TenantRow = {
+  id: string;
+  name: string;
+  isIdentityVerified: boolean;
+  identityVerifiedAt: Date | null;
+};
+
+function mapTenant(tenant: TenantRow | null): CurrentTenant {
+  if (!tenant) return null;
+  return {
+    id: tenant.id,
+    name: tenant.name,
+    isIdentityVerified: tenant.isIdentityVerified,
+    identityVerifiedAt: tenant.identityVerifiedAt ? tenant.identityVerifiedAt.toISOString() : null,
+  };
+}
+
 function extractCurrentTenant(
-  contracts: Array<{ tenant: { id: string; name: string } | null }> | undefined,
+  contracts: Array<{ tenant: TenantRow | null }> | undefined,
 ): CurrentTenant {
   if (!contracts || contracts.length === 0) return null;
-  return contracts[0].tenant ?? null;
+  return mapTenant(contracts[0].tenant);
 }
 
 export const propertyService = {
@@ -247,13 +282,20 @@ export const propertyService = {
           select: {
             propertyId: true,
             createdAt: true,
-            tenant: { select: { id: true, name: true } },
+            tenant: {
+              select: {
+                id: true,
+                name: true,
+                isIdentityVerified: true,
+                identityVerifiedAt: true,
+              },
+            },
           },
           orderBy: { createdAt: 'desc' },
         });
         for (const contract of activeContracts) {
           if (!currentTenantByPropertyId.has(contract.propertyId)) {
-            currentTenantByPropertyId.set(contract.propertyId, contract.tenant);
+            currentTenantByPropertyId.set(contract.propertyId, mapTenant(contract.tenant));
           }
         }
       }

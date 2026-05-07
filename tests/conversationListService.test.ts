@@ -32,8 +32,18 @@ function convRow(overrides: Partial<any> = {}) {
     landlordId: LANDLORD_ID,
     tenantId: TENANT_ID_A,
     createdAt: new Date('2026-05-01T10:00:00.000Z'),
-    landlord: { id: LANDLORD_ID, name: 'João Locador' },
-    tenant: { id: TENANT_ID_A, name: 'Maria Silva' },
+    landlord: {
+      id: LANDLORD_ID,
+      name: 'João Locador',
+      isIdentityVerified: false,
+      identityVerifiedAt: null,
+    },
+    tenant: {
+      id: TENANT_ID_A,
+      name: 'Maria Silva',
+      isIdentityVerified: false,
+      identityVerifiedAt: null,
+    },
     messages: [],
     ...overrides,
   };
@@ -70,12 +80,38 @@ describe('conversationService.list — LL-011', () => {
       id: 'c-1',
       counterpartName: 'Maria Silva',
       counterpartAvatarUrl: null,
+      counterpartIsIdentityVerified: false,
+      counterpartIdentityVerifiedAt: null,
       lastMessage: 'Bom dia',
       lastMessageAt: '2026-05-07T12:00:00.000Z',
       unread: true,
       linkedPropertyId: 'prop-1',
       linkedTenantId: TENANT_ID_A,
     });
+  });
+
+  it('landlord view: counterpart identity verification flags propagate (LL-017)', async () => {
+    const verifiedAt = new Date('2026-04-15T08:00:00.000Z');
+    mockFindMany.mockResolvedValue([
+      convRow({
+        id: 'c-verified',
+        tenant: {
+          id: TENANT_ID_A,
+          name: 'Maria Silva',
+          isIdentityVerified: true,
+          identityVerifiedAt: verifiedAt,
+        },
+        messages: [
+          { id: 'm-1', content: 'Oi', createdAt: new Date('2026-05-07T12:00:00.000Z') },
+        ],
+      }),
+    ]);
+    mockGroupBy.mockResolvedValue([]);
+
+    const [s] = await conversationService.list(LANDLORD_ID);
+
+    expect(s.counterpartIsIdentityVerified).toBe(true);
+    expect(s.counterpartIdentityVerifiedAt).toBe(verifiedAt.toISOString());
   });
 
   it('tenant view: counterpartName is the landlord (same row, caller role flipped)', async () => {
@@ -223,8 +259,22 @@ describe('conversationService.list — LL-011', () => {
       landlordId: true,
       tenantId: true,
       createdAt: true,
-      landlord: { select: { id: true, name: true } },
-      tenant: { select: { id: true, name: true } },
+      landlord: {
+        select: {
+          id: true,
+          name: true,
+          isIdentityVerified: true,
+          identityVerifiedAt: true,
+        },
+      },
+      tenant: {
+        select: {
+          id: true,
+          name: true,
+          isIdentityVerified: true,
+          identityVerifiedAt: true,
+        },
+      },
     });
     expect(args.select.messages).toMatchObject({
       orderBy: { createdAt: 'desc' },

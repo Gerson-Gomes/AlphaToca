@@ -40,6 +40,18 @@ const options: swaggerJsdoc.Options = {
             },
             role: { type: 'string', enum: ['TENANT', 'LANDLORD', 'ADMIN'], default: 'TENANT' },
             createdAt: { type: 'string', format: 'date-time' },
+            isIdentityVerified: {
+              type: 'boolean',
+              default: false,
+              description:
+                'LL-017 — flag do "selo verificado" de identidade. Read-only pela API neste epic (sem endpoint PATCH); writable via Prisma Studio/seed enquanto o setter admin está fora de escopo.',
+            },
+            identityVerifiedAt: {
+              type: 'string',
+              format: 'date-time',
+              nullable: true,
+              description: 'Instante em que `isIdentityVerified` foi setado para true. `null` quando ainda não verificado.',
+            },
           },
         },
         PropertyImage: {
@@ -94,10 +106,12 @@ const options: swaggerJsdoc.Options = {
               type: 'object',
               nullable: true,
               description: 'Inquilino do contrato ACTIVE atualmente vinculado ao imóvel. `null` quando não há contrato ACTIVE.',
-              required: ['id', 'name'],
+              required: ['id', 'name', 'isIdentityVerified', 'identityVerifiedAt'],
               properties: {
                 id: { type: 'string', format: 'uuid' },
                 name: { type: 'string', example: 'Maria Silva' },
+                isIdentityVerified: { type: 'boolean', default: false, description: 'LL-017 — selo verificado.' },
+                identityVerifiedAt: { type: 'string', format: 'date-time', nullable: true },
               },
             },
           },

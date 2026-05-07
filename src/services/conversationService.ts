@@ -17,10 +17,14 @@ export type ConversationView = {
 // referencia o OUTRO participante — landlord vê tenant, tenant vê landlord.
 // `linkedTenantId` é SEMPRE o tenantId da thread, independente do papel do
 // caller (o cliente usa para linkar para a ficha de aluguel do tenant).
+// LL-017 estende o shape com `counterpartIsIdentityVerified` + `counterpartIdentityVerifiedAt`
+// para o ✓ dourado na lista inbox (tenant verificado renderiza o selo).
 export type ConversationSummary = {
   id: string;
   counterpartName: string;
   counterpartAvatarUrl: string | null;
+  counterpartIsIdentityVerified: boolean;
+  counterpartIdentityVerifiedAt: string | null;
   lastMessage: string | null;
   lastMessageAt: string;
   unread: boolean;
@@ -130,8 +134,22 @@ export const conversationService = {
         landlordId: true,
         tenantId: true,
         createdAt: true,
-        landlord: { select: { id: true, name: true } },
-        tenant: { select: { id: true, name: true } },
+        landlord: {
+          select: {
+            id: true,
+            name: true,
+            isIdentityVerified: true,
+            identityVerifiedAt: true,
+          },
+        },
+        tenant: {
+          select: {
+            id: true,
+            name: true,
+            isIdentityVerified: true,
+            identityVerifiedAt: true,
+          },
+        },
         messages: {
           orderBy: { createdAt: 'desc' },
           take: 1,
@@ -168,6 +186,10 @@ export const conversationService = {
         id: row.id,
         counterpartName: counterpart.name,
         counterpartAvatarUrl: null,
+        counterpartIsIdentityVerified: counterpart.isIdentityVerified,
+        counterpartIdentityVerifiedAt: counterpart.identityVerifiedAt
+          ? counterpart.identityVerifiedAt.toISOString()
+          : null,
         lastMessage: lastMsg?.content ?? null,
         lastMessageAt,
         unread: unreadMap.get(row.id) ?? false,

@@ -57,6 +57,8 @@ const router = Router();
  *                   id: { type: string, format: uuid }
  *                   counterpartName: { type: string }
  *                   counterpartAvatarUrl: { type: string, nullable: true }
+ *                   counterpartIsIdentityVerified: { type: boolean }
+ *                   counterpartIdentityVerifiedAt: { type: string, format: date-time, nullable: true }
  *                   lastMessage: { type: string, nullable: true }
  *                   lastMessageAt: { type: string, format: date-time }
  *                   unread: { type: boolean }

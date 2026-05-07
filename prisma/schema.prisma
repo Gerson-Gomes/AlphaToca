@@ -120,6 +120,11 @@ model User {
   role        Role     @default(TENANT)
   fcmToken    String?  @map("fcm_token")
   createdAt   DateTime @default(now()) @map("created_at")
+  // LL-017 — "selo verificado" de identidade do tenant. Exibido como ✓ dourado
+  // na ficha do inquilino. Read-only pela API neste epic: writable somente via
+  // Prisma Studio/seed enquanto o endpoint admin (PRD §8 Q3) não é lançado.
+  isIdentityVerified  Boolean   @default(false) @map("is_identity_verified")
+  identityVerifiedAt  DateTime? @map("identity_verified_at")
 
   // Relacionamentos inversos (Obrigações do Prisma)
   properties          Property[]      @relation("LandlordProperties")
