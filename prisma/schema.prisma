@@ -189,6 +189,7 @@ model Property {
   conversations   Conversation[]
   chatSessions    ChatSession[]
   viewEvents      PropertyViewEvent[] @relation("PropertyViewEvents")
+  contactClickEvents ContactClickEvent[] @relation("PropertyContactClickEvents")
 
   @@index([moderationStatus], name: "properties_moderation_status_idx")
   @@map("properties")
@@ -612,4 +613,22 @@ model PropertyViewEvent {
 
   @@index([propertyId, viewedAt], name: "property_view_events_property_time_idx")
   @@map("property_view_events")
+}
+
+// Evento de clique em "Contatar" na ficha de um Property. Alimenta o campo
+// `contactClicks` do endpoint de analytics por imóvel (LL-008). `viewerId` é
+// nulo para visitantes anônimos — o endpoint que registra o evento (POST
+// /api/properties/:id/contact-click) é PUBLIC, então sempre pode receber
+// cliques sem autenticação. Sem dedup: analytics de cliques conta CADA
+// intenção de contato, não usuários únicos.
+model ContactClickEvent {
+  id         String   @id @default(uuid())
+  propertyId String   @map("property_id")
+  viewerId   String?  @map("viewer_id")
+  clickedAt  DateTime @default(now()) @map("clicked_at")
+
+  property Property @relation("PropertyContactClickEvents", fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@index([propertyId, clickedAt], name: "contact_click_events_property_time_idx")
+  @@map("contact_click_events")
 }

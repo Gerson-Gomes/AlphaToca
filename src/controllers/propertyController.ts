@@ -1,7 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
+import { z } from 'zod';
 import { propertyService, PropertyError } from '../services/propertyService';
 import { profileViewService } from '../services/profileViewService';
 import { propertyViewService } from '../services/propertyViewService';
+import { contactClickEventService } from '../services/contactClickEventService';
 import { analyticsService } from '../services/analyticsService';
 import {
   createPropertySchema,
@@ -10,6 +12,10 @@ import {
 } from '../utils/propertyValidation';
 import { propertySearchSchema } from '../utils/searchValidation';
 import { monthlyAnalyticsQuerySchema } from '../utils/analyticsValidation';
+
+const contactClickParamsSchema = z.object({
+  id: z.string().uuid(),
+});
 
 export const propertyController = {
   async create(req: Request, res: Response, next: NextFunction) {
@@ -117,6 +123,38 @@ export const propertyController = {
       void propertyViewService.record(property.id, req.localUser?.id ?? null);
 
       return res.status(200).json(property);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * POST /api/properties/:id/contact-click
+   *
+   * Registra um evento de clique em "Contatar" na ficha do imóvel. PUBLIC
+   * (sem authStack) — viewers anônimos (`viewerId=null`) também contam, pois
+   * o botão é visível sem login. Zod valida o UUID do path; 404 se o imóvel
+   * não existe (antes de inserir, para não criar eventos órfãos).
+   *
+   * Sem dedup: analytics de cliques conta CADA intenção de contato —
+   * diferente de ProfileView/PropertyView, onde múltiplas aberturas de F5
+   * em janela curta não devem inflar o bucket.
+   */
+  async recordContactClick(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = contactClickParamsSchema.parse(req.params);
+
+      const property = await propertyService.getPropertyById(id);
+      if (!property) {
+        return res.status(404).json({
+          status: 404,
+          code: 'NOT_FOUND',
+          messages: [{ message: 'Property not found' }],
+        });
+      }
+
+      await contactClickEventService.record(id, req.localUser?.id ?? null);
+      return res.status(201).json({});
     } catch (error) {
       next(error);
     }

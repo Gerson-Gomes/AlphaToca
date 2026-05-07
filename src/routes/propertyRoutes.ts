@@ -673,6 +673,51 @@ router.put(
 
 /**
  * @swagger
+ * /properties/{id}/contact-click:
+ *   post:
+ *     summary: Registrar um clique em "Contatar" na ficha do imóvel
+ *     description: |
+ *       Endpoint PUBLIC (sem autenticação): o botão "Contatar" da ficha do
+ *       imóvel é visível para visitantes anônimos, então o tracking também
+ *       precisa funcionar sem token. Quando o viewer está autenticado, o
+ *       `viewerId` é derivado do JWT; quando anônimo, entra `null`.
+ *
+ *       Sem dedup — diferente de ProfileView (24h) e PropertyView (1h), cada
+ *       clique é um evento analítico legítimo, inclusive múltiplos cliques do
+ *       mesmo usuário (sinal de alta intenção). O endpoint LL-008 de
+ *       analytics por imóvel conta todas as linhas no bucket pedido.
+ *     tags: [Propriedades, Analytics]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       201:
+ *         description: Evento registrado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: ID no path não é um UUID válido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Propriedade não encontrada.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.post('/properties/:id/contact-click', propertyController.recordContactClick);
+
+/**
+ * @swagger
  * /properties/{id}:
  *   get:
  *     summary: Recuperar uma propriedade pelo ID
