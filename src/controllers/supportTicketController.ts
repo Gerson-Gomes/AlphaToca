@@ -5,7 +5,9 @@ import { supportEmailService } from '../services/supportEmailService';
 import {
   createSupportTicketSchema,
   listSupportTicketsQuerySchema,
+  updateSupportTicketSchema,
 } from '../utils/supportTicketValidation';
+import { z } from 'zod';
 import { logger } from '../config/logger';
 
 // Mapeia o Role global (TENANT|LANDLORD|ADMIN) para o SupportUserRole, que
@@ -123,6 +125,96 @@ export const supportTicketController = {
       });
       return res.status(200).json(result);
     } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * PUT /api/admin/support/tickets/:id
+   *
+   * Atualização admin-only de status / resolution / assignedToId. A auth
+   * (JWT + role=ADMIN) é gated no router via global authStack + requireRole.
+   *
+   * Regras:
+   *  - Param `id` precisa ser UUID (400 VALIDATION_ERROR caso contrário).
+   *  - Body precisa conter pelo menos um campo; `status=RESOLVED` requer
+   *    `resolution` na mesma request — Zod schema cobre essas regras.
+   *  - 404 TICKET_NOT_FOUND se o ticket não existe.
+   *  - 400 ASSIGNEE_NOT_FOUND se `assignedToId` aponta para um User inexistente.
+   *  - Em mudança de `status`, dispara `supportEmailService.sendTicketUpdated`
+   *    (best-effort, falhas não derrubam o 200).
+   *
+   * Resposta: `SupportTicketAdminView` — shape idêntica ao item do GET list.
+   */
+  async updateForAdmin(req: Request, res: Response, next: NextFunction) {
+    try {
+      const idParsed = z.string().uuid().safeParse(req.params.id);
+      if (!idParsed.success) {
+        return res.status(400).json({
+          status: 400,
+          code: 'VALIDATION_ERROR',
+          messages: idParsed.error.errors.map((e) => ({
+            path: ['id', ...e.path].join('.'),
+            message: e.message,
+          })),
+        });
+      }
+
+      const payload = updateSupportTicketSchema.parse(req.body);
+
+      const statusChanging = payload.status !== undefined;
+
+      const view = await supportTicketService.updateForAdmin(idParsed.data, payload);
+
+      // Side-effect não-fatal: só dispara email quando o status foi tocado
+      // na request. Resoluções/assignees sem mudança de status não alertam
+      // o canal (ruído).
+      if (statusChanging) {
+        // Refetch é caro — usamos o shape retornado pelo service para montar
+        // um objeto compatível com SupportTicket (colunas bases + status +
+        // resolution). O sendTicketUpdated lê `id`, `code`, `status`,
+        // `userName`, `userRole`, `resolution` — tudo disponível na view
+        // exceto `userRole`/`userName`: esses vivem no ticket, não no user.
+        // O service já devolve a row via include; mas a view omite userRole.
+        // Solução: refetchamos o shape necessário através da view + a row
+        // interna (via segundo include leve). Para simplicidade e manter o
+        // service como única porta, chamamos o email com um shape "mínimo
+        // compatível" usando os campos que a view carrega — o build do
+        // envelope lê apenas campos públicos expostos na view aqui (id,
+        // code, status, resolution). Para userRole/userName, lemos do user
+        // projetado no include (sempre presente para tickets com opener
+        // existente).
+        const ticketForEmail = {
+          id: view.id,
+          code: view.code,
+          title: view.title,
+          description: view.description,
+          userId: view.user?.id ?? '',
+          userName: view.user?.name ?? '',
+          userRole: (view.user?.role ?? 'TENANT') as any,
+          status: view.status,
+          resolution: view.resolution,
+          assignedToId: view.assignedTo?.id ?? null,
+          createdAt: new Date(view.createdAt),
+          updatedAt: new Date(view.updatedAt),
+        };
+        void supportEmailService.sendTicketUpdated(ticketForEmail).catch((err) => {
+          logger.error(
+            { err, ticketId: view.id, code: view.code },
+            '[supportTicket] sendTicketUpdated threw unexpectedly',
+          );
+        });
+      }
+
+      return res.status(200).json(view);
+    } catch (error) {
+      if (error instanceof SupportTicketError) {
+        return res.status(error.httpStatus).json({
+          status: error.httpStatus,
+          code: error.code,
+          messages: [{ message: error.message }],
+        });
+      }
       next(error);
     }
   },

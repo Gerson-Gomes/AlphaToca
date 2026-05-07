@@ -50,3 +50,40 @@ export const listSupportTicketsQuerySchema = z
   );
 
 export type ListSupportTicketsQuery = z.infer<typeof listSupportTicketsQuerySchema>;
+
+// Body de PUT /api/admin/support/tickets/:id (US-020).
+// Todos os campos opcionais individualmente — mas pelo menos UM é obrigatório
+// (validado via refine). `status` só aceita OPEN|RESOLVED — reabrir um ticket
+// é permitido (RESOLVED → OPEN) para cobrir casos onde a resolução inicial
+// não resolveu. `resolution` é TEXT até 4000 chars. `assignedToId` é um UUID
+// do User responsável — a existência desse User é validada no serviço
+// (resulta em 400 ASSIGNEE_NOT_FOUND no controller, não um 500 por FK).
+//
+// Regra cruzada: se `status` está explicitamente setado para RESOLVED, então
+// `resolution` tem que estar presente NA MESMA request — o controller-level
+// 400 VALIDATION_ERROR aqui garante que a coluna resolution não fica nula no
+// fechamento do ticket.
+export const updateSupportTicketSchema = z
+  .object({
+    status: z.nativeEnum(SupportTicketStatus).optional(),
+    resolution: z.string().min(1).max(4000).optional(),
+    assignedToId: z.string().uuid().optional(),
+  })
+  .refine(
+    (v) => v.status !== undefined || v.resolution !== undefined || v.assignedToId !== undefined,
+    { message: 'At least one of status, resolution, or assignedToId must be provided.' },
+  )
+  .refine(
+    (v) => {
+      if (v.status === SupportTicketStatus.RESOLVED) {
+        return typeof v.resolution === 'string' && v.resolution.length > 0;
+      }
+      return true;
+    },
+    {
+      message: 'resolution is required when status transitions to RESOLVED.',
+      path: ['resolution'],
+    },
+  );
+
+export type UpdateSupportTicketInput = z.infer<typeof updateSupportTicketSchema>;

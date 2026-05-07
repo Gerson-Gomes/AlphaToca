@@ -212,4 +212,122 @@ router.post('/support/tickets', supportTicketController.create);
  */
 router.get('/admin/support/tickets', adminOnly, supportTicketController.listForAdmin);
 
+/**
+ * @swagger
+ * /admin/support/tickets/{id}:
+ *   put:
+ *     summary: Atualizar ticket de suporte (admin-only)
+ *     description: |
+ *       Atualiza o status, a resolução e/ou o assignee de um ticket.
+ *       Todos os campos do body são opcionais individualmente, mas pelo menos
+ *       um deles precisa estar presente.
+ *
+ *       **Regras de negócio:**
+ *       - Quando `status` transita para `RESOLVED`, o campo `resolution`
+ *         precisa estar presente **na mesma request** (400 VALIDATION_ERROR
+ *         caso contrário). Isso evita fechar um ticket sem registrar a
+ *         resolução.
+ *       - Quando `assignedToId` é fornecido e não corresponde a um User
+ *         existente, a resposta é 400 com `code: 'ASSIGNEE_NOT_FOUND'` (não
+ *         um 500 por FK violation).
+ *       - Em mudança de `status`, o canal de suporte é notificado via
+ *         `supportEmailService.sendTicketUpdated` (best-effort — falha no
+ *         envio não derruba a request).
+ *
+ *       Auth: JWT válido (401) + role ADMIN (403).
+ *
+ *       Resposta: o ticket atualizado com a mesma shape dos itens retornados
+ *       pelo GET /admin/support/tickets (US-019).
+ *     tags: [Support, Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             description: |
+ *               Pelo menos um campo é obrigatório. Se `status=RESOLVED`,
+ *               `resolution` também é obrigatório na mesma request.
+ *             properties:
+ *               status:
+ *                 type: string
+ *                 enum: [OPEN, RESOLVED]
+ *               resolution:
+ *                 type: string
+ *                 minLength: 1
+ *                 maxLength: 4000
+ *               assignedToId:
+ *                 type: string
+ *                 format: uuid
+ *     responses:
+ *       200:
+ *         description: Ticket atualizado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [id, code, title, description, user, status, createdAt, updatedAt]
+ *               properties:
+ *                 id: { type: string, format: uuid }
+ *                 code:
+ *                   type: string
+ *                   pattern: '^SUP-\d{6}-[A-Z0-9]{4}$'
+ *                 title: { type: string }
+ *                 description: { type: string }
+ *                 user:
+ *                   type: object
+ *                   nullable: true
+ *                   properties:
+ *                     id: { type: string, format: uuid }
+ *                     name: { type: string }
+ *                     email: { type: string, format: email }
+ *                     role: { type: string, enum: [TENANT, LANDLORD, ADMIN] }
+ *                 status: { type: string, enum: [OPEN, RESOLVED] }
+ *                 createdAt: { type: string, format: date-time }
+ *                 updatedAt: { type: string, format: date-time }
+ *                 assignedTo:
+ *                   type: object
+ *                   nullable: true
+ *                   properties:
+ *                     id: { type: string, format: uuid }
+ *                     name: { type: string }
+ *                 resolution:
+ *                   type: string
+ *                   nullable: true
+ *       400:
+ *         description: Body inválido, regra RESOLVED+resolution violada, ou ASSIGNEE_NOT_FOUND.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Token ausente ou inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: Usuário autenticado sem role ADMIN.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Ticket não encontrado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.put('/admin/support/tickets/:id', adminOnly, supportTicketController.updateForAdmin);
+
 export default router;

@@ -149,24 +149,92 @@ export const supportTicketService = {
       }),
     ]);
 
-    const data: SupportTicketAdminView[] = rows.map((r) => ({
-      id: r.id,
-      code: r.code,
-      title: r.title,
-      description: r.description,
-      user: r.user
-        ? { id: r.user.id, name: r.user.name, email: r.user.email, role: r.user.role }
-        : null,
-      status: r.status,
-      createdAt: r.createdAt.toISOString(),
-      updatedAt: r.updatedAt.toISOString(),
-      assignedTo: r.assignedTo ? { id: r.assignedTo.id, name: r.assignedTo.name } : null,
-      resolution: r.resolution,
-    }));
+    const data: SupportTicketAdminView[] = rows.map((r) => toAdminView(r));
 
     return { data, page, pageSize, total };
   },
+
+  /**
+   * Admin-only update (US-020). Atualiza status / resolution / assignedToId.
+   *
+   * Validações de negócio:
+   *  - 404 TICKET_NOT_FOUND se `id` não existe.
+   *  - 400 ASSIGNEE_NOT_FOUND se `assignedToId` é UUID válido mas nenhum User
+   *    com esse id existe (ao invés de deixar o P2003 FK violation vazar
+   *    como 500). A verificação é feita ANTES do update para que a resposta
+   *    seja determinística.
+   *
+   * A regra "RESOLVED precisa de resolution" é garantida upstream pelo
+   * Zod refine — service confia nos tipos que recebe.
+   *
+   * Retorna o `SupportTicketAdminView` já com os includes populados, mesma
+   * shape do GET list item — o controller só embrulha em `res.json(view)`.
+   */
+  async updateForAdmin(
+    id: string,
+    payload: UpdateSupportTicketForAdminPayload,
+  ): Promise<SupportTicketAdminView> {
+    const existing = await prisma.supportTicket.findUnique({ where: { id } });
+    if (!existing) {
+      throw new SupportTicketError(404, 'TICKET_NOT_FOUND', `Ticket ${id} not found.`);
+    }
+
+    // Validação explícita da FK `assignedToId` ANTES do update para poder
+    // responder 400 ASSIGNEE_NOT_FOUND (vs. o 500 que a Prisma emitiria).
+    // Skippamos se o valor já está setado no próprio ticket (não precisa
+    // revalidar o mesmo FK na mesma request).
+    if (payload.assignedToId && payload.assignedToId !== existing.assignedToId) {
+      const assignee = await prisma.user.findUnique({
+        where: { id: payload.assignedToId },
+        select: { id: true },
+      });
+      if (!assignee) {
+        throw new SupportTicketError(
+          400,
+          'ASSIGNEE_NOT_FOUND',
+          `Assignee user ${payload.assignedToId} not found.`,
+        );
+      }
+    }
+
+    const data: Prisma.SupportTicketUpdateInput = {};
+    if (payload.status !== undefined) data.status = payload.status;
+    if (payload.resolution !== undefined) data.resolution = payload.resolution;
+    if (payload.assignedToId !== undefined) {
+      data.assignedTo = { connect: { id: payload.assignedToId } };
+    }
+
+    const updated = await prisma.supportTicket.update({
+      where: { id },
+      data,
+      include: {
+        user: { select: { id: true, name: true, email: true, role: true } },
+        assignedTo: { select: { id: true, name: true } },
+      },
+    });
+
+    return toAdminView(updated);
+  },
 };
+
+// Converte a row do Prisma (com includes) na view admin — reutilizado por
+// `list` e `updateForAdmin` para garantir shape idêntica entre GET e PUT.
+function toAdminView(r: any): SupportTicketAdminView {
+  return {
+    id: r.id,
+    code: r.code,
+    title: r.title,
+    description: r.description,
+    user: r.user
+      ? { id: r.user.id, name: r.user.name, email: r.user.email, role: r.user.role }
+      : null,
+    status: r.status,
+    createdAt: r.createdAt.toISOString(),
+    updatedAt: r.updatedAt.toISOString(),
+    assignedTo: r.assignedTo ? { id: r.assignedTo.id, name: r.assignedTo.name } : null,
+    resolution: r.resolution,
+  };
+}
 
 // Filtros aceitos pelo admin list. `from`/`to` já convertidos para Date no
 // controller — service não faz parsing de string aqui, fica agnóstico de
@@ -206,4 +274,13 @@ export type ListSupportTicketsResult = {
   page: number;
   pageSize: number;
   total: number;
+};
+
+// Payload já validado + normalizado pelo controller. O service confia nos
+// tipos recebidos — ele não re-valida formato (Zod upstream), mas valida
+// existência da FK `assignedToId`.
+export type UpdateSupportTicketForAdminPayload = {
+  status?: SupportTicketStatus;
+  resolution?: string;
+  assignedToId?: string;
 };

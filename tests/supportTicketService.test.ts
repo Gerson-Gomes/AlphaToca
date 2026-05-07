@@ -9,6 +9,11 @@ vi.mock('../src/config/db', () => ({
       create: vi.fn(),
       count: vi.fn(),
       findMany: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn(),
+    },
+    user: {
+      findUnique: vi.fn(),
     },
   },
 }));
@@ -341,5 +346,151 @@ describe('supportTicketService.list() — US-019', () => {
       email: null,
       role: 'TENANT',
     });
+  });
+});
+
+describe('supportTicketService.updateForAdmin() — US-020', () => {
+  const TICKET_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+  const ADMIN_ID = '44444444-4444-4444-4444-444444444444';
+
+  const existingRow = {
+    id: TICKET_ID,
+    code: 'SUP-260507-A001',
+    title: 'Problema',
+    description: 'Descrição',
+    userId: author.id,
+    userName: author.name,
+    userRole: SupportUserRole.TENANT,
+    status: SupportTicketStatus.OPEN,
+    resolution: null,
+    assignedToId: null,
+    createdAt: new Date('2026-05-07T12:00:00Z'),
+    updatedAt: new Date('2026-05-07T12:00:00Z'),
+  };
+
+  const updatedRow = {
+    ...existingRow,
+    status: SupportTicketStatus.RESOLVED,
+    resolution: 'Problema resolvido.',
+    assignedToId: ADMIN_ID,
+    updatedAt: new Date('2026-05-07T13:00:00Z'),
+    user: {
+      id: author.id,
+      name: author.name,
+      email: 'maria@demo.com',
+      role: 'TENANT',
+    },
+    assignedTo: { id: ADMIN_ID, name: 'Ana Admin' },
+  };
+
+  it('404 TICKET_NOT_FOUND when the ticket does not exist', async () => {
+    (prisma.supportTicket.findUnique as any).mockResolvedValueOnce(null);
+
+    await expect(
+      supportTicketService.updateForAdmin(TICKET_ID, { status: SupportTicketStatus.OPEN }),
+    ).rejects.toMatchObject({
+      httpStatus: 404,
+      code: 'TICKET_NOT_FOUND',
+    });
+    expect(prisma.supportTicket.update).not.toHaveBeenCalled();
+  });
+
+  it('400 ASSIGNEE_NOT_FOUND when assignedToId references a non-existent user', async () => {
+    (prisma.supportTicket.findUnique as any).mockResolvedValueOnce(existingRow);
+    (prisma.user.findUnique as any).mockResolvedValueOnce(null);
+
+    await expect(
+      supportTicketService.updateForAdmin(TICKET_ID, {
+        assignedToId: '99999999-9999-9999-9999-999999999999',
+      }),
+    ).rejects.toMatchObject({
+      httpStatus: 400,
+      code: 'ASSIGNEE_NOT_FOUND',
+    });
+    expect(prisma.supportTicket.update).not.toHaveBeenCalled();
+  });
+
+  it('skips the assignee existence check when assignedToId equals the current value (no change)', async () => {
+    (prisma.supportTicket.findUnique as any).mockResolvedValueOnce({
+      ...existingRow,
+      assignedToId: ADMIN_ID,
+    });
+    (prisma.supportTicket.update as any).mockResolvedValueOnce(updatedRow);
+
+    await supportTicketService.updateForAdmin(TICKET_ID, {
+      assignedToId: ADMIN_ID,
+      resolution: 'Nota',
+    });
+
+    expect(prisma.user.findUnique).not.toHaveBeenCalled();
+    expect(prisma.supportTicket.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('updates status + resolution and returns the view shape', async () => {
+    (prisma.supportTicket.findUnique as any).mockResolvedValueOnce(existingRow);
+    (prisma.supportTicket.update as any).mockResolvedValueOnce(updatedRow);
+
+    const result = await supportTicketService.updateForAdmin(TICKET_ID, {
+      status: SupportTicketStatus.RESOLVED,
+      resolution: 'Problema resolvido.',
+    });
+
+    expect(result).toMatchObject({
+      id: TICKET_ID,
+      status: SupportTicketStatus.RESOLVED,
+      resolution: 'Problema resolvido.',
+      assignedTo: { id: ADMIN_ID, name: 'Ana Admin' },
+      user: {
+        id: author.id,
+        name: author.name,
+        email: 'maria@demo.com',
+        role: 'TENANT',
+      },
+    });
+    expect(typeof result.createdAt).toBe('string');
+    expect(typeof result.updatedAt).toBe('string');
+  });
+
+  it('forwards only the provided fields to prisma.update (no spurious writes)', async () => {
+    (prisma.supportTicket.findUnique as any).mockResolvedValueOnce(existingRow);
+    (prisma.supportTicket.update as any).mockResolvedValueOnce(updatedRow);
+
+    await supportTicketService.updateForAdmin(TICKET_ID, {
+      status: SupportTicketStatus.RESOLVED,
+      resolution: 'OK',
+    });
+
+    const arg = (prisma.supportTicket.update as any).mock.calls[0][0];
+    expect(arg.where).toEqual({ id: TICKET_ID });
+    expect(arg.data).toEqual({
+      status: SupportTicketStatus.RESOLVED,
+      resolution: 'OK',
+    });
+    // No spurious assignedTo write.
+    expect(arg.data.assignedTo).toBeUndefined();
+  });
+
+  it('uses prisma.assignedTo.connect syntax when assignedToId is provided', async () => {
+    (prisma.supportTicket.findUnique as any).mockResolvedValueOnce(existingRow);
+    (prisma.user.findUnique as any).mockResolvedValueOnce({ id: ADMIN_ID });
+    (prisma.supportTicket.update as any).mockResolvedValueOnce(updatedRow);
+
+    await supportTicketService.updateForAdmin(TICKET_ID, { assignedToId: ADMIN_ID });
+
+    const arg = (prisma.supportTicket.update as any).mock.calls[0][0];
+    expect(arg.data.assignedTo).toEqual({ connect: { id: ADMIN_ID } });
+  });
+
+  it('returns ISO-serialized dates in the response', async () => {
+    (prisma.supportTicket.findUnique as any).mockResolvedValueOnce(existingRow);
+    (prisma.supportTicket.update as any).mockResolvedValueOnce(updatedRow);
+
+    const result = await supportTicketService.updateForAdmin(TICKET_ID, {
+      status: SupportTicketStatus.RESOLVED,
+      resolution: 'OK',
+    });
+
+    expect(result.createdAt).toBe(updatedRow.createdAt.toISOString());
+    expect(result.updatedAt).toBe(updatedRow.updatedAt.toISOString());
   });
 });
