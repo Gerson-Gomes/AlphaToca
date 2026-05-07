@@ -46,6 +46,9 @@ export const createPropertySchema = z.object({
   petsAllowed: multipartBoolean.optional(),
   nearSubway: multipartBoolean.optional(),
   isFeatured: multipartBoolean.optional(),
+
+  hasWifi: multipartBoolean.optional(),
+  hasPool: multipartBoolean.optional(),
 });
 
 // Multer coleta campos de texto repetidos em um array; um único campo chega como
@@ -68,6 +71,8 @@ export const updatePropertySchema = z.object({
   city: z.string().optional(),
   state: z.string().length(2).toUpperCase().optional(),
   zipCode: z.string().optional(),
+  hasWifi: multipartBoolean.optional(),
+  hasPool: multipartBoolean.optional(),
   photosToRemove: photosToRemoveField,
 });
 

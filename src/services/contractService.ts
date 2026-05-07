@@ -1,5 +1,5 @@
 import prisma from '../config/db';
-import { Prisma, ContractStatus, PaymentStatus } from '@prisma/client';
+import { Prisma, ContractStatus, ContractDocumentStatus, PaymentStatus } from '@prisma/client';
 
 export class ContractError extends Error {
   constructor(
@@ -206,6 +206,7 @@ export type ContractByPropertyTenantView = {
   monthlyRent: number;
   pdfUrl: string | null;
   signedAt: string | null;
+  documentStatus: ContractDocumentStatus;
 };
 
 // Retorna o contrato ACTIVE entre um (propertyId, tenantId). O filtro por
@@ -233,6 +234,7 @@ export async function getActiveContractByPropertyAndTenant(
       monthlyRent: true,
       pdfUrl: true,
       signedAt: true,
+      documentStatus: true,
     },
     orderBy: { createdAt: 'desc' },
   });
@@ -249,7 +251,39 @@ export async function getActiveContractByPropertyAndTenant(
     monthlyRent: Number(row.monthlyRent),
     pdfUrl: row.pdfUrl ?? null,
     signedAt: row.signedAt ? row.signedAt.toISOString() : null,
+    documentStatus: row.documentStatus,
   };
+}
+
+// Erros do service de documentStatus (LL-016). 404 quando o contract
+// não existe; 403 quando o caller não é o landlord do contrato. O
+// controller mapeia para { status, code, messages } via ContractError.
+export async function updateContractDocumentStatus(
+  id: string,
+  callerId: string,
+  newStatus: ContractDocumentStatus,
+): Promise<{ id: string; documentStatus: ContractDocumentStatus }> {
+  const existing = await prisma.contract.findUnique({
+    where: { id },
+    select: { id: true, landlordId: true },
+  });
+  if (!existing) {
+    throw new ContractError(404, 'CONTRACT_NOT_FOUND', 'Contract not found');
+  }
+  if (existing.landlordId !== callerId) {
+    throw new ContractError(
+      403,
+      'FORBIDDEN',
+      'Only the contract landlord can change its document status.',
+    );
+  }
+
+  const updated = await prisma.contract.update({
+    where: { id },
+    data: { documentStatus: newStatus },
+    select: { id: true, documentStatus: true },
+  });
+  return updated;
 }
 
 export async function listLandlordTenants(landlordId: string) {

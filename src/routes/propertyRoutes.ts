@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { Role } from '@prisma/client';
 import { propertyController } from '../controllers/propertyController';
 import { rentalPaymentController } from '../controllers/rentalPaymentController';
 import {
@@ -15,6 +16,7 @@ const router = Router();
 
 const adminAuthStack = [checkJwt, authSyncMiddleware, requireRole('ADMIN')];
 const authStack = [checkJwt, authSyncMiddleware];
+const landlordAuthStack = [checkJwt, authSyncMiddleware, requireRole(Role.LANDLORD)];
 
 /**
  * @swagger
@@ -50,7 +52,7 @@ const authStack = [checkJwt, authSyncMiddleware];
  *                 example: Rua das Flores, 123, São Paulo - SP
  *               type:
  *                 type: string
- *                 enum: [APARTMENT, HOUSE, STUDIO, CONDO_HOUSE]
+ *                 enum: [APARTMENT, HOUSE, STUDIO, CONDO_HOUSE, KITNET, PENTHOUSE, LAND, COMMERCIAL]
  *               bedrooms:
  *                 type: integer
  *                 example: 2
@@ -69,6 +71,12 @@ const authStack = [checkJwt, authSyncMiddleware];
  *               petsAllowed:
  *                 type: boolean
  *                 example: true
+ *               hasWifi:
+ *                 type: boolean
+ *                 example: true
+ *               hasPool:
+ *                 type: boolean
+ *                 example: false
  *               latitude:
  *                 type: number
  *                 example: -23.5489
@@ -113,7 +121,7 @@ const authStack = [checkJwt, authSyncMiddleware];
  *                 example: Rua das Flores, 123, São Paulo - SP
  *               type:
  *                 type: string
- *                 enum: [APARTMENT, HOUSE, STUDIO, CONDO_HOUSE]
+ *                 enum: [APARTMENT, HOUSE, STUDIO, CONDO_HOUSE, KITNET, PENTHOUSE, LAND, COMMERCIAL]
  *               bedrooms:
  *                 type: integer
  *                 example: 2
@@ -132,6 +140,12 @@ const authStack = [checkJwt, authSyncMiddleware];
  *               petsAllowed:
  *                 type: boolean
  *                 example: true
+ *               hasWifi:
+ *                 type: boolean
+ *                 example: true
+ *               hasPool:
+ *                 type: boolean
+ *                 example: false
  *               latitude:
  *                 type: number
  *                 example: -23.5489
@@ -226,7 +240,7 @@ router.get('/properties', propertyController.list);
  *         name: type
  *         schema:
  *           type: string
- *           enum: [APARTMENT, HOUSE, STUDIO, CONDO_HOUSE]
+ *           enum: [APARTMENT, HOUSE, STUDIO, CONDO_HOUSE, KITNET, PENTHOUSE, LAND, COMMERCIAL]
  *       - in: query
  *         name: minPrice
  *         schema:
@@ -265,6 +279,16 @@ router.get('/properties', propertyController.list);
  *           type: boolean
  *       - in: query
  *         name: nearSubway
+ *         schema:
+ *           type: boolean
+ *       - in: query
+ *         name: hasWifi
+ *         description: Filtra imóveis que possuem Wi-Fi (LL-022).
+ *         schema:
+ *           type: boolean
+ *       - in: query
+ *         name: hasPool
+ *         description: Filtra imóveis que possuem piscina (LL-022).
  *         schema:
  *           type: boolean
  *       - in: query
@@ -336,6 +360,107 @@ router.get('/properties', propertyController.list);
  *         description: Erro interno do servidor
  */
 router.get('/properties/search', propertyController.search);
+
+/**
+ * @swagger
+ * /properties/analytics/monthly:
+ *   get:
+ *     summary: Série mensal de aluguéis, novos inquilinos e receita do landlord
+ *     description: |
+ *       Retorna quatro arrays paralelos (`months`, `rentals`, `newTenants`,
+ *       `monthlyRevenue`) para o gráfico "Análise de Performance" do dashboard
+ *       do locador. Todos os buckets sem atividade entram como 0 (zero-fill) —
+ *       o UI pode iterar por índice sem checar existência.
+ *
+ *       A janela padrão é os últimos 6 meses terminando no mês corrente em UTC
+ *       (mesmo cálculo de `rentalPaymentService.currentPeriod`). Quando `from`
+ *       e `to` são informados, ambos devem ser o primeiro dia do mês (`YYYY-MM-01`),
+ *       `from` ≤ `to`, e o span inclusivo não pode exceder 24 meses — caso
+ *       contrário, retorna 400 `VALIDATION_ERROR`. Se só um dos dois for
+ *       informado, o default completo (últimos 6 meses) também é aplicado.
+ *
+ *       Apenas o locador autenticado lê — outros usuários autenticados recebem
+ *       403; anônimos recebem 401. A consulta é escopada ao `req.localUser.id`
+ *       via `$queryRaw` parametrizado (nunca interpolado).
+ *     tags: [Propriedades, Analytics]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         description: Primeiro mês da janela, formato YYYY-MM-01 (UTC).
+ *         schema:
+ *           type: string
+ *           pattern: '^\d{4}-(0[1-9]|1[0-2])-01$'
+ *           example: '2025-12-01'
+ *       - in: query
+ *         name: to
+ *         description: Último mês da janela (inclusivo), formato YYYY-MM-01 (UTC).
+ *         schema:
+ *           type: string
+ *           pattern: '^\d{4}-(0[1-9]|1[0-2])-01$'
+ *           example: '2026-05-01'
+ *     responses:
+ *       200:
+ *         description: Quatro arrays paralelos (zero-fill aplicado).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [months, rentals, newTenants, monthlyRevenue]
+ *               properties:
+ *                 months:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                     pattern: '^\d{4}-(0[1-9]|1[0-2])$'
+ *                   example: ['2025-12', '2026-01', '2026-02', '2026-03', '2026-04', '2026-05']
+ *                 rentals:
+ *                   type: array
+ *                   description: Número de contratos iniciados no mês.
+ *                   items:
+ *                     type: integer
+ *                   example: [1, 0, 2, 1, 0, 3]
+ *                 newTenants:
+ *                   type: array
+ *                   description: |
+ *                     Número de inquilinos cujo PRIMEIRO contrato com este locador
+ *                     começou no mês (MIN(startDate) agrupado por tenantId).
+ *                   items:
+ *                     type: integer
+ *                   example: [1, 0, 2, 1, 0, 2]
+ *                 monthlyRevenue:
+ *                   type: array
+ *                   description: Soma de RentalPayment.amount de pagamentos PAID no período (BRL).
+ *                   items:
+ *                     type: number
+ *                   example: [3200, 0, 6400, 3200, 0, 9600]
+ *       400:
+ *         description: |
+ *           Formato inválido (`from`/`to` não casam YYYY-MM-01), `from > to`,
+ *           ou span excede 24 meses. Corpo usa `ErrorResponse` com `code=VALIDATION_ERROR`.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Token ausente ou inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: Usuário autenticado não é LANDLORD.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get(
+  '/properties/analytics/monthly',
+  ...landlordAuthStack,
+  propertyController.getMonthlyAnalytics,
+);
 
 /**
  * @swagger
@@ -412,7 +537,7 @@ router.put('/properties/:id/moderation', ...adminAuthStack, propertyController.m
  *           application/json:
  *             schema:
  *               type: object
- *               required: [period, status, updatedAt, updatedBy]
+ *               required: [period, status, amount, updatedAt, updatedBy]
  *               properties:
  *                 period:
  *                   type: string
@@ -421,6 +546,15 @@ router.put('/properties/:id/moderation', ...adminAuthStack, propertyController.m
  *                 status:
  *                   type: string
  *                   enum: [AWAITING, PAID, LATE]
+ *                 amount:
+ *                   type: number
+ *                   format: float
+ *                   nullable: true
+ *                   description: |
+ *                     Valor do aluguel em BRL, snapshot do Contract.monthlyRent
+ *                     ACTIVE no momento da gravação. `null` quando não há contrato
+ *                     ativo no write OU quando a linha pré-existia ao backfill
+ *                     best-effort (LL-003).
  *                 updatedAt:
  *                   type: string
  *                   format: date-time
@@ -502,7 +636,7 @@ router.get(
  *           application/json:
  *             schema:
  *               type: object
- *               required: [period, status, updatedAt, updatedBy]
+ *               required: [period, status, amount, updatedAt, updatedBy]
  *               properties:
  *                 period:
  *                   type: string
@@ -511,6 +645,15 @@ router.get(
  *                 status:
  *                   type: string
  *                   enum: [AWAITING, PAID, LATE]
+ *                 amount:
+ *                   type: number
+ *                   format: float
+ *                   nullable: true
+ *                   description: |
+ *                     Valor do aluguel em BRL, snapshot do Contract.monthlyRent
+ *                     ACTIVE no momento da gravação. `null` quando não há contrato
+ *                     ativo no write OU quando a linha pré-existia ao backfill
+ *                     best-effort (LL-003).
  *                 updatedAt:
  *                   type: string
  *                   format: date-time
@@ -548,6 +691,248 @@ router.put(
   '/properties/:id/payments/current',
   ...authStack,
   rentalPaymentController.updateCurrent,
+);
+
+/**
+ * @swagger
+ * /properties/{propertyId}/payments:
+ *   get:
+ *     summary: Histórico multi-mês de pagamentos de aluguel para um inquilino
+ *     description: |
+ *       Retorna o histórico (lista) de `RentalPayment` para o par
+ *       (`propertyId`, `tenantId`). Apenas meses DENTRO da janela de algum
+ *       contrato (qualquer status) entre o imóvel e o inquilino são
+ *       incluídos — pagamentos registrados quando o imóvel estava alugado
+ *       por outro inquilino são excluídos.
+ *
+ *       Apenas o locador dono do imóvel pode ler — outros usuários
+ *       autenticados recebem 403; anônimos recebem 401. Imóveis
+ *       inexistentes retornam 404 ANTES do 403 para não diferenciar
+ *       "inexistente" de "alheio".
+ *
+ *       `paidAt` é derivado de `updatedAt` APENAS quando `status=PAID`;
+ *       nos demais status volta `null`. `amount` é o valor gravado no
+ *       snapshot do mês (0 para linhas anteriores ao backfill LL-003).
+ *       Ordem: `period DESC`.
+ *     tags: [Propriedades, Pagamentos]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: propertyId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *       - in: query
+ *         name: tenantId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       200:
+ *         description: Histórico de pagamentos (lista, possivelmente vazia).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 required: [period, amount, status, paidAt]
+ *                 properties:
+ *                   period:
+ *                     type: string
+ *                     pattern: '^\d{4}-(0[1-9]|1[0-2])$'
+ *                   amount:
+ *                     type: number
+ *                     format: float
+ *                   status:
+ *                     type: string
+ *                     enum: [AWAITING, PAID, LATE]
+ *                   paidAt:
+ *                     type: string
+ *                     format: date-time
+ *                     nullable: true
+ *       400:
+ *         description: `propertyId` (path) ou `tenantId` (query) inválidos/ausentes.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Token ausente ou inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: Usuário autenticado não é o dono do imóvel.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Propriedade não encontrada.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get(
+  '/properties/:propertyId/payments',
+  ...authStack,
+  rentalPaymentController.listByTenant,
+);
+
+/**
+ * @swagger
+ * /properties/{id}/contact-click:
+ *   post:
+ *     summary: Registrar um clique em "Contatar" na ficha do imóvel
+ *     description: |
+ *       Endpoint PUBLIC (sem autenticação): o botão "Contatar" da ficha do
+ *       imóvel é visível para visitantes anônimos, então o tracking também
+ *       precisa funcionar sem token. Quando o viewer está autenticado, o
+ *       `viewerId` é derivado do JWT; quando anônimo, entra `null`.
+ *
+ *       Sem dedup — diferente de ProfileView (24h) e PropertyView (1h), cada
+ *       clique é um evento analítico legítimo, inclusive múltiplos cliques do
+ *       mesmo usuário (sinal de alta intenção). O endpoint LL-008 de
+ *       analytics por imóvel conta todas as linhas no bucket pedido.
+ *     tags: [Propriedades, Analytics]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       201:
+ *         description: Evento registrado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: ID no path não é um UUID válido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Propriedade não encontrada.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.post('/properties/:id/contact-click', propertyController.recordContactClick);
+
+/**
+ * @swagger
+ * /properties/{id}/analytics:
+ *   get:
+ *     summary: Analytics por imóvel (somente o locador dono)
+ *     description: |
+ *       Retorna contadores e série diária de visualizações do imóvel, usadas
+ *       pelo dashboard do landlord. Apenas o dono lê — autenticados não-donos
+ *       recebem 403; anônimos recebem 401. Imóveis inexistentes retornam 404
+ *       ANTES do 403, para não diferenciar "inexistente" de "alheio".
+ *
+ *       `window` aceita `30d | 90d | 1y` (default `30d`). Contadores:
+ *       - `views`: PropertyViewEvent dentro da janela.
+ *       - `favorites`: Favorite do imóvel all-time.
+ *       - `proposalsTotal`: Proposal criadas dentro da janela.
+ *       - `proposalsOpen`: Proposal com status=PENDING all-time.
+ *       - `visitsScheduled`: Visit com status=SCHEDULED all-time.
+ *       - `contactClicks`: ContactClickEvent dentro da janela.
+ *       - `dailyViews`: série de buckets diários zero-filled cobrindo a janela.
+ *     tags: [Propriedades, Analytics]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *       - in: query
+ *         name: window
+ *         schema:
+ *           type: string
+ *           enum: [30d, 90d, 1y]
+ *           default: 30d
+ *     responses:
+ *       200:
+ *         description: Analytics do imóvel na janela solicitada.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required:
+ *                 - views
+ *                 - favorites
+ *                 - proposalsTotal
+ *                 - proposalsOpen
+ *                 - visitsScheduled
+ *                 - contactClicks
+ *                 - dailyViews
+ *               properties:
+ *                 views:
+ *                   type: integer
+ *                 favorites:
+ *                   type: integer
+ *                 proposalsTotal:
+ *                   type: integer
+ *                 proposalsOpen:
+ *                   type: integer
+ *                 visitsScheduled:
+ *                   type: integer
+ *                 contactClicks:
+ *                   type: integer
+ *                 dailyViews:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     required: [date, count]
+ *                     properties:
+ *                       date:
+ *                         type: string
+ *                         pattern: '^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
+ *                       count:
+ *                         type: integer
+ *       400:
+ *         description: Param inválido (UUID ou window fora do enum).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Token ausente ou inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: Usuário autenticado não é o dono do imóvel.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Propriedade não encontrada.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get(
+  '/properties/:id/analytics',
+  ...authStack,
+  propertyController.getPropertyAnalytics,
 );
 
 /**
@@ -634,6 +1019,12 @@ router.get('/properties/:id', propertyController.getById);
  *               status:
  *                 type: string
  *                 enum: [AVAILABLE, NEGOTIATING, RENTED]
+ *               hasWifi:
+ *                 type: boolean
+ *                 description: LL-022 — Atualiza a flag de Wi-Fi. Multipart envia a string `'true'`/`'false'`; o backend converte para boolean.
+ *               hasPool:
+ *                 type: boolean
+ *                 description: LL-022 — Atualiza a flag de piscina. Multipart envia a string `'true'`/`'false'`; o backend converte para boolean.
  *               photos:
  *                 type: array
  *                 maxItems: 20

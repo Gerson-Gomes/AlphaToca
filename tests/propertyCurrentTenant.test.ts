@@ -57,17 +57,58 @@ describe('propertyService.getPropertyById — currentTenant (US-004)', () => {
     expect(result).not.toHaveProperty('contracts');
   });
 
-  it('returns currentTenant={id,name} when an ACTIVE contract exists', async () => {
+  it('returns currentTenant={id,name,isIdentityVerified,identityVerifiedAt} when an ACTIVE contract exists', async () => {
+    const verifiedAt = new Date('2026-04-10T09:30:00.000Z');
     (prisma.property.findUnique as any).mockResolvedValue(
       makePropertyRow({
-        contracts: [{ tenant: { id: TENANT_ID, name: 'Maria Silva' } }],
+        contracts: [
+          {
+            tenant: {
+              id: TENANT_ID,
+              name: 'Maria Silva',
+              isIdentityVerified: true,
+              identityVerifiedAt: verifiedAt,
+            },
+          },
+        ],
       }),
     );
 
     const result = await propertyService.getPropertyById(PROPERTY_ID);
 
     expect(result).not.toBeNull();
-    expect(result!.currentTenant).toEqual({ id: TENANT_ID, name: 'Maria Silva' });
+    expect(result!.currentTenant).toEqual({
+      id: TENANT_ID,
+      name: 'Maria Silva',
+      isIdentityVerified: true,
+      identityVerifiedAt: verifiedAt.toISOString(),
+    });
+  });
+
+  it('returns isIdentityVerified=false and identityVerifiedAt=null by default (LL-017)', async () => {
+    (prisma.property.findUnique as any).mockResolvedValue(
+      makePropertyRow({
+        contracts: [
+          {
+            tenant: {
+              id: TENANT_ID,
+              name: 'Maria Silva',
+              isIdentityVerified: false,
+              identityVerifiedAt: null,
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await propertyService.getPropertyById(PROPERTY_ID);
+
+    expect(result!.currentTenant).toEqual({
+      id: TENANT_ID,
+      name: 'Maria Silva',
+      isIdentityVerified: false,
+      identityVerifiedAt: null,
+    });
   });
 
   it('returns null when the property itself is not found', async () => {
@@ -93,9 +134,16 @@ describe('propertyService.getPropertyById — currentTenant (US-004)', () => {
         take: 1,
       },
     });
-    // Tenant is selected only to { id, name } — verify no extra PII leaks
+    // LL-017 — tenant now also surfaces identity-verification flags; no extra PII beyond that.
     expect(arg.include.contracts.select).toEqual({
-      tenant: { select: { id: true, name: true } },
+      tenant: {
+        select: {
+          id: true,
+          name: true,
+          isIdentityVerified: true,
+          identityVerifiedAt: true,
+        },
+      },
     });
   });
 });
@@ -106,7 +154,21 @@ describe('propertyService.searchProperties — currentTenant per item (US-004)',
   });
 
   it('findMany path: each item carries currentTenant (populated or null)', async () => {
-    const propA = { id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', landlordId: LANDLORD_ID, images: [], contracts: [{ tenant: { id: TENANT_ID, name: 'Maria Silva' } }] };
+    const propA = {
+      id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      landlordId: LANDLORD_ID,
+      images: [],
+      contracts: [
+        {
+          tenant: {
+            id: TENANT_ID,
+            name: 'Maria Silva',
+            isIdentityVerified: false,
+            identityVerifiedAt: null,
+          },
+        },
+      ],
+    };
     const propB = { id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', landlordId: LANDLORD_ID, images: [], contracts: [] };
 
     (prisma.property.count as any).mockResolvedValue(2);
@@ -115,7 +177,15 @@ describe('propertyService.searchProperties — currentTenant per item (US-004)',
     const result = await propertyService.searchProperties({ landlordId: LANDLORD_ID, page: 1, limit: 10 } as any);
 
     expect(result.data).toHaveLength(2);
-    expect(result.data[0]).toMatchObject({ id: propA.id, currentTenant: { id: TENANT_ID, name: 'Maria Silva' } });
+    expect(result.data[0]).toMatchObject({
+      id: propA.id,
+      currentTenant: {
+        id: TENANT_ID,
+        name: 'Maria Silva',
+        isIdentityVerified: false,
+        identityVerifiedAt: null,
+      },
+    });
     expect(result.data[1]).toMatchObject({ id: propB.id, currentTenant: null });
     // contracts must not leak into the response shape
     expect(result.data[0]).not.toHaveProperty('contracts');
@@ -155,11 +225,17 @@ describe('propertyService.searchProperties — currentTenant per item (US-004)',
       .mockResolvedValueOnce(rawProps) // SELECT *
       .mockResolvedValueOnce([{ count: 2 }]); // COUNT
 
+    const verifiedAt = new Date('2026-04-20T08:00:00.000Z');
     (prisma.contract.findMany as any).mockResolvedValue([
       {
         propertyId: rawProps[0].id,
         createdAt: new Date(),
-        tenant: { id: TENANT_ID, name: 'Maria Silva' },
+        tenant: {
+          id: TENANT_ID,
+          name: 'Maria Silva',
+          isIdentityVerified: true,
+          identityVerifiedAt: verifiedAt,
+        },
       },
     ]);
 
@@ -174,7 +250,12 @@ describe('propertyService.searchProperties — currentTenant per item (US-004)',
     expect(result.data).toHaveLength(2);
     expect(result.data[0]).toMatchObject({
       id: rawProps[0].id,
-      currentTenant: { id: TENANT_ID, name: 'Maria Silva' },
+      currentTenant: {
+        id: TENANT_ID,
+        name: 'Maria Silva',
+        isIdentityVerified: true,
+        identityVerifiedAt: verifiedAt.toISOString(),
+      },
     });
     expect(result.data[1]).toMatchObject({
       id: rawProps[1].id,

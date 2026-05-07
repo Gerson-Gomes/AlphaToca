@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { VisitStatus } from '@prisma/client';
+import { VisitStatus, VisitSource } from '@prisma/client';
 import {
   DEFAULT_VISIT_DURATION_MINUTES,
   MAX_VISIT_DURATION_MINUTES,
@@ -22,6 +22,7 @@ export const createVisitSchema = z.object({
   rentalProcessId: z.string().optional(),
   scheduledAt: scheduledAtField,
   durationMinutes: durationMinutesField.optional().default(DEFAULT_VISIT_DURATION_MINUTES),
+  source: z.nativeEnum(VisitSource).optional().default(VisitSource.MANUAL),
   notes: z.string().max(2000).optional(),
 });
 

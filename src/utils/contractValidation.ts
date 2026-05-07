@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ContractStatus, PaymentStatus } from '@prisma/client';
+import { ContractStatus, ContractDocumentStatus, PaymentStatus } from '@prisma/client';
 
 export const createContractSchema = z.object({
   propertyId: z.string().uuid(),
@@ -30,3 +30,15 @@ export const getContractQuerySchema = z.object({
 });
 
 export type GetContractQuery = z.infer<typeof getContractQuerySchema>;
+
+// Body do PATCH /api/contracts/:id/document-status (LL-016). O único campo
+// é `documentStatus`, validado contra o enum Prisma — qualquer valor fora
+// de PENDING_DOCUMENTS/AWAITING_SIGNATURE/APPROVED retorna 400 VALIDATION_ERROR
+// sem tocar no banco.
+export const updateContractDocumentStatusSchema = z.object({
+  documentStatus: z.nativeEnum(ContractDocumentStatus),
+});
+
+export type UpdateContractDocumentStatusInput = z.infer<
+  typeof updateContractDocumentStatusSchema
+>;

@@ -135,6 +135,7 @@ export async function createVisit(
       rentalProcessId: input.rentalProcessId ?? null,
       scheduledAt: input.scheduledAt,
       durationMinutes: input.durationMinutes,
+      source: input.source,
       notes: input.notes ?? null,
     },
   });

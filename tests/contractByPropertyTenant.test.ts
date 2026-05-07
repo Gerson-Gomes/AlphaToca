@@ -105,6 +105,7 @@ function seedContractView(propertyId: string, overrides: Partial<any> = {}) {
     monthlyRent: 2500,
     pdfUrl: null,
     signedAt: null,
+    documentStatus: 'PENDING_DOCUMENTS',
     ...overrides,
   };
 }
@@ -134,6 +135,7 @@ describe('GET /api/contracts?propertyId=&tenantId= — US-014', () => {
       monthlyRent: 2500,
       pdfUrl: null,
       signedAt: null,
+      documentStatus: 'PENDING_DOCUMENTS',
     });
     // PRD contract: landlordId is NOT part of the projection.
     expect(res.body).not.toHaveProperty('landlordId');

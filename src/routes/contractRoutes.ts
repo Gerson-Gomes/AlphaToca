@@ -71,7 +71,7 @@ router.post('/contracts', contractController.create);
  *           application/json:
  *             schema:
  *               type: object
- *               required: [id, propertyId, tenantId, startDate, endDate, monthlyRent, pdfUrl, signedAt]
+ *               required: [id, propertyId, tenantId, startDate, endDate, monthlyRent, pdfUrl, signedAt, documentStatus]
  *               properties:
  *                 id: { type: 'string', format: 'uuid' }
  *                 propertyId: { type: 'string', format: 'uuid' }
@@ -81,6 +81,9 @@ router.post('/contracts', contractController.create);
  *                 monthlyRent: { type: 'number', example: 2500.00 }
  *                 pdfUrl: { type: 'string', format: 'uri', nullable: true }
  *                 signedAt: { type: 'string', format: 'date-time', nullable: true }
+ *                 documentStatus:
+ *                   type: string
+ *                   enum: [PENDING_DOCUMENTS, AWAITING_SIGNATURE, APPROVED]
  *       400:
  *         description: Query params inválidos (propertyId/tenantId fora do formato UUID ou ausentes).
  *         content:
@@ -322,6 +325,88 @@ router.put(
  *       409: { description: Outro contrato já está ACTIVE para este imóvel }
  */
 router.patch('/contracts/:id/status', contractController.updateStatus);
+
+/**
+ * @swagger
+ * /contracts/{id}/document-status:
+ *   patch:
+ *     summary: Atualiza o status documental do contrato (LL-016)
+ *     description: |
+ *       Atualiza `Contract.documentStatus` — campo independente de
+ *       `Contract.status`, usado pelo chip de status documental na tela
+ *       "Meus Inquilinos" do landlord.
+ *
+ *       Autorização: somente o landlord do contrato pode alterar. Tenants e
+ *       terceiros autenticados recebem 403 FORBIDDEN.
+ *
+ *       Valores válidos: `PENDING_DOCUMENTS`, `AWAITING_SIGNATURE`, `APPROVED`.
+ *       Qualquer outro valor retorna 400 VALIDATION_ERROR antes de tocar no
+ *       banco.
+ *
+ *       Resposta 200 traz o mínimo necessário para o frontend atualizar o
+ *       chip sem refetch: `{ id, documentStatus }`. Para ler o contrato
+ *       completo use `GET /api/contracts/:id`.
+ *     tags: [Contratos]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: 'string', format: 'uuid' }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [documentStatus]
+ *             properties:
+ *               documentStatus:
+ *                 type: string
+ *                 enum: [PENDING_DOCUMENTS, AWAITING_SIGNATURE, APPROVED]
+ *     responses:
+ *       200:
+ *         description: Status documental atualizado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [id, documentStatus]
+ *               properties:
+ *                 id: { type: 'string', format: 'uuid' }
+ *                 documentStatus:
+ *                   type: string
+ *                   enum: [PENDING_DOCUMENTS, AWAITING_SIGNATURE, APPROVED]
+ *       400:
+ *         description: `documentStatus` ausente ou fora do enum.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Token ausente ou inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: Caller não é o landlord do contrato.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Contrato não encontrado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.patch(
+  '/contracts/:id/document-status',
+  contractController.updateDocumentStatus,
+);
 
 /**
  * @swagger

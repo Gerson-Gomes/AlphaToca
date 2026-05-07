@@ -1,0 +1,420 @@
+{
+  "project": "I-Moveis",
+  "branchName": "ralph/landlord-backend-closeout",
+  "description": "Landlord Backend Closeout (Epic LL) — close every remaining backend gap listed in BACKEND_PENDENCIAS_LANDLORD.md so the Flutter landlord UI stops falling back to mocks and heuristics. Delivers: dashboard metrics + monthly analytics, per-property analytics with daily series, multi-month rent payment history, full in-app chat (list + messages + WebSocket push), Contract.documentStatus + User.isIdentityVerified, Visit.source (MANUAL/AI), and property schema expansion (+4 PropertyType values, hasWifi/hasPool amenities, TransactionType enum). 13 additive migrations total; zero renames to US-001→US-020 response shapes.",
+  "userStories": [
+    {
+      "id": "LL-001",
+      "title": "Profile view tracking table + increment hook",
+      "description": "As the backend, I need a ProfileView table so I can aggregate how many users opened a landlord's public profile in the last 30 days (dashboard 'Visitas ao perfil' card).",
+      "acceptanceCriteria": [
+        "Add Prisma model ProfileView { id, landlordId, viewerId?, viewedAt } with @@index([landlordId, viewedAt]) and onDelete: Cascade on landlord FK",
+        "Hand-author prisma/migrations/<stamp>_add_profile_view/migration.sql (DO NOT run prisma migrate dev — .env points at live Supabase)",
+        "Verify via npx prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script that DDL matches hand-authored SQL byte-for-byte",
+        "npx prisma validate && npx prisma generate succeed",
+        "Add src/services/profileViewService.ts::record(landlordId, viewerId?) — fire-and-forget, 24h dedup by (landlordId, viewerId) when viewerId non-null; anonymous viewers (viewerId=null) always recorded",
+        "Wire call site in propertyController.getPropertyById when ?inspectLandlord=true (or dedicated /api/landlord/:id route if one exists — grep first)",
+        "tests/profileViewService.test.ts covers: record with viewer, 24h dedup, anonymous insert",
+        "Typecheck passes (npx tsc --noEmit)",
+        "Tests pass (npx vitest run)"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-002",
+      "title": "GET /api/landlord/metrics",
+      "description": "As a landlord, I want one endpoint that returns my top-card dashboard metrics (profileViews, proposalsPending, unreadMessages) in a single round trip.",
+      "acceptanceCriteria": [
+        "New route GET /api/landlord/metrics in new src/routes/landlordRoutes.ts mounted in src/app.ts via app.use('/api', authStack, landlordRoutes) — follow conversationRoutes.ts template (no per-route auth spread)",
+        "Guards: checkJwt → authSyncMiddleware → requireRole(Role.LANDLORD)",
+        "Response shape: { profileViews: number, proposalsPending: number, unreadMessages: number }",
+        "profileViews: COUNT(ProfileView) where landlordId=req.localUser.id AND viewedAt >= now()-30d",
+        "proposalsPending: COUNT(Proposal) where property.landlordId=req.localUser.id AND status='PENDING'",
+        "unreadMessages: COUNT(ConversationMessage) authored by tenant in landlord's conversations with readAt=null; return 0 if ConversationMessage table not yet present (graceful fallback before LL-010)",
+        "tests/landlordMetrics.test.ts: 200 happy, 401 unauth, 403 non-landlord",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-003",
+      "title": "Add RentalPayment.amount column + backfill migration",
+      "description": "As the backend, I need RentalPayment to carry an amount column so analytics can SUM(amount) for revenue and payment-history endpoints can return per-month values.",
+      "acceptanceCriteria": [
+        "Add column RentalPayment.amount Decimal(10,2)? (nullable) to prisma/schema.prisma",
+        "Hand-author prisma/migrations/<stamp>_add_rental_payment_amount/migration.sql with: ALTER TABLE rental_payments ADD COLUMN amount NUMERIC(10,2); plus backfill UPDATE rental_payments rp SET amount = (SELECT c.monthly_rent FROM contracts c WHERE c.property_id = rp.property_id AND c.status='ACTIVE' LIMIT 1) WHERE amount IS NULL;",
+        "SQL header comment: 'Best-effort backfill from currently-ACTIVE contract.monthlyRent — historical rent changes not preserved. See PRD §8 Q2.'",
+        "Verify with npx prisma migrate diff --from-empty ... that column+type match",
+        "npx prisma validate && npx prisma generate succeed",
+        "Update rentalPaymentService.upsertCurrent to include amount (pull from active Contract.monthlyRent at write time)",
+        "Expose amount in GET /api/properties/:id/payments/current response (US-009 endpoint)",
+        "tests/rentalPaymentAmount.test.ts: create + read back, null-handling when no active contract",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-004",
+      "title": "analyticsService.monthlySeries helper",
+      "description": "As the backend, I need an efficient month-bucketed aggregation over contracts + rental payments so the analytics endpoint responds <300ms at P95.",
+      "acceptanceCriteria": [
+        "New src/services/analyticsService.ts::monthlySeries(landlordId, from: Date, to: Date) returning { months: string[], rentals: number[], newTenants: number[], monthlyRevenue: number[] }",
+        "rentals[m]: COUNT(Contract) where landlordId match AND startDate in month m",
+        "newTenants[m]: COUNT(DISTINCT tenantId) whose FIRST contract with this landlord started in month m (subquery on MIN(startDate) grouped by tenantId)",
+        "monthlyRevenue[m]: SUM(RentalPayment.amount) where property.landlordId match AND status='PAID' AND period=YYYY-MM(m); COALESCE to 0",
+        "Missing months zero-filled — arrays always parallel length",
+        "Use prisma.$queryRaw with parameterized SQL for the three queries; do NOT interpolate landlordId into the string",
+        "tests/analyticsService.test.ts: seed 3 months data + assert shape and zero-fill for a gap month",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-005",
+      "title": "GET /api/properties/analytics/monthly",
+      "description": "As a landlord, I want the 'Análise de Performance' charts back using real data from the last N months.",
+      "acceptanceCriteria": [
+        "New route GET /api/properties/analytics/monthly?from=YYYY-MM-01&to=YYYY-MM-01 in src/routes/propertyRoutes.ts (spread local authStack + requireRole(LANDLORD))",
+        "Zod schema validates from ≤ to, max span 24 months (else 400)",
+        "Default when query omitted: last 6 months ending current month (UTC, matching rentalPaymentService.currentPeriod)",
+        "Delegates to analyticsService.monthlySeries(req.localUser.id, from, to)",
+        "Returns { months, rentals, newTenants, monthlyRevenue }",
+        "tests/propertiesAnalyticsMonthly.test.ts: default range, custom range, oversized span 400, role gate 403",
+        "Swagger JSDoc block added per convention (src/routes/propertyRoutes.ts)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-006",
+      "title": "PropertyViewEvent table + increment hook",
+      "description": "As the backend, I need per-day property-view events so the per-property analytics endpoint can return a daily series.",
+      "acceptanceCriteria": [
+        "Add Prisma model PropertyViewEvent { id, propertyId, viewerId?, viewedAt } with @@index([propertyId, viewedAt]) and onDelete: Cascade on property FK",
+        "Hand-author prisma/migrations/<stamp>_add_property_view_event/migration.sql",
+        "Verify via prisma migrate diff; validate + generate succeed",
+        "Existing Property.views integer counter is PRESERVED and still incremented (do not replace — FR-12)",
+        "Add src/services/propertyViewService.ts::record(propertyId, viewerId?) — 1h dedup by (propertyId, viewerId) when non-null",
+        "Call from propertyController.getPropertyById AFTER the main read succeeds (fire-and-forget, don't block response)",
+        "tests/propertyViewService.test.ts: record + 1h dedup + anonymous insert + Property.views counter still increments",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-007",
+      "title": "ContactClickEvent table + POST /api/properties/:id/contact-click",
+      "description": "As the backend, I need contact-click events tracked per property so per-property analytics can return contactClicks counts.",
+      "acceptanceCriteria": [
+        "Add Prisma model ContactClickEvent { id, propertyId, viewerId?, clickedAt } with @@index([propertyId, clickedAt]) and onDelete: Cascade on property FK",
+        "Hand-author prisma/migrations/<stamp>_add_contact_click_event/migration.sql",
+        "Verify via prisma migrate diff; validate + generate succeed",
+        "New route POST /api/properties/:id/contact-click in propertyRoutes.ts — PUBLIC (no authStack); anonymous viewers pass viewerId=null",
+        "Controller: validate :id as UUID; 404 if property missing; else insert row and return 201 {}",
+        "tests/contactClickEvent.test.ts: anonymous click, authenticated click, unknown property 404",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-008",
+      "title": "GET /api/properties/:id/analytics",
+      "description": "As a landlord, I want real per-property analytics (not the same mocked 142/23 across every listing).",
+      "acceptanceCriteria": [
+        "New route GET /api/properties/:id/analytics?window=30d|90d|1y (default 30d) in propertyRoutes.ts with authStack + inline ownership check",
+        "Ownership: 404 if property missing (before 403 — don't leak existence); 403 if caller !== property.landlordId; 200 otherwise",
+        "Response shape: { views, favorites, proposalsTotal, proposalsOpen, visitsScheduled, contactClicks, dailyViews: [{date:'YYYY-MM-DD', count:number}] }",
+        "views: COUNT(PropertyViewEvent) in window; favorites: COUNT(Favorite) all-time for property; proposalsTotal: COUNT(Proposal) in window; proposalsOpen: COUNT(Proposal status=PENDING, all-time); visitsScheduled: COUNT(Visit status=SCHEDULED, all-time); contactClicks: COUNT(ContactClickEvent) in window",
+        "dailyViews: zero-filled daily buckets across the window range",
+        "tests/propertyAnalytics.test.ts: each window value, zero-fill assertion, ownership 403, missing 404",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-009",
+      "title": "GET /api/properties/:propertyId/payments?tenantId=",
+      "description": "As a landlord viewing a tenant's financial history, I want the full multi-month payment list, not just the current month.",
+      "acceptanceCriteria": [
+        "New route GET /api/properties/:propertyId/payments?tenantId=<uuid> in propertyRoutes.ts with authStack + ownership check",
+        "Zod: propertyId + tenantId both required UUIDs (400 on missing/invalid)",
+        "Ownership: 404 if property missing, 403 if caller !== property.landlordId",
+        "Query RentalPayment rows for propertyId, then filter to periods that fall within the tenant's Contract window for that (propertyId, tenantId) — rows outside tenure excluded",
+        "Response: array of { period:'YYYY-MM', amount:number, status:'PAID'|'AWAITING'|'LATE', paidAt:string|null }; paidAt = RentalPayment.updatedAt when status=PAID else null",
+        "Ordering: period DESC",
+        "tests/rentalPaymentsList.test.ts: happy path with 3 periods, tenure-window filter excludes prior tenant's months, 400 missing tenantId, 403 non-owner, 404 missing property",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-010",
+      "title": "ConversationMessage table",
+      "description": "As the backend, I need a message table tied to Conversation (NOT the existing Message model tied to ChatSession/WhatsApp RAG) so the in-app chat can persist messages without entangling the RAG worker.",
+      "acceptanceCriteria": [
+        "Add Prisma model ConversationMessage { id, conversationId, authorId, content @db.Text, createdAt, readAt DateTime? } with @@index([conversationId, createdAt]) and @@index([conversationId, readAt]); onDelete: Cascade on conversation FK",
+        "Add inverse relation `messages ConversationMessage[]` on Conversation model",
+        "Hand-author prisma/migrations/<stamp>_add_conversation_message/migration.sql",
+        "Migration SQL header comment: 'Kept distinct from messages(session_id) because that table services the WhatsApp/RAG ChatSession flow; fusing would force nullable FKs and confuse the RAG worker (src/workers/*).'",
+        "Verify via prisma migrate diff; validate + generate succeed",
+        "tests/conversationMessage.test.ts: model round-trip (create message, read back, readAt default null)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-011",
+      "title": "GET /api/conversations (list)",
+      "description": "As any authenticated user, I want to list my active conversations so /chat renders a real inbox instead of 'Nenhuma conversa'.",
+      "acceptanceCriteria": [
+        "New route GET /api/conversations?unreadOnly=true in src/routes/conversationRoutes.ts (global authStack mount)",
+        "Role-agnostic: LANDLORD sees tenants as counterparts (linkedTenantId=tenant.id); TENANT sees landlords",
+        "Response: array of { id, counterpartName, counterpartAvatarUrl:null, lastMessage, lastMessageAt, unread, linkedPropertyId, linkedTenantId }",
+        "lastMessage / lastMessageAt from latest ConversationMessage; conversations with zero messages still appear with lastMessage=null and lastMessageAt=conversation.createdAt",
+        "unread = EXISTS(ConversationMessage with authorId != localUser.id AND readAt IS NULL)",
+        "Ordering: lastMessageAt DESC (fallback createdAt DESC)",
+        "unreadOnly=true filters to conversations where unread=true",
+        "counterpartAvatarUrl returns null (User has no avatar field; out of scope to add one)",
+        "tests/conversationList.test.ts: landlord view, tenant view, unreadOnly filter, empty-conversation edge case, 401 unauth",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-012",
+      "title": "GET /api/conversations/:id/messages (paginated)",
+      "description": "As a conversation participant, I want cursor-based message history pagination with automatic read receipts.",
+      "acceptanceCriteria": [
+        "New route GET /api/conversations/:id/messages?before=<messageId>&limit=50 in conversationRoutes.ts",
+        "Zod: id UUID, before UUID optional, limit int 1..100 default 50",
+        "Response: array of { id, authorId, content, createdAt, readAt } ordered createdAt ASC within the returned page",
+        "Page semantics: returns the `limit` items older than `before` (or latest `limit` when before absent)",
+        "Authorization: 404 for both missing conversation AND non-participant (caller !== landlordId AND !== tenantId) — document 'existence-hiding 404' in handler comment",
+        "Side effect: set readAt=now() on returned messages where authorId != localUser.id AND readAt IS NULL — batch UPDATE in one query",
+        "tests/conversationMessages.test.ts: pagination cursor, read-receipt side effect, non-participant 404, missing 404",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-013",
+      "title": "POST /api/conversations/:id/messages",
+      "description": "As a conversation participant, I want to send a message.",
+      "acceptanceCriteria": [
+        "New route POST /api/conversations/:id/messages in conversationRoutes.ts",
+        "Zod body: { content: string().min(1).max(4000) }",
+        "Authorization: same 404-for-non-participant rule as LL-012",
+        "Insert ConversationMessage with authorId=localUser.id; return 201 + full message object { id, authorId, content, createdAt, readAt:null }",
+        "tests/conversationMessageCreate.test.ts: happy path, empty content 400, oversized content 400, non-participant 404, missing 404",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-014",
+      "title": "WebSocket push for conversation events",
+      "description": "As a participant, I want new messages and read-receipts to arrive over Socket.IO so I don't have to poll.",
+      "acceptanceCriteria": [
+        "New service src/services/conversationSocketService.ts modelled on chatSocketService.ts (same safeEmit + getIO pattern)",
+        "emitNewMessage(conversation, message): emits 'conversation:new_message' payload { conversationId, message } to rooms `user:${landlordId}` and `user:${tenantId}`",
+        "emitMessagesRead(conversation, readerId, messageIds): emits 'conversation:message_read' payload { conversationId, messageIds } to the OTHER participant's room",
+        "Do NOT fan out to provider:all — admins are not party to user-to-user threads (per PRD §8 Q5)",
+        "Wire emitNewMessage into LL-013 handler AFTER the DB insert succeeds (never emit for an unpersisted message)",
+        "Wire emitMessagesRead into LL-012's read-side-effect (batch once per request)",
+        "tests/conversationSocket.test.ts: mock getIO, assert emit called with correct room + event + payload for both events",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-015",
+      "title": "POST /api/conversations/:id/read (mark-all-as-read)",
+      "description": "As a client recovering from a socket drop, I want an explicit endpoint to mark everything read without re-fetching message pages.",
+      "acceptanceCriteria": [
+        "New route POST /api/conversations/:id/read (no body) in conversationRoutes.ts",
+        "Authorization: same 404-for-non-participant rule as LL-012/LL-013",
+        "Side effect: UPDATE ConversationMessage SET readAt=now() WHERE conversationId=:id AND authorId != localUser.id AND readAt IS NULL — capture updated ids via RETURNING",
+        "Emit conversationSocketService.emitMessagesRead(conversation, localUser.id, updatedIds) when updatedIds.length > 0",
+        "Response 200 { markedRead: number }",
+        "tests/conversationMarkRead.test.ts: 0-to-N transitions, socket emit assertion, non-participant 404",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-016",
+      "title": "Contract.documentStatus enum + backfill + PATCH endpoint",
+      "description": "As a landlord on 'Meus Inquilinos', I want the chip to reflect documental state via a real field, not the existing property.status heuristic.",
+      "acceptanceCriteria": [
+        "Add enum ContractDocumentStatus { PENDING_DOCUMENTS, AWAITING_SIGNATURE, APPROVED }",
+        "Add column Contract.documentStatus ContractDocumentStatus @default(PENDING_DOCUMENTS)",
+        "Hand-author prisma/migrations/<stamp>_add_contract_document_status/migration.sql including backfill: UPDATE contracts SET document_status='APPROVED' WHERE signed_at IS NOT NULL;",
+        "Verify via prisma migrate diff; validate + generate succeed",
+        "Expose documentStatus in every existing Contract response — grep controllers for `contract` returns (contractController.ts, propertyController currentContract expansion)",
+        "New route PATCH /api/contracts/:id/document-status body { documentStatus: ContractDocumentStatus } in contractRoutes.ts with authStack + inline landlord-ownership check",
+        "Zod schema under src/utils/contractValidation.ts using z.nativeEnum(ContractDocumentStatus)",
+        "tests/contractDocumentStatus.test.ts: default value, backfill verification via seed, PATCH happy path, PATCH 403 non-owner, PATCH 400 invalid enum",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-017",
+      "title": "User identity verification fields",
+      "description": "As a landlord, I want to see the ✓ dourado again when a tenant is identity-verified — fields only, no setter endpoint in this story.",
+      "acceptanceCriteria": [
+        "Add columns User.isIdentityVerified Boolean @default(false) and User.identityVerifiedAt DateTime?",
+        "Hand-author prisma/migrations/<stamp>_add_user_identity_verification/migration.sql",
+        "Migration SQL header comment: 'Fields are read-only from the API surface in this epic — admin setter endpoint is a follow-up (PRD §8 Q3). Writable only via Prisma Studio / seed for now.'",
+        "Verify via prisma migrate diff; validate + generate succeed",
+        "Expose isIdentityVerified + identityVerifiedAt in every existing user-shaped response — grep: userController.ts, propertyController.currentTenant expansion, conversationController counterpart shape",
+        "NO new endpoint to flip the flag",
+        "tests/userIdentityVerification.test.ts: default=false in response, identityVerifiedAt=null default, read-after-seed override",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-018",
+      "title": "Visit.source (MANUAL/AI)",
+      "description": "As the landlord calendar, I want to visually distinguish visits scheduled by humans vs. the AI agent.",
+      "acceptanceCriteria": [
+        "Add enum VisitSource { MANUAL, AI }",
+        "Add column Visit.source VisitSource @default(MANUAL)",
+        "Hand-author prisma/migrations/<stamp>_add_visit_source/migration.sql",
+        "Verify via prisma migrate diff; validate + generate succeed",
+        "Include source in every Visit response — check visitController.list + visitController.getById + any landlord/tenant visit list handlers",
+        "POST /api/visits accepts optional source (default MANUAL). Zod uses z.nativeEnum(VisitSource)",
+        "Note in Swagger JSDoc: AI source is reserved for future internal agent flow (grep leadExtractionService callers) — current human clients always write MANUAL",
+        "tests/visitSource.test.ts: default MANUAL on create-without-source, explicit AI on create-with-source, field present in list + detail responses",
+        "Reference doc BACKEND_VISIT_SOURCE.md — align values",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-019",
+      "title": "PropertyType enum +4 values (KITNET, PENTHOUSE, LAND, COMMERCIAL)",
+      "description": "As a landlord creating a listing, I want all 8 UI types to be valid in the backend.",
+      "acceptanceCriteria": [
+        "Extend enum PropertyType in prisma/schema.prisma with KITNET, PENTHOUSE, LAND, COMMERCIAL (keep existing APARTMENT, HOUSE, STUDIO, CONDO_HOUSE)",
+        "Hand-author prisma/migrations/<stamp>_add_property_type_extended_values/migration.sql using ALTER TYPE \"PropertyType\" ADD VALUE 'KITNET'; (one per value) — existing rows untouched",
+        "Verify via prisma migrate diff; validate + generate succeed",
+        "No Zod edit needed: propertyValidation.ts uses z.nativeEnum(PropertyType) per codebase pattern — `prisma generate` is sufficient",
+        "tests/propertyTypeExtended.test.ts: create one Property with each of the 4 new types + read back",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-020",
+      "title": "Search filter accepts new PropertyType values",
+      "description": "As a tenant filtering search, I want to filter by KITNET / PENTHOUSE / LAND / COMMERCIAL.",
+      "acceptanceCriteria": [
+        "GET /api/properties/search?type=KITNET (etc.) returns only rows matching that type",
+        "Confirm Zod schema for the `type` query param accepts all 8 values (z.nativeEnum autoregenerates post LL-019)",
+        "If there's a manual enum allowlist anywhere (grep `APARTMENT.*HOUSE.*STUDIO` in src/), extend it",
+        "Swagger JSDoc for search route lists all 8 type values",
+        "tests/propertySearchExtendedTypes.test.ts: seed one property per new type + assert each filter returns just that row, and type=HOUSE still works (no regression)",
+        "Depends on LL-019 being merged",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-021",
+      "title": "Property amenities columns (hasWifi, hasPool)",
+      "description": "As a landlord, I want wifi and pool checkboxes to persist on my listing.",
+      "acceptanceCriteria": [
+        "Add columns Property.hasWifi Boolean @default(false) and Property.hasPool Boolean @default(false) to prisma/schema.prisma with @map('has_wifi') and @map('has_pool')",
+        "Hand-author prisma/migrations/<stamp>_add_property_amenities/migration.sql",
+        "Verify via prisma migrate diff; validate + generate succeed",
+        "tests/propertyAmenitiesColumns.test.ts: Prisma round-trip — create with true/false, read back, default false when omitted",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "LL-022",
+      "title": "Amenity support in create/update/search",
+      "description": "As a landlord and tenant, I want hasWifi and hasPool to flow through POST, PUT (JSON + multipart), and search filters.",
+      "acceptanceCriteria": [
+        "Zod schemas in src/utils/propertyValidation.ts (propertyToCreate + propertyToPatch) accept optional hasWifi/hasPool booleans",
+        "POST /api/properties + PUT /api/properties/:id (application/json) persist both fields",
+        "PUT /api/properties/:id multipart variant also forwards both fields — follow existing propertyUpdateMultipart.test.ts shape (text fields alongside `photos` file array)",
+        "GET /api/properties/search?hasWifi=true&hasPool=true filters correctly (AND semantics); omitted flags don't filter",
+        "Search Zod accepts hasWifi/hasPool as optional booleans (z.preprocess for 'true'/'false' strings if the existing pattern requires — mirror whatever US-005's search filter does)",
+        "Swagger updated (propertyRoutes JSDoc + swagger.ts Property schema)",
+        "tests/propertyAmenitiesFlow.test.ts: create with both, update via JSON, update via multipart, search filter positive + negative, search with neither flag returns all",
+        "Depends on LL-021",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

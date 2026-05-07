@@ -8,6 +8,7 @@ import {
   listLandlordTenants,
   listTenantContracts,
   updateContractStatus,
+  updateContractDocumentStatus,
   updatePaymentStatus,
   attachSignedPdfToContract,
   ContractError
@@ -16,6 +17,7 @@ import {
   createContractSchema,
   getContractQuerySchema,
   updateContractStatusSchema,
+  updateContractDocumentStatusSchema,
   updatePaymentStatusSchema
 } from '../utils/contractValidation';
 import {
@@ -178,6 +180,40 @@ export const contractController = {
       const input = updateContractStatusSchema.parse(req.body);
       const contract = await updateContractStatus(req.params.id, input.status);
       return res.status(200).json(contract);
+    } catch (err) {
+      if (err instanceof ContractError) {
+        return handleContractError(err, res, next);
+      }
+      next(err);
+    }
+  },
+
+  /**
+   * PATCH /api/contracts/:id/document-status (LL-016)
+   *
+   * Guard order: 401 (no localUser) → 400 (Zod body) → 404 (missing
+   * contract) → 403 (caller !== landlord of the contract). 200 body is
+   * { id, documentStatus } — the minimum the UI needs to refresh its chip
+   * without a round-trip back to GET /api/contracts/:id.
+   */
+  async updateDocumentStatus(req: Request, res: Response, next: NextFunction) {
+    try {
+      const localUser = req.localUser;
+      if (!localUser) {
+        return res.status(401).json({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          messages: [{ message: 'Authentication required.' }],
+        });
+      }
+
+      const input = updateContractDocumentStatusSchema.parse(req.body);
+      const updated = await updateContractDocumentStatus(
+        req.params.id,
+        localUser.id,
+        input.documentStatus,
+      );
+      return res.status(200).json(updated);
     } catch (err) {
       if (err instanceof ContractError) {
         return handleContractError(err, res, next);

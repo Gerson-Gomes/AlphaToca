@@ -1,0 +1,5 @@
+-- AlterEnum
+ALTER TYPE "PropertyType" ADD VALUE 'KITNET';
+ALTER TYPE "PropertyType" ADD VALUE 'PENTHOUSE';
+ALTER TYPE "PropertyType" ADD VALUE 'LAND';
+ALTER TYPE "PropertyType" ADD VALUE 'COMMERCIAL';

@@ -6,7 +6,7 @@ set -e
 
 # Parse arguments
 TOOL="claude"  # Default to amp for backwards compatibility
-MAX_ITERATIONS=20
+MAX_ITERATIONS=22
 
 while [[ $# -gt 0 ]]; do
   case $1 in

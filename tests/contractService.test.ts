@@ -37,6 +37,7 @@ describe('contractService.getActiveContractByPropertyAndTenant — US-014', () =
       monthlyRent: new Prisma.Decimal('2500.00'),
       pdfUrl: null,
       signedAt: null,
+      documentStatus: 'PENDING_DOCUMENTS',
     });
 
     const { getActiveContractByPropertyAndTenant } = await import(
@@ -66,6 +67,7 @@ describe('contractService.getActiveContractByPropertyAndTenant — US-014', () =
       monthlyRent: 2500,
       pdfUrl: null,
       signedAt: null,
+      documentStatus: 'PENDING_DOCUMENTS',
     });
     expect(typeof result!.monthlyRent).toBe('number');
   });
@@ -96,6 +98,7 @@ describe('contractService.getActiveContractByPropertyAndTenant — US-014', () =
       monthlyRent: new Prisma.Decimal('3100.50'),
       pdfUrl: '/uploads/contracts/55555555.pdf',
       signedAt: new Date('2026-04-15T12:00:00.000Z'),
+      documentStatus: 'APPROVED',
     });
 
     const { getActiveContractByPropertyAndTenant } = await import(
@@ -109,6 +112,7 @@ describe('contractService.getActiveContractByPropertyAndTenant — US-014', () =
     expect(result!.pdfUrl).toBe('/uploads/contracts/55555555.pdf');
     expect(result!.signedAt).toBe('2026-04-15T12:00:00.000Z');
     expect(result!.monthlyRent).toBe(3100.5);
+    expect(result!.documentStatus).toBe('APPROVED');
   });
 
   it('orders results by createdAt DESC so the most recent ACTIVE contract wins if multiple exist', async () => {

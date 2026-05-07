@@ -47,6 +47,10 @@ enum PropertyType {
   HOUSE
   STUDIO
   CONDO_HOUSE
+  KITNET
+  PENTHOUSE
+  LAND
+  COMMERCIAL
 }
 
 enum ProcessStatus {
@@ -67,6 +71,11 @@ enum VisitStatus {
   CANCELLED
   COMPLETED
   NO_SHOW
+}
+
+enum VisitSource {
+  MANUAL
+  AI
 }
 
 enum MessageStatus {
@@ -120,6 +129,11 @@ model User {
   role        Role     @default(TENANT)
   fcmToken    String?  @map("fcm_token")
   createdAt   DateTime @default(now()) @map("created_at")
+  // LL-017 — "selo verificado" de identidade do tenant. Exibido como ✓ dourado
+  // na ficha do inquilino. Read-only pela API neste epic: writable somente via
+  // Prisma Studio/seed enquanto o endpoint admin (PRD §8 Q3) não é lançado.
+  isIdentityVerified  Boolean   @default(false) @map("is_identity_verified")
+  identityVerifiedAt  DateTime? @map("identity_verified_at")
 
   // Relacionamentos inversos (Obrigações do Prisma)
   properties          Property[]      @relation("LandlordProperties")
@@ -137,6 +151,7 @@ model User {
   conversationsAsTenant   Conversation[] @relation("TenantConversations")
   supportTicketsOpened    SupportTicket[] @relation("SupportTicketOpener")
   supportTicketsAssigned  SupportTicket[] @relation("SupportTicketAssignee")
+  profileViewsReceived    ProfileView[]   @relation("LandlordProfileViews")
 
   @@map("users")
 }
@@ -165,6 +180,8 @@ model Property {
   area         Float        @default(0)
   isFurnished  Boolean      @default(false) @map("is_furnished")
   petsAllowed  Boolean      @default(false) @map("pets_allowed")
+  hasWifi      Boolean      @default(false) @map("has_wifi")
+  hasPool      Boolean      @default(false) @map("has_pool")
   latitude     Float?
   longitude    Float?
   nearSubway   Boolean      @default(false) @map("near_subway")
@@ -187,6 +204,8 @@ model Property {
   rentalPayments  RentalPayment[]
   conversations   Conversation[]
   chatSessions    ChatSession[]
+  viewEvents      PropertyViewEvent[] @relation("PropertyViewEvents")
+  contactClickEvents ContactClickEvent[] @relation("PropertyContactClickEvents")
 
   @@index([moderationStatus], name: "properties_moderation_status_idx")
   @@map("properties")
@@ -331,6 +350,7 @@ model Visit {
   scheduledAt     DateTime    @map("scheduled_at")
   durationMinutes Int         @default(45) @map("duration_minutes")
   status          VisitStatus @default(SCHEDULED)
+  source          VisitSource @default(MANUAL)
   notes           String?
   createdAt       DateTime    @default(now()) @map("created_at")
   updatedAt       DateTime    @updatedAt @map("updated_at")
@@ -450,6 +470,12 @@ model Contract {
   // versão assinada armazenada.
   signedAt    DateTime?      @map("signed_at")
   status      ContractStatus @default(ACTIVE)
+  // Estado documental da locação, exposto como chip na tela "Meus Inquilinos"
+  // do landlord (LL-016). Contratos com `signed_at IS NOT NULL` são
+  // backfilled para APPROVED; demais contratos partem do default
+  // PENDING_DOCUMENTS. O flip para AWAITING_SIGNATURE/APPROVED é feito via
+  // PATCH /api/contracts/:id/document-status.
+  documentStatus ContractDocumentStatus @default(PENDING_DOCUMENTS) @map("document_status")
   createdAt   DateTime       @default(now()) @map("created_at")
   updatedAt   DateTime       @updatedAt @map("updated_at")
 
@@ -465,6 +491,14 @@ enum ContractStatus {
   ACTIVE
   TERMINATED
   COMPLETED
+}
+
+// Estado documental do contrato (LL-016). Alimenta o chip de status documental
+// na tela "Meus Inquilinos" do landlord, independente de Contract.status.
+enum ContractDocumentStatus {
+  PENDING_DOCUMENTS
+  AWAITING_SIGNATURE
+  APPROVED
 }
 
 model TenantPayment {
@@ -497,6 +531,12 @@ model RentalPayment {
   propertyId String              @map("property_id")
   period     String              @db.VarChar(7) // formato 'YYYY-MM'
   status     RentalPaymentStatus @default(AWAITING)
+  // Valor do aluguel do mês, em BRL. Gravado no upsert a partir do
+  // Contract.monthlyRent ativo no momento. Nullable: a coluna foi adicionada
+  // após linhas já existirem e só é backfilled best-effort (ver migration
+  // header). Mantendo nullable também cobre o caso de imóvel sem contrato
+  // ativo no momento do write (LL-003).
+  amount     Decimal?            @db.Decimal(10, 2)
   updatedAt  DateTime            @updatedAt @map("updated_at")
   updatedBy  String?             @map("updated_by")
 
@@ -563,9 +603,83 @@ model Conversation {
   property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
   landlord User     @relation("LandlordConversations", fields: [landlordId], references: [id], onDelete: Cascade)
   tenant   User     @relation("TenantConversations", fields: [tenantId], references: [id], onDelete: Cascade)
+  messages ConversationMessage[]
 
   @@unique([propertyId, landlordId, tenantId], name: "conversations_property_landlord_tenant_key")
   @@index([landlordId], name: "conversations_landlord_idx")
   @@index([tenantId], name: "conversations_tenant_idx")
   @@map("conversations")
+}
+
+// Mensagens do canal in-app entre landlord e tenant (epic LL — chat).
+// Kept distinct from `messages(session_id)` because that table services the
+// WhatsApp/RAG ChatSession flow; fusing would force nullable FKs and confuse
+// the RAG worker (src/workers/*). LL-011/LL-012/LL-013 expose list/messages/post.
+model ConversationMessage {
+  id             String    @id @default(uuid())
+  conversationId String    @map("conversation_id")
+  authorId       String    @map("author_id")
+  content        String    @db.Text
+  createdAt      DateTime  @default(now()) @map("created_at")
+  readAt         DateTime? @map("read_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt], name: "conversation_messages_conversation_created_idx")
+  @@index([conversationId, readAt], name: "conversation_messages_conversation_read_idx")
+  @@map("conversation_messages")
+}
+
+// Registro de aberturas do perfil público de um landlord. Usado pelo card
+// "Visitas ao perfil" do dashboard (GET /api/landlord/metrics, LL-002) que
+// conta linhas dos últimos 30 dias. `viewerId` é nulo para visitantes anônimos;
+// quando não nulo, o service aplica dedup de 24h (LL-001) para não inflar o
+// contador com F5 do mesmo usuário logado.
+model ProfileView {
+  id         String   @id @default(uuid())
+  landlordId String   @map("landlord_id")
+  viewerId   String?  @map("viewer_id")
+  viewedAt   DateTime @default(now()) @map("viewed_at")
+
+  landlord User @relation("LandlordProfileViews", fields: [landlordId], references: [id], onDelete: Cascade)
+
+  @@index([landlordId, viewedAt], name: "profile_views_landlord_time_idx")
+  @@map("profile_views")
+}
+
+// Evento por abertura da ficha de um Property. Alimenta a série diária do
+// endpoint de analytics por imóvel (LL-008 GET /api/properties/:id/analytics) —
+// `views` em Property.views (contador agregado all-time) continua sendo
+// incrementado em paralelo para preservar o ordering `orderBy=views` no
+// search existente. `viewerId` é nulo para visitantes anônimos; quando
+// não nulo, o service aplica dedup de 1h (LL-006) — mais curto que o dedup
+// de ProfileView (24h) porque a granularidade do gráfico é diária.
+model PropertyViewEvent {
+  id         String   @id @default(uuid())
+  propertyId String   @map("property_id")
+  viewerId   String?  @map("viewer_id")
+  viewedAt   DateTime @default(now()) @map("viewed_at")
+
+  property Property @relation("PropertyViewEvents", fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@index([propertyId, viewedAt], name: "property_view_events_property_time_idx")
+  @@map("property_view_events")
+}
+
+// Evento de clique em "Contatar" na ficha de um Property. Alimenta o campo
+// `contactClicks` do endpoint de analytics por imóvel (LL-008). `viewerId` é
+// nulo para visitantes anônimos — o endpoint que registra o evento (POST
+// /api/properties/:id/contact-click) é PUBLIC, então sempre pode receber
+// cliques sem autenticação. Sem dedup: analytics de cliques conta CADA
+// intenção de contato, não usuários únicos.
+model ContactClickEvent {
+  id         String   @id @default(uuid())
+  propertyId String   @map("property_id")
+  viewerId   String?  @map("viewer_id")
+  clickedAt  DateTime @default(now()) @map("clicked_at")
+
+  property Property @relation("PropertyContactClickEvents", fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@index([propertyId, clickedAt], name: "contact_click_events_property_time_idx")
+  @@map("contact_click_events")
 }
