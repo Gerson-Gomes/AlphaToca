@@ -18,6 +18,7 @@ import favoriteRoutes from './routes/favoriteRoutes';
 import financeRoutes from './routes/financeRoutes';
 import rentalProcessRoutes from './routes/rentalProcessRoutes';
 import conversationRoutes from './routes/conversationRoutes';
+import deeplinkRoutes from './routes/deeplinkRoutes';
 import supportRoutes from './routes/supportRoutes';
 import landlordRoutes from './routes/landlordRoutes';
 import { checkJwt, authSyncMiddleware, requireRole, validateAuthConfig } from './middlewares/authMiddleware';
@@ -88,6 +89,9 @@ app.get('/health/ready', async (_req: Request, res: Response) => {
         timestamp: new Date().toISOString(),
     });
 });
+
+// Ponte de redirecionamento p/ app (pública — browser não tem JWT)
+app.use('/api', deeplinkRoutes);
 
 // Protected routes middleware chain
 const authStack = [checkJwt, authSyncMiddleware];

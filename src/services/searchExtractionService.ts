@@ -54,6 +54,13 @@ function cleanPrice(raw: unknown): number | null {
   return num;
 }
 
+function normalizeNullableString(raw: string | null | undefined): string | null {
+  if (!raw || raw.trim() === "") return null;
+  const lower = raw.trim().toLowerCase();
+  if (lower === "null" || lower === "undefined" || lower === "nenhuma" || lower === "nenhum") return null;
+  return raw.trim();
+}
+
 export const SearchFiltersSchema = z.object({
   intent: z.enum(SEARCH_INTENT_VALUES),
   city: z.string().nullable(),
@@ -119,7 +126,7 @@ export async function extractSearchFilters(
   const parsed = SearchFiltersSchema.parse(raw);
   return {
     intent: parsed.intent,
-    city: parsed.city || null,
+    city: normalizeNullableString(parsed.city),
     state: normalizeState(parsed.state),
     maxPrice: cleanPrice(parsed.maxPrice),
   };
@@ -139,7 +146,7 @@ export function buildSearchResponse(params: {
   if (state) searchParams.set("state", state);
   if (city) searchParams.set("city", city);
   searchParams.set("maxPrice", String(maxPrice));
-  const deepLink = `${appBaseUrl}/search?${searchParams.toString()}`;
+  const deepLink = `${appBaseUrl}/api/deeplink?${searchParams.toString()}`;
 
   const formattedPrice = maxPrice.toLocaleString("pt-BR");
 
