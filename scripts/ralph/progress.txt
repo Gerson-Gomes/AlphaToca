@@ -37,6 +37,9 @@ Started: Thu May  7 2026 (backend-gaps-finais)
 - **Cross-device history persists for ALL users, not just users with an FCM token** (US-013 broadcast). A "cross-device notification history" is only cross-device if it survives the FCM push — i.e., if a user opens the app tomorrow on a device that was offline today, they should still see the broadcast. `broadcastService.sendToAll` now SELECTs every user via `prisma.user.findMany({ select: { id, fcmToken } })` and creates one Notification row per user via `createMany` inside a `$transaction`, THEN dispatches FCM to only the token-holders. If persistence throws (DB down), the FCM dispatch is NEVER attempted — the DB is the source of truth, and a push without a history row is worse than no push at all (the user clicks the push, app opens to /notifications, list is empty → confusion).
 - **Bare array responses for per-user list endpoints** (US-003 support tickets, US-013 notifications). The project convention is: GET endpoints that return a user's own list (support tickets, notifications) return a bare JSON array; admin/paginated endpoints return `{ data, total, page, ... }` envelopes. The /notifications endpoint's OLD shape was `{ data: [...] }` with the full Prisma row; US-013 switched it to a bare array of `NotificationView` (narrow projection) — same move US-003 made. When an AC specifies a bare array shape, do NOT wrap it in an envelope even if the pre-existing endpoint did — the AC shape IS the contract.
 - **`NotificationType` vs `NotificationCategory` are intentionally different enums** (US-013). `NotificationType` is the FCM-dispatch taxonomy (VISIT_SCHEDULED, DOCUMENT_REJECTED, BROADCAST, etc. — one per business trigger); `NotificationCategory` is the coarser UX bucket the /notifications screen uses to colour-code groups (update / announcement / system). A future refactor might be tempted to merge them — don't: the FCM dispatch code needs fine-grained types for deep-link routing, while the UX needs a 3-way bucket for grouping. Keep them separate; the existing `type` column stays on the Notification model as a secondary field for the future-case where the /notifications screen needs to deep-link into the trigger.
+- **Additive verb expansion instead of contract replacement** (US-014). When an AC asks for a new HTTP verb on an existing path (`PUT /notifications/:id/read` next to the pre-existing `PATCH /notifications/:id/read`), ADD the new endpoint alongside the old one rather than mutating the old endpoint's response shape / status code. PATCH returned 200 + `{ data: row }`; PUT returns 204 + empty body with idempotency semantics. Both coexist; Flutter callers migrate at their own pace. Cost: ~8 lines of JSDoc duplication. Benefit: zero breaking change for production builds already in the field. Do NOT aggressively refactor the legacy endpoint during the same story — that's a separate 'deprecate PATCH' ticket.
+- **Idempotency on mark-read is a cross-device correctness invariant** (US-014). When the current row's `readAt` is non-null, the handler MUST NOT overwrite it — preserving the first-read timestamp is what makes the /notifications screen's "read 2 days ago" grouping meaningful on a second device. Gate the mutation with `if (row.readAt === null) prisma.update(...)` and lock it in tests with an explicit `expect(mockUpdate).not.toHaveBeenCalled()` on the already-read branch. Pattern lives in `notificationController.markAsReadIdempotent`.
+- **Narrow `select:` on ownership-check findUnique** (US-014). When a handler only needs `id`, `userId`, and maybe one status field to decide 404/403/mutate, do not pull the full row — pass `select: { id: true, userId: true, readAt: true }`. Shipping less from the DB on a hot path is free, and it makes the assertion in the accompanying test crisper (the test can lock the exact 3-field select shape as a regression tripwire). Apply to any controller that follows the `find → check ownership → maybe mutate` pattern.
 
 ---
 
@@ -793,4 +796,124 @@ than adding a parallel model, per the Codebase Pattern flagged during US-010.
   columns for the same event (sent vs received) would be conceptually
   confusing. The rename is clean and the migration-SQL test locks in data
   preservation.
+---
+
+## 2026-05-07 - US-014 (PUT /api/notifications/:id/read — idempotent cross-device mark-read)
+
+### What was implemented
+
+Added `PUT /api/notifications/:id/read` as the AC-aligned cross-device contract,
+next to the pre-existing `PATCH /notifications/:id/read` (kept unchanged so no
+current frontend caller breaks). The new endpoint is idempotent: if the row was
+already read on another device, the second `PUT` does NOT overwrite `readAt` —
+that's the whole point of "cross-device history", the timestamp must reflect the
+first read, not the latest sync.
+
+- New controller method `notificationController.markAsReadIdempotent` (src/controllers/notificationController.ts):
+  - 401 guard for missing localUser (uses the same envelope as `list`).
+  - `prisma.notification.findUnique({ where: { id }, select: { id, userId, readAt } })`
+    — narrow select; we don't need `title`/`body`/`category` for an ownership
+    check, and shipping less data from the DB on a hot path is free.
+  - 404 when row is missing.
+  - 403 when `notification.userId !== req.localUser.id` (explicit 403/404 split,
+    see deviation note below).
+  - Idempotency gate: `if (notification.readAt === null)` → run `prisma.notification.update({
+    where: { id }, data: { readAt: new Date() } })`; otherwise skip the write.
+  - `res.status(204).send()` on the happy path. Matches the project convention
+    (userController / favoriteController / propertyController / visitController
+    all use `res.status(204).send()` for "success, no body").
+
+- Route wired in src/routes/notificationRoutes.ts below the existing PATCH,
+  inheriting `authStack` via the existing `app.use('/api', authStack, notificationRoutes)`
+  mount in src/app.ts. No app.ts change needed.
+
+### Why a separate endpoint instead of modifying the existing PATCH
+
+The existing `PATCH /notifications/:id/read` is the LL-rollout legacy endpoint —
+it returns 200 with the full updated row (ENVELOPE shape `{ data: <row> }`) and
+overwrites `readAt` unconditionally on every call. Changing its contract now to
+match US-014 would be a breaking change for any existing Flutter call site that
+either (a) reads `res.body.data.readAt` to render the mark-read timestamp locally,
+or (b) checks `res.status === 200` vs `=== 204`. The safer move is to add PUT
+as the new cross-device contract (204, idempotent) and let the Flutter chat PR
+migrate callers at their own pace. Eventually the PATCH can be deprecated, but
+not as a side-effect of this story.
+
+### Intentional AC deviations (documented)
+
+1. **Kept the 403/404 split explicit** — AC says '403 for non-owner, 404 for
+   missing id'. This does NOT follow the chat-family existence-hiding convention
+   from LL-012/LL-013/LL-015 because notification ids are not user-enumerable —
+   there is no `POST /notifications/resolve` creation surface and no seed
+   mechanism that would let an authenticated attacker enumerate valid notification
+   UUIDs by probing 403 vs 404. Separately, the frontend relies on
+   distinguishable 403 vs 404 for UX copy ('você perdeu acesso a esta
+   notificação' vs 'essa notificação foi apagada'). So aligning with the AC is
+   correct here even though chat endpoints take a different posture.
+
+2. **Kept the legacy PATCH endpoint alongside the new PUT.** The AC says 'Add
+   PUT', not 'replace PATCH'. Both endpoints exist now. Migration of Flutter
+   callers to PUT is a frontend ticket, not a blocker for US-014.
+
+### Files changed
+
+- `src/controllers/notificationController.ts` — added `markAsReadIdempotent` method.
+- `src/routes/notificationRoutes.ts` — added `router.put('/notifications/:id/read', ...)` + Swagger block.
+- `tests/notificationMarkRead.test.ts` — new test file, 7 cases.
+- `scripts/ralph/prd.json` — flipped US-014 passes: true + notes.
+- `scripts/ralph/progress.txt` — this entry.
+
+### Tests
+
+`tests/notificationMarkRead.test.ts` — 7 cases, all passing:
+- 204 happy path: unread row → update called with `{ readAt: Date }`; response
+  204 with empty body; findUnique called with the narrow 3-column select.
+- 204 idempotent: already-read row → update NEVER called (critical: original
+  readAt is preserved across devices).
+- 403 non-owner: user A calls on user B's row → no write.
+- 404 missing id: no write.
+- 401 missing Authorization header: no findUnique, no update.
+- 403 cross-user isolation: user B calls on user A's row → 403, no write.
+- 500 passthrough: findUnique rejects → surfaced via errorHandler; update
+  never called (defensive — the write must NEVER fire if the find failed).
+
+### Verification
+
+- `npx tsc --noEmit` → clean.
+- `npx vitest run tests/notificationMarkRead.test.ts` → 7/7 pass.
+- `npx vitest run` full suite → **23 failed / 672 passed / 73 files**.
+  +7 new passing tests vs US-013 baseline of 665. Same 6 pre-existing failing
+  files (auth/rag/ingest/userSync/visitValidation). Zero regression.
+
+### Learnings for future iterations
+
+- **When an AC asks for a new verb on an existing path, prefer adding the new
+  verb alongside the old one if the old contract is locked by production
+  callers.** `PUT` and `PATCH` on `/notifications/:id/read` now coexist —
+  different status codes (204 vs 200), different body shapes (empty vs
+  `{ data: row }`), different idempotency semantics. The cost is a few lines
+  of JSDoc duplication; the benefit is zero breaking change for any Flutter
+  build already in the field.
+
+- **Idempotency on mark-read is cross-device correctness, not just politeness.**
+  If the second call overwrote `readAt`, the UI on device B would show the
+  read timestamp as "now" instead of "when you first read it on device A" —
+  that's a meaningful UX regression for the /notifications screen's grouping
+  logic ('read 2 days ago' vs 'read just now'). Lock idempotency with an
+  explicit `not.toHaveBeenCalled()` assertion on the update mock for the
+  already-read branch.
+
+- **`findUnique` with a narrow `select:` on ownership checks.** When a handler
+  only needs `id`, `userId`, and maybe one status field to decide 404/403/mutate,
+  do not pull the full row. Shipping less data from the DB on a hot path is
+  free optimization with zero behavioral cost. Pattern now lives in
+  `notificationController.markAsReadIdempotent`.
+
+- **Pre-flight 401 guard before touching `req.localUser.id`.** The existing
+  `markAsRead` method reads `(req as any).localUser.id` unconditionally — fine
+  when the route is ALWAYS behind authStack, but if authStack is ever swapped
+  for a route-level middleware chain that doesn't guarantee `localUser`, the
+  crash is a 500 instead of a clean 401. The new `markAsReadIdempotent` does
+  an explicit `if (!userId) return 401` as a defensive belt. Cheap insurance.
+
 ---

@@ -122,4 +122,35 @@ router.patch('/notifications/read-all', notificationController.markAllAsRead);
  */
 router.patch('/notifications/:id/read', notificationController.markAsRead);
 
+/**
+ * @swagger
+ * /notifications/{id}/read:
+ *   put:
+ *     summary: Marca uma notificação como lida (idempotente, cross-device — US-014)
+ *     description: |
+ *       Variante idempotente do mark-as-read. Se a notificação já está lida,
+ *       retorna 204 sem atualizar `readAt` (preserva o timestamp original do
+ *       primeiro dispositivo que a leu). Sempre retorna 204 em caminhos
+ *       felizes — clientes podem usar fire-and-forget sem parsear o body.
+ *     tags: [Notifications]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       204:
+ *         description: Notificação marcada (ou já estava marcada — idempotente)
+ *       401:
+ *         description: Token ausente ou inválido
+ *       403:
+ *         description: Notificação não pertence ao usuário
+ *       404:
+ *         description: Notificação não encontrada
+ */
+router.put('/notifications/:id/read', notificationController.markAsReadIdempotent);
+
 export default router;
