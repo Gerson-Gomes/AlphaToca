@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { VisitSource } from '@prisma/client';
 import {
   createVisit,
   listVisits,
@@ -14,6 +15,15 @@ import {
   listVisitsQuerySchema,
   availabilityQuerySchema,
 } from '../utils/visitValidation';
+
+// US-012 / Open Question #6: the `ai-agent` scope on the JWT hasn't been
+// defined yet. Until it exists, every human caller must be treated as
+// lacking it — so source=AI submitted via the public POST /api/visits body
+// is downgraded to MANUAL on the server. When the scope lands, replace this
+// with a real claim check (e.g., req.localUser.scopes?.includes('ai-agent')).
+function callerHasAiAgentScope(_req: Request): boolean {
+  return false;
+}
 
 function handleVisitError(err: unknown, res: Response, next: NextFunction): boolean {
   if (err instanceof VisitError) {
@@ -33,7 +43,10 @@ export const visitController = {
   async create(req: Request, res: Response, next: NextFunction) {
     try {
       const input = createVisitSchema.parse(req.body);
-      const visit = await createVisit(input);
+      const effectiveSource = callerHasAiAgentScope(req)
+        ? input.source
+        : VisitSource.MANUAL;
+      const visit = await createVisit({ ...input, source: effectiveSource });
       return res.status(201).json(visit);
     } catch (err) {
       if (err instanceof VisitError) {

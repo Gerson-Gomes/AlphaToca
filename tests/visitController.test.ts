@@ -130,6 +130,74 @@ describe('visitController.create', () => {
       expect.objectContaining({ code: 'CONFLICT' }),
     );
   });
+
+  // US-012 / Open Question #6: until the `ai-agent` JWT scope is defined,
+  // every human caller must be treated as lacking it. POST /api/visits
+  // therefore downgrades source=AI to MANUAL server-side, regardless of
+  // what the client sent. When the scope lands, this guard flips to a
+  // real claim check in visitController.create.
+  it('forwards source=MANUAL to the service when the body omits source', async () => {
+    mockCreateVisit.mockResolvedValueOnce({ id: 'v-1', source: 'MANUAL' });
+    const req = {
+      body: {
+        propertyId: '11111111-1111-1111-1111-111111111111',
+        tenantId: '22222222-2222-2222-2222-222222222222',
+        scheduledAt: '2026-05-10T14:00:00Z',
+      },
+    } as unknown as Request;
+    const res = mockRes();
+
+    await visitController.create(req, res, mockNext);
+
+    expect(mockCreateVisit).toHaveBeenCalledTimes(1);
+    expect(mockCreateVisit).toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'MANUAL' }),
+    );
+  });
+
+  it('forwards source=MANUAL to the service when the body sends source=MANUAL', async () => {
+    mockCreateVisit.mockResolvedValueOnce({ id: 'v-1', source: 'MANUAL' });
+    const req = {
+      body: {
+        propertyId: '11111111-1111-1111-1111-111111111111',
+        tenantId: '22222222-2222-2222-2222-222222222222',
+        scheduledAt: '2026-05-10T14:00:00Z',
+        source: 'MANUAL',
+      },
+    } as unknown as Request;
+    const res = mockRes();
+
+    await visitController.create(req, res, mockNext);
+
+    expect(mockCreateVisit).toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'MANUAL' }),
+    );
+  });
+
+  it('downgrades source=AI to MANUAL when the caller lacks the ai-agent scope (always, today)', async () => {
+    mockCreateVisit.mockResolvedValueOnce({ id: 'v-1', source: 'MANUAL' });
+    const req = {
+      body: {
+        propertyId: '11111111-1111-1111-1111-111111111111',
+        tenantId: '22222222-2222-2222-2222-222222222222',
+        scheduledAt: '2026-05-10T14:00:00Z',
+        source: 'AI',
+      },
+      localUser: { id: 'user-1', role: 'TENANT' },
+    } as unknown as Request;
+    const res = mockRes();
+
+    await visitController.create(req, res, mockNext);
+
+    expect(mockCreateVisit).toHaveBeenCalledTimes(1);
+    expect(mockCreateVisit).toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'MANUAL' }),
+    );
+    // Sanity: the AI value MUST NOT have reached the service.
+    expect(mockCreateVisit).not.toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'AI' }),
+    );
+  });
 });
 
 describe('visitController.list', () => {

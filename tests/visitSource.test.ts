@@ -126,7 +126,7 @@ describe('createVisitSchema — source default', () => {
   });
 });
 
-describe('visitService.createVisit — source persistence', () => {
+describe('visitService.createVisit — source persistence (pure service layer)', () => {
   it('persists MANUAL by default (no source in body)', async () => {
     const h = makeDeps({ properties: [{ id: 'prop-1', landlordId: 'landlord-1' }] });
 
@@ -145,7 +145,13 @@ describe('visitService.createVisit — source persistence', () => {
     );
   });
 
-  it('persists AI when caller passes source=AI', async () => {
+  // US-012: the service itself is a pure persistence layer — it honors
+  // whatever `source` it's given. The AI-agent-scope gate lives in the
+  // controller (visitController.create), not here. When the future
+  // ai-agent flow lands and legitimately passes source=AI, the service
+  // will persist it unchanged. See the controller-level test below for
+  // the end-to-end downgrade contract.
+  it('persists AI when the service layer is called with source=AI directly', async () => {
     const h = makeDeps({ properties: [{ id: 'prop-1', landlordId: 'landlord-1' }] });
 
     const parsed = createVisitSchema.parse({
