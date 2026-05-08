@@ -151,6 +151,7 @@ model User {
   conversationsAsTenant   Conversation[] @relation("TenantConversations")
   supportTicketsOpened    SupportTicket[] @relation("SupportTicketOpener")
   supportTicketsAssigned  SupportTicket[] @relation("SupportTicketAssignee")
+  supportTicketMessages   SupportTicketMessage[] @relation("SupportMessageSender")
   profileViewsReceived    ProfileView[]   @relation("LandlordProfileViews")
 
   @@map("users")
@@ -580,11 +581,30 @@ model SupportTicket {
 
   user       User  @relation("SupportTicketOpener", fields: [userId], references: [id], onDelete: Cascade)
   assignedTo User? @relation("SupportTicketAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  messages   SupportTicketMessage[] @relation("TicketMessages")
 
   @@index([status, createdAt], name: "support_tickets_status_created_idx")
   @@index([userRole, createdAt], name: "support_tickets_role_created_idx")
   @@index([userId], name: "support_tickets_user_idx")
   @@map("support_tickets")
+}
+
+// Mensagens trocadas dentro de um ticket de suporte entre o opener
+// (tenant/landlord) e o admin. Cada mensagem é associada a um ticket
+// e a um usuário remetente. Ordenação por timestamp ASC na listagem.
+model SupportTicketMessage {
+  id         String          @id @default(uuid())
+  ticketId   String          @map("ticket_id")
+  senderId   String          @map("sender_id")
+  senderRole SupportUserRole @map("sender_role")
+  content    String          @db.Text
+  timestamp  DateTime        @default(now())
+
+  ticket SupportTicket @relation("TicketMessages", fields: [ticketId], references: [id], onDelete: Cascade)
+  sender User          @relation("SupportMessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, timestamp])
+  @@map("support_ticket_messages")
 }
 
 // Thread de chat canônico entre um (landlord, tenant) em torno de um Property.

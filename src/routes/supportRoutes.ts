@@ -84,6 +84,32 @@ const adminOnly = requireRole('ADMIN');
 router.post('/support/tickets', supportTicketController.create);
 
 /**
+ * GET /api/support/tickets
+ *
+ * Lista os tickets do próprio usuário autenticado. Sem paginação —
+ * retorna array simples ordenado por createdAt DESC. Inclui a última
+ * mensagem de cada ticket como preview.
+ */
+router.get('/support/tickets', supportTicketController.listForUser);
+
+/**
+ * GET /api/support/tickets/:id/messages
+ *
+ * Lista todas as mensagens de um ticket em ordem cronológica.
+ * Acesso: opener do ticket ou admin.
+ */
+router.get('/support/tickets/:id/messages', supportTicketController.getMessages);
+
+/**
+ * POST /api/support/tickets/:id/messages
+ *
+ * Envia uma mensagem no chat do ticket. Side-effect: emite evento
+ * support_ticket_message via WebSocket.
+ * Acesso: opener do ticket ou admin.
+ */
+router.post('/support/tickets/:id/messages', supportTicketController.sendMessage);
+
+/**
  * @swagger
  * /admin/support/tickets:
  *   get:

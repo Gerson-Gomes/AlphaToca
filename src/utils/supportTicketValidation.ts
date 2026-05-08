@@ -87,3 +87,10 @@ export const updateSupportTicketSchema = z
   );
 
 export type UpdateSupportTicketInput = z.infer<typeof updateSupportTicketSchema>;
+
+// Body de POST /api/support/tickets/:id/messages
+export const sendTicketMessageSchema = z.object({
+  content: z.string().min(1, 'Message content is required').max(4000),
+});
+
+export type SendTicketMessageInput = z.infer<typeof sendTicketMessageSchema>;

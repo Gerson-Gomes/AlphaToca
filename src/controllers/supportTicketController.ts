@@ -1,11 +1,14 @@
 import { Request, Response, NextFunction } from 'express';
 import { SupportUserRole } from '@prisma/client';
 import { supportTicketService, SupportTicketError } from '../services/supportTicketService';
+import { supportTicketMessageService, SupportTicketMessageError } from '../services/supportTicketMessageService';
+import { supportTicketSocketService } from '../services/supportTicketSocketService';
 import { supportEmailService } from '../services/supportEmailService';
 import {
   createSupportTicketSchema,
   listSupportTicketsQuerySchema,
   updateSupportTicketSchema,
+  sendTicketMessageSchema,
 } from '../utils/supportTicketValidation';
 import { z } from 'zod';
 import { logger } from '../config/logger';
@@ -204,11 +207,147 @@ export const supportTicketController = {
             '[supportTicket] sendTicketUpdated threw unexpectedly',
           );
         });
+
+        // Emite mudança de status via WebSocket para o opener e admins
+        if (view.user?.id) {
+          supportTicketSocketService.emitTicketUpdated(view.id, view.user.id, {
+            ticketId: view.id,
+            status: view.status,
+            resolution: view.resolution,
+          });
+        }
       }
 
       return res.status(200).json(view);
     } catch (error) {
       if (error instanceof SupportTicketError) {
+        return res.status(error.httpStatus).json({
+          status: error.httpStatus,
+          code: error.code,
+          messages: [{ message: error.message }],
+        });
+      }
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/support/tickets
+   *
+   * Lista os tickets do próprio usuário autenticado (tenant, landlord ou admin).
+   * Diferente do GET /admin/support/tickets (admin-only com filtros e paginação),
+   * esta rota retorna apenas os tickets do caller, sem paginação.
+   */
+  async listForUser(req: Request, res: Response, next: NextFunction) {
+    try {
+      const localUser = req.localUser;
+      if (!localUser) {
+        return res.status(401).json({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          messages: [{ message: 'Authentication required.' }],
+        });
+      }
+
+      const tickets = await supportTicketService.listForUser(localUser.id);
+      return res.status(200).json(tickets);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/support/tickets/:id/messages
+   *
+   * Lista todas as mensagens de um ticket. Acesso permitido ao opener do ticket
+   * ou a qualquer admin.
+   */
+  async getMessages(req: Request, res: Response, next: NextFunction) {
+    try {
+      const localUser = req.localUser;
+      if (!localUser) {
+        return res.status(401).json({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          messages: [{ message: 'Authentication required.' }],
+        });
+      }
+
+      const ticketId = req.params.id;
+      const ticket = await supportTicketService.findById(ticketId);
+
+      if (!ticket) {
+        return res.status(404).json({
+          status: 404,
+          code: 'TICKET_NOT_FOUND',
+          messages: [{ message: `Ticket ${ticketId} not found.` }],
+        });
+      }
+
+      const isOpener = ticket.userId === localUser.id;
+      const isAdmin = localUser.role === 'ADMIN';
+      if (!isOpener && !isAdmin) {
+        return res.status(403).json({
+          status: 403,
+          code: 'FORBIDDEN',
+          messages: [{ message: 'Only the ticket opener or admins can view messages.' }],
+        });
+      }
+
+      const messages = await supportTicketMessageService.list(ticketId);
+      return res.status(200).json(messages);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * POST /api/support/tickets/:id/messages
+   *
+   * Envia uma mensagem no chat do ticket. Acesso: opener do ticket ou admin.
+   * Side-effect: emite evento support_ticket_message via WebSocket para
+   * o opener e para admins.
+   */
+  async sendMessage(req: Request, res: Response, next: NextFunction) {
+    try {
+      const localUser = req.localUser;
+      if (!localUser) {
+        return res.status(401).json({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          messages: [{ message: 'Authentication required.' }],
+        });
+      }
+
+      const ticketId = req.params.id;
+      const { content } = sendTicketMessageSchema.parse(req.body);
+
+      const message = await supportTicketMessageService.send({
+        ticketId,
+        senderId: localUser.id,
+        senderRole: mapAuthorRole(localUser.role),
+        content,
+      });
+
+      // Emite via WebSocket para o opener e admins
+      const ticket = await supportTicketService.findById(ticketId);
+      if (ticket) {
+        supportTicketSocketService.emitTicketMessage(ticketId, ticket.userId, {
+          ticketId,
+          message: {
+            id: message.id,
+            ticketId: message.ticketId,
+            senderId: message.senderId,
+            senderRole: message.senderRole,
+            content: message.content,
+            timestamp: message.timestamp,
+          },
+        });
+      }
+
+      return res.status(201).json(message);
+    } catch (error) {
+      if (error instanceof SupportTicketMessageError) {
         return res.status(error.httpStatus).json({
           status: error.httpStatus,
           code: error.code,

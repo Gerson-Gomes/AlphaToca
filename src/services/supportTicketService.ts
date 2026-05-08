@@ -155,6 +155,31 @@ export const supportTicketService = {
   },
 
   /**
+   * Lista tickets do próprio usuário (não-admin). Sem paginação,
+   * ordenado por createdAt DESC.
+   */
+  async listForUser(userId: string) {
+    return prisma.supportTicket.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        messages: {
+          orderBy: { timestamp: 'asc' },
+          take: 1,
+        },
+      },
+    });
+  },
+
+  /**
+   * Busca um ticket por ID (UUID). Usado internamente para verificar
+   * existência e autorização antes de operações de mensagem.
+   */
+  async findById(id: string) {
+    return prisma.supportTicket.findUnique({ where: { id } });
+  },
+
+  /**
    * Admin-only update (US-020). Atualiza status / resolution / assignedToId.
    *
    * Validações de negócio:
