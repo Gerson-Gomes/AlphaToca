@@ -13,6 +13,8 @@ Started: Sat May  9 03:38:23 AM -03 2026
 - Postgres DDL idempotency: `CREATE DATABASE` does NOT support `IF NOT EXISTS`; gate with `SELECT 1 FROM pg_database WHERE datname='…'` first. `CREATE ROLE` should be wrapped in a `DO $$ … IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='…') THEN CREATE ROLE … END IF; END $$;` block.
 - Apt PG paths on Debian/Ubuntu after `postgresql-16` install: configs at `/etc/postgresql/16/main/{postgresql,pg_hba}.conf`, service unit `postgresql`. Don't try to discover paths dynamically; this is the convention every operator script assumes.
 - Modern apt repo signing: keyrings live at `/etc/apt/keyrings/`, source entries use `[signed-by=…]`. Do not use `apt-key add` (deprecated). The 01-provision-postgres.sh PGDG setup follows this pattern — copy it for any future apt-repo additions.
+- `pg_dump --jobs=N` is incompatible with `--format=custom`; parallel dump only works with `--format=directory`. The PRD AC for US-003 listed both — scripts here resolve the conflict by keeping `--format=custom` (single-file, easier scp/checksum) and dropping `--jobs`. Parallel restore (`pg_restore --jobs=4`) IS supported with custom-format dumps and is used in 03-restore-local.sh. Document the choice in a header comment so future readers don't "fix" it back.
+- Timestamps in operator artefacts (dump files, backups) use UTC ISO basic format: `date -u +%Y%m%dT%H%M%SZ` (e.g., `20260509T034512Z`). Avoid local time / colons — both confuse downstream tools and SCP filenames.
 
 ---
 
@@ -49,4 +51,22 @@ Started: Sat May  9 03:38:23 AM -03 2026
   - For postgresql.conf/pg_hba.conf .bak preservation across re-runs, do NOT use `sed -i.bak` (it overwrites .bak with the already-modified file on rerun). Pattern used: `cp -p` to .bak only when .bak does not yet exist, then sed without the suffix (or with a scratch `.tmp` that is immediately deleted). Future scripts (04-cutover-env.sh) should follow the same idiom for `.env.pre-supabase-cutover.bak`.
   - The PGDG repo setup uses the keyring at `/etc/apt/keyrings/postgresql.gpg` and a `signed-by=` source entry — this is the modern (post-`apt-key`) pattern. Don't regress to `apt-key add`.
   - Smoke-test caveat: when the role pre-existed (re-run with no fresh password generated), the script cannot test `\conninfo` over TCP without `PGPASSWORD` from the operator. The script warns rather than fails — re-runs after the first successful run should not be blocked by a missing password.
+---
+
+## 2026-05-09 - US-003
+- Authored `scripts/db-migration/02-dump-supabase.sh` — produces a custom-format pg_dump from the Supabase DIRECT_URL and validates it.
+- Files changed:
+  - `scripts/db-migration/02-dump-supabase.sh` (new, +x) — header comment documents `--jobs` vs `--format=custom` incompatibility and the explicit choice to drop `--jobs`. Steps: validate `SUPABASE_DIRECT_URL` is set / contains `:5432` / rejects `:6543` with pooler explanation → `pg_dump --version` parsed and warned-not-failed when < 16 → optional source DB size via `psql pg_size_pretty(pg_database_size(current_database()))` → `pg_dump --format=custom --no-owner --no-privileges --verbose --file=imoveis-supabase-<UTC-iso-basic>.dump $SUPABASE_DIRECT_URL` → `pg_restore --list` capture to `<file>.toc` for audit → final summary printing absolute path, `du -h` size, TOC path, and source size.
+  - `scripts/ralph/prd.json` — flipped US-003 `passes` to `true`, added implementation notes.
+- Acceptance verification:
+  - `bash -n scripts/db-migration/02-dump-supabase.sh` → exits 0.
+  - `chmod +x` confirmed (`-rwxr-xr-x`).
+  - URL validation paths exercised by reading: missing URL, `:6543`, no `:5432` each fail with distinct messages; valid URL proceeds.
+  - `npx tsc --noEmit` → only the 3 pre-existing `supportTicket*` errors from main; zero new errors.
+- **Learnings for future iterations:**
+  - The PRD wrote `pg_dump --format=custom --jobs=4` literally. Postgres rejects this combination at runtime (`--jobs` requires `--format=directory`). Resolution: keep `--format=custom` for the single-file ergonomics and document the trade-off; parallelism is recovered on the restore side via `pg_restore --jobs=4`. Future scripts that quote PRD commands verbatim should sanity-check them against `pg_dump --help`.
+  - `readlink -f` is the right way to resolve absolute paths inside the dump-summary output: it survives relative invocations (`./02-dump-supabase.sh`) and symlinked CWDs without depending on `pwd` capture.
+  - Use `pg_dump --verbose` (not `-v`, which would conflict with `psql -v`); the long form is unambiguous and matches the rest of the script's flag style.
+  - For psql connection-string commands, ALWAYS quote the URL: `psql "$SUPABASE_DIRECT_URL" -tAc "…"`. Unquoted URLs with `?` query strings (e.g., `?sslmode=require`) get glob-expanded by bash and silently break.
+  - The TOC artefact (`<file>.toc`) is small (a few KB) and immensely useful for the operator's audit trail — it doubles as an extension list for `03-restore-local.sh`'s `pg_restore --list | grep EXTENSION` step.
 ---

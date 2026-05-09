@@ -60,8 +60,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented 2026-05-09. scripts/db-migration/02-dump-supabase.sh authored, chmod +x. Validates SUPABASE_DIRECT_URL is set, contains :5432, and rejects :6543 with explicit pooler-incompatibility message. pg_dump major-version parsed via awk; warns (does not abort) when < 16. Source DB size queried via psql pg_size_pretty for restore comparison. Dump runs as `pg_dump --format=custom --no-owner --no-privileges --verbose --file=imoveis-supabase-<UTC-timestamp>.dump`; --jobs=4 deliberately dropped because it requires --format=directory — rationale documented at the top of the script. Post-dump validation runs `pg_restore --list` into <file>.toc. Final summary prints absolute path via readlink -f, du -h size, TOC path, and source size for the operator to record. `bash -n` passes; typecheck shows only the 3 pre-existing supportTicket* errors that exist on main."
     },
     {
       "id": "US-004",
