@@ -74,6 +74,17 @@ export function initializeSocket(server: HttpServer): Server {
       '[Socket.IO] client connected',
     );
 
+    // Ticket support chat: join/leave rooms para acompanhar tickets em tempo real
+    socket.on('join_ticket', (ticketId: string) => {
+      socket.join(`ticket:${ticketId}`);
+      logger.info({ userId, ticketId }, '[Socket.IO] joined ticket room');
+    });
+
+    socket.on('leave_ticket', (ticketId: string) => {
+      socket.leave(`ticket:${ticketId}`);
+      logger.info({ userId, ticketId }, '[Socket.IO] left ticket room');
+    });
+
     socket.on('disconnect', (reason) => {
       socket.leave(`user:${userId}`);
       if (role === 'LANDLORD') {

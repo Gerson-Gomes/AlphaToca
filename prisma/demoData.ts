@@ -329,7 +329,7 @@ export const demoPropertyImages = [
   {
     id: DEMO_IMAGE_RJ_1_ID,
     propertyId: DEMO_PROPERTY_RJ_1_ID,
-    url: `https://lab.alphaedtech.org.br/server01/api/uploads/${DEMO_PROPERTY_RJ_1_ID}/0001.png`,
+    url: `/uploads/${DEMO_PROPERTY_RJ_1_ID}/0001.png`,
     isCover: true,
     caption: 'Fachada Principal',
     createdAt: new Date(),
@@ -337,7 +337,7 @@ export const demoPropertyImages = [
   {
     id: DEMO_IMAGE_RJ_2_ID,
     propertyId: DEMO_PROPERTY_RJ_1_ID,
-    url: `https://lab.alphaedtech.org.br/server01/api/uploads/${DEMO_PROPERTY_RJ_1_ID}/0002.png`,
+    url: `/uploads/${DEMO_PROPERTY_RJ_1_ID}/0002.png`,
     isCover: false,
     caption: 'Sala de Estar',
     createdAt: new Date(),
@@ -345,7 +345,7 @@ export const demoPropertyImages = [
   {
     id: DEMO_IMAGE_RJ_3_ID,
     propertyId: DEMO_PROPERTY_RJ_1_ID,
-    url: `https://lab.alphaedtech.org.br/server01/api/uploads/${DEMO_PROPERTY_RJ_1_ID}/0003.png`,
+    url: `/uploads/${DEMO_PROPERTY_RJ_1_ID}/0003.png`,
     isCover: false,
     caption: 'Cozinha',
     createdAt: new Date(),
@@ -353,7 +353,7 @@ export const demoPropertyImages = [
   {
     id: DEMO_IMAGE_RJ_4_ID,
     propertyId: DEMO_PROPERTY_RJ_1_ID,
-    url: `https://lab.alphaedtech.org.br/server01/api/uploads/${DEMO_PROPERTY_RJ_1_ID}/0004.png`,
+    url: `/uploads/${DEMO_PROPERTY_RJ_1_ID}/0004.png`,
     isCover: false,
     caption: 'Quarto',
     createdAt: new Date(),
@@ -361,7 +361,7 @@ export const demoPropertyImages = [
   {
     id: DEMO_IMAGE_RJ2_1_ID,
     propertyId: DEMO_PROPERTY_RJ_2_ID,
-    url: `http://lab.alphaedtech.org.br/server01/api/uploads/${DEMO_PROPERTY_RJ_2_ID}/0001.png`,
+    url: `/uploads/${DEMO_PROPERTY_RJ_2_ID}/0001.png`,
     isCover: true,
     caption: 'Sala',
     createdAt: new Date(),
@@ -369,7 +369,7 @@ export const demoPropertyImages = [
   {
     id: DEMO_IMAGE_RJ2_2_ID,
     propertyId: DEMO_PROPERTY_RJ_2_ID,
-    url: `http://lab.alphaedtech.org.br/server01/api/uploads/${DEMO_PROPERTY_RJ_2_ID}/0002.png`,
+    url: `/uploads/${DEMO_PROPERTY_RJ_2_ID}/0002.png`,
     isCover: false,
     caption: 'Quarto',
     createdAt: new Date(),
@@ -377,7 +377,7 @@ export const demoPropertyImages = [
   {
     id: DEMO_IMAGE_RJ2_3_ID,
     propertyId: DEMO_PROPERTY_RJ_2_ID,
-    url: `http://lab.alphaedtech.org.br/server01/api/uploads/${DEMO_PROPERTY_RJ_2_ID}/0003.png`,
+    url: `/uploads/${DEMO_PROPERTY_RJ_2_ID}/0003.png`,
     isCover: false,
     caption: 'Banheiro',
     createdAt: new Date(),
@@ -385,7 +385,7 @@ export const demoPropertyImages = [
   {
     id: DEMO_IMAGE_RJ2_4_ID,
     propertyId: DEMO_PROPERTY_RJ_2_ID,
-    url: `http://lab.alphaedtech.org.br/server01/api/uploads/${DEMO_PROPERTY_RJ_2_ID}/0004.png`,
+    url: `/uploads/${DEMO_PROPERTY_RJ_2_ID}/0004.png`,
     isCover: false,
     caption: 'Cozinha',
     createdAt: new Date(),
@@ -393,7 +393,7 @@ export const demoPropertyImages = [
   {
     id: DEMO_IMAGE_RJ3_1_ID,
     propertyId: DEMO_PROPERTY_RJ_3_ID,
-    url: `http://lab.alphaedtech.org.br/server01/api/uploads/${DEMO_PROPERTY_RJ_3_ID}/0001.jpeg`,
+    url: `/uploads/${DEMO_PROPERTY_RJ_3_ID}/0001.jpeg`,
     isCover: true,
     caption: 'Estudio',
     createdAt: new Date(),
@@ -401,7 +401,7 @@ export const demoPropertyImages = [
   {
     id: DEMO_IMAGE_RJ3_2_ID,
     propertyId: DEMO_PROPERTY_RJ_3_ID,
-    url: `http://lab.alphaedtech.org.br/server01/api/uploads/${DEMO_PROPERTY_RJ_3_ID}/0002.jpeg`,
+    url: `/uploads/${DEMO_PROPERTY_RJ_3_ID}/0002.jpeg`,
     isCover: false,
     caption: 'Estudio',
     createdAt: new Date(),

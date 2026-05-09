@@ -155,43 +155,28 @@ export const supportTicketService = {
   },
 
   /**
-   * Lista os tickets abertos pelo próprio usuário autenticado (US-003).
-   *
-   * Filtra estritamente por `userId = author.id` — nunca mistura tickets de
-   * outros usuários, mesmo para ADMIN. Admins que quiserem o painel de triage
-   * devem usar `GET /api/admin/support/tickets` (vide `list`).
-   *
-   * Ordem: `createdAt DESC` (alinhado com o contrato do admin list — mais
-   * recente primeiro, o que também bate com a forma que o cache local do
-   * frontend já armazena a tela /support).
-   *
-   * Shape: campos mínimos que o frontend precisa para reconstituir a lista
-   * (`id`, `code`, `title`, `description`, `createdAt`, `status`). Campos
-   * admin-only (`user`, `assignedTo`, `resolution`, `userRole`, `updatedAt`)
-   * ficam de fora — ruído para o próprio dono do ticket.
+   * Lista tickets do próprio usuário (não-admin). Sem paginação,
+   * ordenado por createdAt DESC. Inclui a última mensagem como preview.
    */
-  async listForUser(userId: string): Promise<SupportTicketUserView[]> {
-    const rows = await prisma.supportTicket.findMany({
+  async listForUser(userId: string) {
+    return prisma.supportTicket.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        code: true,
-        title: true,
-        description: true,
-        createdAt: true,
-        status: true,
+      include: {
+        messages: {
+          orderBy: { timestamp: 'asc' },
+          take: 1,
+        },
       },
     });
+  },
 
-    return rows.map((r) => ({
-      id: r.id,
-      code: r.code,
-      title: r.title,
-      description: r.description,
-      createdAt: r.createdAt.toISOString(),
-      status: r.status,
-    }));
+  /**
+   * Busca um ticket por ID (UUID). Usado internamente para verificar
+   * existência e autorização antes de operações de mensagem.
+   */
+  async findById(id: string) {
+    return prisma.supportTicket.findUnique({ where: { id } });
   },
 
   /**

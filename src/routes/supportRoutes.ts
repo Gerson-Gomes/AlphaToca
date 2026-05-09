@@ -84,56 +84,30 @@ const adminOnly = requireRole('ADMIN');
 router.post('/support/tickets', supportTicketController.create);
 
 /**
- * @swagger
- * /support/tickets:
- *   get:
- *     summary: Listar meus tickets de suporte (US-003)
- *     description: |
- *       Retorna a lista de tickets abertos pelo próprio usuário autenticado,
- *       ordenados por `createdAt DESC` (mais recente primeiro).
+ * GET /api/support/tickets
  *
- *       Este endpoint é pareado com `POST /support/tickets`: ele dá ao
- *       frontend a fonte de verdade para a tela `/support`, substituindo o
- *       fallback de cache local que existia antes deste rollout.
- *
- *       O filtro por `userId = req.localUser.id` é aplicado no service. Um
- *       usuário NUNCA vê tickets de outro usuário por este endpoint, mesmo
- *       que seja ADMIN — admins devem usar `GET /admin/support/tickets` para
- *       triage.
- *
- *       A shape é enxuta (sem `user`, `assignedTo`, `resolution`) porque o
- *       dono do ticket já sabe quem o abriu e a tela não mostra os dados de
- *       triage interno.
- *     tags: [Support]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Lista dos tickets do usuário (pode ser vazia).
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 type: object
- *                 required: [id, code, title, description, createdAt, status]
- *                 properties:
- *                   id: { type: string, format: uuid }
- *                   code:
- *                     type: string
- *                     pattern: '^SUP-\d{6}-[A-Z0-9]{4}$'
- *                   title: { type: string }
- *                   description: { type: string }
- *                   createdAt: { type: string, format: date-time }
- *                   status: { type: string, enum: [OPEN, RESOLVED] }
- *       401:
- *         description: Token ausente ou inválido.
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
+ * Lista os tickets do próprio usuário autenticado. Sem paginação —
+ * retorna array simples ordenado por createdAt DESC. Inclui a última
+ * mensagem de cada ticket como preview.
  */
 router.get('/support/tickets', supportTicketController.listForUser);
+
+/**
+ * GET /api/support/tickets/:id/messages
+ *
+ * Lista todas as mensagens de um ticket em ordem cronológica.
+ * Acesso: opener do ticket ou admin.
+ */
+router.get('/support/tickets/:id/messages', supportTicketController.getMessages);
+
+/**
+ * POST /api/support/tickets/:id/messages
+ *
+ * Envia uma mensagem no chat do ticket. Side-effect: emite evento
+ * support_ticket_message via WebSocket.
+ * Acesso: opener do ticket ou admin.
+ */
+router.post('/support/tickets/:id/messages', supportTicketController.sendMessage);
 
 /**
  * @swagger
