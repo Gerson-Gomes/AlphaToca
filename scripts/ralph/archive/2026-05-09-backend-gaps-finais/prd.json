@@ -1,0 +1,202 @@
+{
+  "project": "I-Moveis",
+  "branchName": "ralph/supabase-to-localhost-db-migration",
+  "description": "Migrate the production database from managed Supabase (aws-1-us-west-2.pooler.supabase.com) to a self-hosted Postgres co-located with the API on desafio01.alphaedtech (10.10.0.201). Source PRD: tasks/prd-supabase-to-localhost-db-migration.md. Ralph cannot SSH into the production server, so its job here is to (a) author the shell scripts and SQL helpers the human operator runs during the cutover window, (b) write the rollback runbook, and (c) clean Supabase artifacts out of the repo. The actual install/dump/restore/cutover is performed by an operator following the scripts. User decisions baked in: 1B production-only scope, 2A full pg_dump+restore migration, 3C system-installed Postgres via apt (no Docker), 4A remove all Supabase artifacts, 5B no pre-cutover safety dump (Supabase retained for ≥7d as the rollback path).",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Scaffold scripts/db-migration/ with operator-facing README",
+      "description": "As an operator, I need a single entry-point directory under scripts/db-migration/ with a README that documents the cutover sequence so I can follow the migration without re-reading the full PRD.",
+      "acceptanceCriteria": [
+        "Directory `scripts/db-migration/` created at repo root",
+        "File `scripts/db-migration/README.md` exists with sections: Overview, Pre-flight Checks, Execution Order (links 01→05 scripts), Rollback (links runbook), Decommission Timeline (≥7d Supabase retention)",
+        "README references the source PRD at `tasks/prd-supabase-to-localhost-db-migration.md`",
+        "README execution-order section lists the 5 scripts US-002→US-006 will create, in order, with one-line summaries (scripts themselves do NOT need to exist yet — this is the table of contents)",
+        "README explicitly notes that scripts run on the production server `desafio01.alphaedtech`, not on a developer machine",
+        "`grep -i 'supabase' scripts/db-migration/README.md` finds the project ID `qkmseleljscluhhrcpaz` and the source pooler host so the operator has them at hand",
+        "Typecheck passes (`npx tsc --noEmit` — no TS files added so this should be a no-op)"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Write 01-provision-postgres.sh for native Postgres install",
+      "description": "As an operator, I need an idempotent shell script that installs Postgres 16 on Ubuntu via apt, creates the application role and database, and locks down the listener to localhost.",
+      "acceptanceCriteria": [
+        "File `scripts/db-migration/01-provision-postgres.sh` exists and is `chmod +x`",
+        "Script starts with `#!/usr/bin/env bash` and `set -euo pipefail`",
+        "Script installs `postgresql-16` and `postgresql-contrib-16` via `apt-get install -y` (uses PGDG repo if Ubuntu default is older — include the `apt.postgresql.org` repo setup conditionally)",
+        "Script generates a strong password via `openssl rand -base64 32`, prints it ONCE to stdout with a clear marker (`>>> SAVE THIS PASSWORD INTO .env <<<`), and uses it to create role `imoveis`",
+        "Script creates database `imoveis` with `OWNER imoveis`, `TEMPLATE template0`, `LC_COLLATE 'en_US.UTF-8'`, `ENCODING 'UTF8'` (runs `locale-gen en_US.UTF-8` first if needed)",
+        "Script edits `postgresql.conf` to set `listen_addresses = 'localhost'` (uses `sed -i` with backup `.bak`)",
+        "Script edits `pg_hba.conf` to ensure only `local` and `host ... 127.0.0.1/32 ... scram-sha-256` rules exist for the `imoveis` db (no `trust`, no `0.0.0.0/0`)",
+        "Script restarts postgres via `systemctl restart postgresql` and verifies `systemctl is-active postgresql` returns `active`",
+        "Script runs `psql -h 127.0.0.1 -U imoveis -d imoveis -c '\\conninfo'` as a final smoke check (using the generated password via `PGPASSWORD`)",
+        "Script is idempotent: re-running it on a server where role/db already exist must NOT fail — uses `IF NOT EXISTS` guards or `CREATE ROLE ... IF NOT EXISTS` equivalents (`DO $$ BEGIN ... EXCEPTION WHEN duplicate_object ...`)",
+        "Script prints a final summary: `Postgres ready at 127.0.0.1:5432, database 'imoveis', role 'imoveis'`",
+        "`bash -n scripts/db-migration/01-provision-postgres.sh` (syntax check) exits 0",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Write 02-dump-supabase.sh for pg_dump from Supabase direct port",
+      "description": "As an operator, I need a script that produces a custom-format pg_dump from the Supabase DIRECT_URL (port 5432, never the 6543 pooler), with a timestamped filename and pre/post sanity checks.",
+      "acceptanceCriteria": [
+        "File `scripts/db-migration/02-dump-supabase.sh` exists, `chmod +x`, with `#!/usr/bin/env bash` and `set -euo pipefail`",
+        "Script reads `SUPABASE_DIRECT_URL` from environment, fails with helpful message if unset",
+        "Script asserts the URL contains `:5432` and rejects URLs containing `:6543` with a clear error message about pooler incompatibility with pg_dump",
+        "Script verifies local `pg_dump` major version with `pg_dump --version` and warns (does NOT abort) if it is below 16",
+        "Script runs: `pg_dump --format=custom --no-owner --no-privileges --jobs=4 --verbose --file=\"imoveis-supabase-$(date -u +%Y%m%dT%H%M%SZ).dump\" \"$SUPABASE_DIRECT_URL\"` — note: `--jobs` requires `--format=directory`, so the script uses `--format=custom` WITHOUT `--jobs` (fix: drop `--jobs=4` for custom format, OR switch to directory format with jobs — pick one and document the choice in a comment)",
+        "After dump, script runs `pg_restore --list <file>` to validate the dump file is readable, captures output to `<file>.toc` for audit",
+        "Script prints final dump file size via `du -h` and the absolute path",
+        "Script also queries the source DB via `psql \"$SUPABASE_DIRECT_URL\" -c \"SELECT pg_size_pretty(pg_database_size(current_database()));\"` and prints it (operator records this for restore comparison)",
+        "`bash -n scripts/db-migration/02-dump-supabase.sh` exits 0",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Write 03-restore-local.sh with extension prep and row-count verification",
+      "description": "As an operator, I need a script that restores the dump into the local Postgres after creating the required extensions, then runs row-count checks against critical tables to confirm fidelity.",
+      "acceptanceCriteria": [
+        "File `scripts/db-migration/03-restore-local.sh` exists, `chmod +x`, with `#!/usr/bin/env bash` and `set -euo pipefail`",
+        "Script accepts the dump file path as `$1`, fails with usage message if missing",
+        "Script reads `LOCAL_DATABASE_URL` from environment (default `postgresql://imoveis@127.0.0.1:5432/imoveis` — password supplied via PGPASSWORD)",
+        "Step 1 — extension discovery: runs `pg_restore --list \"$1\" | grep -i 'EXTENSION' | awk '{print $NF}'` and prints the list",
+        "Step 2 — extension creation: for each extension found, runs `psql \"$LOCAL_DATABASE_URL\" -c \"CREATE EXTENSION IF NOT EXISTS <name>;\"` (requires the extension to exist in `postgresql-contrib-16` — script logs which ones might be Supabase-only, e.g., `pg_graphql`, `pgjwt`, `vault`, and proceeds)",
+        "Step 3 — restore: `pg_restore --no-owner --no-privileges --jobs=4 --verbose --dbname=\"$LOCAL_DATABASE_URL\" \"$1\"` — exit code captured but does NOT abort on warnings (Supabase-only extensions produce expected warnings)",
+        "Step 4 — Prisma migration check: prints the command `npx prisma migrate status` for the operator to run manually (script does not run npx itself, since project root may differ)",
+        "Step 5 — row count verification: runs a single SQL query that prints counts for User, Property, PropertyImage, Lead, Conversation tables (formatted as a table for visual diff against Supabase counts)",
+        "Step 6 — final summary: prints `Restore complete. Compare row counts above against Supabase pre-cutover counts.`",
+        "`bash -n scripts/db-migration/03-restore-local.sh` exits 0",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Write 04-cutover-env.sh to swap .env and restart PM2",
+      "description": "As an operator, I need a script that backs up the current production .env, replaces the Supabase URLs with local ones, removes SUPABASE_ACCESS_TOKEN, and restarts the API via PM2.",
+      "acceptanceCriteria": [
+        "File `scripts/db-migration/04-cutover-env.sh` exists, `chmod +x`, with `#!/usr/bin/env bash` and `set -euo pipefail`",
+        "Script accepts the target `.env` path as `$1` (default: `./.env`)",
+        "Script accepts the new local DB password as `$2` (or reads from prompt with `read -s`)",
+        "Step 1 — backup: copies `.env` to `.env.pre-supabase-cutover.bak` in the same directory; aborts if backup file already exists (avoid silent overwrite)",
+        "Step 2 — substitute: uses `sed -i.tmp` to replace any line matching `^DATABASE_URL=` with `DATABASE_URL=postgresql://imoveis:<password>@127.0.0.1:5432/imoveis?schema=public` (URL-encodes the password — uses `python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=\"\"))' \"$PASSWORD\"`)",
+        "Step 3 — substitute: same for `^DIRECT_URL=`",
+        "Step 4 — strip: removes any line matching `^SUPABASE_ACCESS_TOKEN=` (uses `sed -i '/^SUPABASE_ACCESS_TOKEN=/d'`)",
+        "Step 5 — verify: greps the resulting `.env` for `aws-1-us-west-2.pooler.supabase.com`, `qkmseleljscluhhrcpaz`, `SUPABASE_ACCESS_TOKEN` — exits non-zero if any still present",
+        "Step 6 — pm2 restart: runs `pm2 restart alphatoca-backend --update-env` (process name parameterized via `${PM2_NAME:-alphatoca-backend}`)",
+        "Step 7 — log tail: prints `pm2 logs alphatoca-backend --lines 50 --nostream` so operator sees startup output inline",
+        "Final message instructs operator to run `05-smoke-test.sh` next",
+        "`bash -n scripts/db-migration/04-cutover-env.sh` exits 0",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Write 05-smoke-test.sh for post-cutover validation",
+      "description": "As an operator, I need a script that runs a fixed sequence of HTTP and SQL checks against the live API + local Postgres so I can confirm the cutover succeeded before declaring the window closed.",
+      "acceptanceCriteria": [
+        "File `scripts/db-migration/05-smoke-test.sh` exists, `chmod +x`, with `#!/usr/bin/env bash` and `set -euo pipefail`",
+        "Script defines `API_BASE=\"${API_BASE:-http://localhost:3000}\"` and `LOCAL_DATABASE_URL` (same default as US-004)",
+        "Check 1 — health: `curl -fsS \"$API_BASE/health\"` (or `/` if /health absent — script tries both, fails only if both 5xx)",
+        "Check 2 — Swagger: `curl -fsS \"$API_BASE/docs/\"` returns 200 (just status, not body)",
+        "Check 3 — DB connection from API: tail `pm2 logs alphatoca-backend --lines 100 --nostream` and grep for `PrismaClientInitializationError` or `ECONNREFUSED` — fail if found",
+        "Check 4 — DB direct: `psql \"$LOCAL_DATABASE_URL\" -tAc 'SELECT count(*) FROM \"Property\";'` — prints count, asserts > 0",
+        "Check 5 — pg_stat_activity: `psql \"$LOCAL_DATABASE_URL\" -tAc \"SELECT count(*) FROM pg_stat_activity WHERE datname='imoveis' AND application_name LIKE 'prisma%';\"` — asserts ≥ 1 (proves API is connected)",
+        "Each check prints a `[PASS]` or `[FAIL]` prefix; script exits non-zero if any FAIL",
+        "Final summary line counts pass/fail: `Smoke tests: 5/5 passed.`",
+        "`bash -n scripts/db-migration/05-smoke-test.sh` exits 0",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Create rollback runbook at documentation/runbook-rollback-supabase.md",
+      "description": "As an operator, I need a documented rollback procedure to revert to Supabase in case the local Postgres exhibits a critical issue within 72h post-cutover.",
+      "acceptanceCriteria": [
+        "File `documentation/runbook-rollback-supabase.md` created",
+        "Section: Pre-requisites — states Supabase project `qkmseleljscluhhrcpaz` MUST remain active for ≥7 days post-cutover; provides a placeholder for the cutover date and the decommission deadline (operator fills in)",
+        "Section: When to roll back — lists triggers (DB unreachable >5min, data corruption detected, query latency >10x baseline, etc.)",
+        "Section: Procedure — numbered steps: (1) SSH to `desafio01@desafio01.alphaedtech`, (2) `cd` to API directory, (3) restore `.env` from `.env.pre-supabase-cutover.bak`, (4) `pm2 restart alphatoca-backend --update-env`, (5) `curl http://localhost:3000/health` validation, (6) check `pm2 logs --lines 100`",
+        "Section: Data Loss Warning — explicitly states that all writes between cutover and rollback will be lost, references NG-3 of the source PRD",
+        "Section: Post-rollback — instructs operator to file an incident report, post in #engineering, and freeze further migration attempts until root cause is identified",
+        "Section: Decommission Timeline — table with rows for Day 0 (cutover), Day 7 (Supabase decommission window opens), Day 14 (Supabase decommission deadline)",
+        "File is referenced from `scripts/db-migration/README.md` (link added in US-001's README — update README here if missing)",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Remove the abandoned supabase/ directory from the repo",
+      "description": "As a maintainer, I want to delete the unused supabase/ directory so future contributors do not mistake it for an active source of schema truth.",
+      "acceptanceCriteria": [
+        "Directory `supabase/` (including `supabase/migrations/` and `supabase/.temp/`) removed via `git rm -r supabase/`",
+        "Confirmed that the only file inside was `supabase/migrations/20260426211018_add_location_fields_to_property.sql` and that an equivalent migration already exists in `prisma/migrations/` (grep `prisma/migrations/` for `add_location_fields` or for the corresponding ALTER TABLE — record the matching prisma migration name in progress.txt)",
+        "If no equivalent prisma migration exists, ABORT this story and instead append the SQL contents to a NEW prisma migration (commit separately) before deleting — note this contingency in progress.txt",
+        "`ls supabase/ 2>/dev/null` returns nothing (directory gone)",
+        "`git status` shows the deletion staged",
+        "Typecheck passes",
+        "`npx prisma validate` passes (schema is intact and consistent with migrations)"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Update plan_hospedagem.md to reflect local Postgres",
+      "description": "As a maintainer, I want plan_hospedagem.md to describe the new local Postgres setup so the hosting documentation stops referencing Supabase as the implied database.",
+      "acceptanceCriteria": [
+        "Line 56 of `plan_hospedagem.md` (currently: `(que parece ser Supabase pelo histórico)`) is replaced with text reflecting that the production database is now Postgres native running on the same host",
+        "Line 124 of `plan_hospedagem.md` (currently mentions `Supabase` in the env config example) is rewritten to list `DATABASE_URL` / `DIRECT_URL` pointing to `127.0.0.1:5432`",
+        "A new subsection `## 2.X Banco de Dados Local` is inserted into `plan_hospedagem.md` between sections 2 and 3, summarizing the install (link to `scripts/db-migration/01-provision-postgres.sh`) and pointing to the rollback runbook from US-007",
+        "`grep -ni 'supabase' plan_hospedagem.md` returns zero matches",
+        "Markdown still renders cleanly (no broken section numbering — section 3 onwards renumbered if needed, OR the new section is numbered 2.5 to avoid renumbering downstream)",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Final scrub — zero supabase references in versioned code/config",
+      "description": "As a maintainer, I want a final pass to confirm no committed file (excluding tasks/, documentation/runbook-rollback-supabase.md, .planning/, scripts/db-migration/, and ralph progress logs) references Supabase, so the codebase is fully detached.",
+      "acceptanceCriteria": [
+        "Run `grep -rni 'supabase\\|SUPABASE' --include='*.ts' --include='*.js' --include='*.json' --include='*.yml' --include='*.yaml' --include='*.sh' --include='*.md' --exclude-dir=node_modules --exclude-dir=.planning --exclude-dir=tasks --exclude-dir=archive --exclude-dir=dist --exclude-dir='db-migration'` in repo root",
+        "Permitted residual matches: `documentation/runbook-rollback-supabase.md` (intentional), `scripts/ralph/progress.txt` and `scripts/ralph/CLAUDE.md` (work logs), `scripts/ralph/archive/**` (historical), `.env.example` ONLY if it explicitly documents that Supabase is NO LONGER used",
+        "All other matches are removed (edit each file or delete the reference); list each file touched in progress.txt with the rationale",
+        "`.env.example` audited: no `SUPABASE_*` lines remain (already empty per current state — verify and document in progress.txt)",
+        "`package.json` and `package-lock.json` audited: no `@supabase/*` dependencies (already clean — verify)",
+        "After cleanup, the same `grep` command from the first criterion outputs only the permitted residuals — record the exact remaining lines in progress.txt for audit",
+        "Typecheck passes",
+        "`npm run dev` starts without errors (smoke that nothing import-side broke)"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

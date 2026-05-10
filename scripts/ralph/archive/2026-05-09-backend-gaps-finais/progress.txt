@@ -1,0 +1,23 @@
+# Ralph Progress Log
+Started: Sat May  9 2026 (supabase-to-localhost-db-migration)
+Source PRD: tasks/prd-supabase-to-localhost-db-migration.md
+Branch: ralph/supabase-to-localhost-db-migration
+---
+
+## Codebase Patterns
+(Carry over relevant patterns from archive/2026-05-09-backend-gaps-finais/progress.txt as iterations encounter them. Bootstrap entries below are the ones most likely to matter for THIS migration; add more as discovered.)
+
+- **Hand-author migrations**: NEVER run `prisma migrate dev`. Write `prisma/migrations/<stamp>_<slug>/migration.sql` by hand, then verify byte-for-byte with `npx prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script`. (Relevant if US-008 needs to fold the orphan supabase/ migration into prisma/.)
+- **Pre-existing test failures (baseline)**: On the prior `ralph/backend-gaps-finais` branch baseline was **23 failing / 618 passing / 65 files** with a clean tree, in 6 unrelated files (auth, ingestKnowledge, ragChainService, ragRetrieverService, userSync, visitValidation). This migration should not change that count — if it does, investigate.
+- **Prisma datasource**: `prisma/schema.prisma` reads `DATABASE_URL` (and likely `DIRECT_URL` via `directUrl`). The schema does NOT need to be edited for this migration — only the env values change.
+- **Production server context**: The cutover target is `desafio01@desafio01.alphaedtech` (10.10.0.201, internal VPN). API runs under PM2 as process name `alphatoca-backend` per plan_hospedagem.md. Operator runs scripts on the server; Ralph only authors them.
+- **Operator vs Ralph boundary**: Ralph CANNOT SSH to desafio01, run apt, run pg_dump against Supabase, or restart PM2 in production. Ralph's job is to produce the artifacts (shell scripts, runbook, repo cleanup) the operator uses. Stories US-001→US-007 produce artifacts; US-008→US-010 do repo-side cleanup.
+- **Supabase footprint in repo (as of bootstrap)**: only `supabase/` directory (one stale migration file, see US-008), `SUPABASE_ACCESS_TOKEN` env var (in production .env only — already absent from .env.example), and prose mentions in `plan_hospedagem.md` lines 56 and 124. No `@supabase/*` packages, no SDK usage in src/.
+
+## Open Questions Carried From PRD
+- DB size on Supabase (run `SELECT pg_size_pretty(pg_database_size(current_database()));` before scheduling cutover window) — affects dump/restore time estimate.
+- Server resources on desafio01 (`free -h` and `df -h`) — must accommodate Postgres + API + Redis.
+- Frontend Supabase usage — grep says zero, but confirm with frontend team before cutover.
+- Decommission ownership — who cancels the Supabase project after Day 14.
+
+---
