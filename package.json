@@ -14,7 +14,11 @@
     "eval:rag": "ts-node src/scripts/evalRag.ts",
     "eval:injection": "ts-node src/scripts/evalPromptInjection.ts",
     "conductor:sync": "echo 'Run automation script'",
-    "seed": "ts-node prisma/seed.ts"
+    "seed": "ts-node prisma/seed.ts",
+    "kafka:health": "ts-node scripts/kafka-health-check.ts",
+    "kafka:test": "ts-node scripts/kafka-message-test.ts",
+    "kafka:topics": "ts-node scripts/create-kafka-topics.ts",
+    "verify:env": "ts-node scripts/verify-environment.ts"
   },
   "dependencies": {
     "@google/genai": "^1.50.1",
@@ -27,7 +31,6 @@
     "@socket.io/redis-adapter": "^8.3.0",
     "@socket.io/redis-emitter": "^5.1.0",
     "axios": "^1.15.0",
-    "bullmq": "^5.73.4",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",

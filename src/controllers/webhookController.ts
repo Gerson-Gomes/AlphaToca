@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
-import { producer } from '../config/kafka';
+import { produceWhatsAppMessage } from '../services/kafkaProducer';
 import { WhatsAppWebhookSchema } from '../schemas/whatsappSchema';
 import { updateMessageStatus } from '../services/messageStatusService';
 import { verifyMetaSignature } from '../utils/verifyMetaSignature';
@@ -81,14 +81,20 @@ export const receiveMessage = async (req: Request, res: Response, _next: NextFun
         res.status(200).send('EVENT_RECEIVED');
 
         if (payload.object === 'whatsapp_business_account') {
-            // Migração: Agora usamos Kafka em vez de Redis/BullMQ
-            await producer.send({
-                topic: 'chat-events',
-                messages: [
-                    { value: JSON.stringify(payload) }
-                ],
-            });
-            logger.info('[webhook] mensagem enviada para o Kafka (topic: chat-events)');
+            try {
+                const phoneNumber = payload.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.wa_id;
+                await produceWhatsAppMessage(payload, phoneNumber);
+                logger.info(
+                    { phoneNumber },
+                    '[webhook] message produced to kafka successfully'
+                );
+            } catch (err) {
+                logger.error(
+                    { err, phoneNumber: payload.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.wa_id },
+                    '[webhook] failed to produce message to kafka'
+                );
+                // Não retorna erro (webhook já respondeu 200 OK)
+            }
         }
     } catch (error) {
         if (error instanceof ZodError) {
