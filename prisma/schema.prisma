@@ -606,12 +606,13 @@ model SupportTicket {
 // (tenant/landlord) e o admin. Cada mensagem é associada a um ticket
 // e a um usuário remetente. Ordenação por timestamp ASC na listagem.
 model SupportTicketMessage {
-  id         String          @id @default(uuid())
-  ticketId   String          @map("ticket_id")
-  senderId   String          @map("sender_id")
-  senderRole SupportUserRole @map("sender_role")
-  content    String          @db.Text
-  timestamp  DateTime        @default(now())
+  id              String          @id @default(uuid())
+  ticketId        String          @map("ticket_id")
+  senderId        String          @map("sender_id")
+  senderRole      SupportUserRole @map("sender_role")
+  content         String          @db.Text
+  clientMessageId String?         @unique @map("client_message_id")
+  timestamp       DateTime        @default(now())
 
   ticket SupportTicket @relation("TicketMessages", fields: [ticketId], references: [id], onDelete: Cascade)
   sender User          @relation("SupportMessageSender", fields: [senderId], references: [id], onDelete: Cascade)

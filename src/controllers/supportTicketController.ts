@@ -9,6 +9,7 @@ import {
   listSupportTicketsQuerySchema,
   updateSupportTicketSchema,
   sendTicketMessageSchema,
+  getTicketMessagesQuerySchema,
 } from '../utils/supportTicketValidation';
 import { z } from 'zod';
 import { logger } from '../config/logger';
@@ -312,7 +313,11 @@ export const supportTicketController = {
         });
       }
 
-      const messages = await supportTicketMessageService.list(ticketId);
+      const { since } = getTicketMessagesQuerySchema.parse(req.query);
+      const messages = await supportTicketMessageService.list(
+        ticketId,
+        since ? new Date(since) : undefined,
+      );
       return res.status(200).json(messages);
     } catch (error) {
       next(error);
@@ -338,13 +343,14 @@ export const supportTicketController = {
       }
 
       const ticketId = req.params.id;
-      const { content } = sendTicketMessageSchema.parse(req.body);
+      const { content, clientMessageId } = sendTicketMessageSchema.parse(req.body);
 
       const message = await supportTicketMessageService.send({
         ticketId,
         senderId: localUser.id,
         senderRole: mapAuthorRole(localUser.role),
         content,
+        clientMessageId,
       });
 
       // Emite via WebSocket para o opener e admins

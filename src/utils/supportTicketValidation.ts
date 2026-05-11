@@ -89,8 +89,19 @@ export const updateSupportTicketSchema = z
 export type UpdateSupportTicketInput = z.infer<typeof updateSupportTicketSchema>;
 
 // Body de POST /api/support/tickets/:id/messages
+// `clientMessageId` é um UUID gerado pelo cliente para idempotência —
+// se o backend já tiver uma mensagem com esse ID, retorna a existente
+// em vez de criar duplicata.
 export const sendTicketMessageSchema = z.object({
   content: z.string().min(1, 'Message content is required').max(4000),
+  clientMessageId: z.string().uuid().optional(),
 });
 
 export type SendTicketMessageInput = z.infer<typeof sendTicketMessageSchema>;
+
+// Query params de GET /api/support/tickets/:id/messages
+// `since` é um timestamp ISO 8601 — o backend só retorna mensagens
+// com timestamp > since, fechando o gap entre REST e WebSocket.
+export const getTicketMessagesQuerySchema = z.object({
+  since: isoDateLike.optional(),
+});
