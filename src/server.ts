@@ -2,7 +2,7 @@ import 'dotenv/config';
 import http from 'http';
 
 import app from './app';
-import './workers/whatsappWorker';
+// import './workers/whatsappWorker'; (Removido: Migração para Kafka)
 import './workers/visitReminderWorker';
 import { setupSwagger } from './config/swagger';
 import { bootstrapLangSmith } from './config/langsmith';
@@ -26,12 +26,22 @@ const server = http.createServer(app);
 // Anexa WebSocket (Socket.IO) ao servidor HTTP
 initializeSocket(server);
 
-// Task 2: Inicializa o Consumidor Kafka
+// Task 2: Inicializa o Produtor e o Consumidor Kafka
 import { startChatWorker } from './workers/chatWorker';
-startChatWorker().catch((err) => {
-    logger.error({ err }, '[server] Falha ao iniciar ChatWorker (Kafka)');
-});
+import { connectProducer } from './config/kafka';
 
-server.listen(port, '0.0.0.0', () => {
-    logger.info({ port }, '[server] HTTP + WebSocket running on 0.0.0.0');
-});
+const startApp = async () => {
+    try {
+        await connectProducer();
+        await startChatWorker();
+        
+        server.listen(port, '0.0.0.0', () => {
+            logger.info({ port }, '[server] HTTP + WebSocket running on 0.0.0.0 (Kafka Enabled)');
+        });
+    } catch (err) {
+        logger.error({ err }, '[server] Falha ao iniciar infraestrutura Kafka');
+        process.exit(1);
+    }
+};
+
+startApp();

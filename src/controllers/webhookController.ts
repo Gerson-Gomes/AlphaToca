@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
-import { messageQueue } from '../queues/whatsappQueue';
+import { producer } from '../config/kafka';
 import { WhatsAppWebhookSchema } from '../schemas/whatsappSchema';
 import { updateMessageStatus } from '../services/messageStatusService';
 import { verifyMetaSignature } from '../utils/verifyMetaSignature';
@@ -81,12 +81,14 @@ export const receiveMessage = async (req: Request, res: Response, _next: NextFun
         res.status(200).send('EVENT_RECEIVED');
 
         if (payload.object === 'whatsapp_business_account') {
-            await messageQueue.add('whatsapp-message', payload, {
-                attempts: 3,
-                backoff: { type: 'exponential', delay: 5000 },
-                removeOnComplete: true,
-                removeOnFail: 100,
+            // Migração: Agora usamos Kafka em vez de Redis/BullMQ
+            await producer.send({
+                topic: 'chat-events',
+                messages: [
+                    { value: JSON.stringify(payload) }
+                ],
             });
+            logger.info('[webhook] mensagem enviada para o Kafka (topic: chat-events)');
         }
     } catch (error) {
         if (error instanceof ZodError) {

@@ -15,3 +15,10 @@ export const kafka = new Kafka({
     };
   },
 });
+
+export const producer = kafka.producer();
+
+export const connectProducer = async () => {
+  await producer.connect();
+  logger.info('[Kafka] Produtor conectado');
+};
