@@ -71,3 +71,20 @@ Branch: ralph/hospedagem-local
   - Ao editar .env.example, sempre verificar antes que edits anteriores (DATABASE_URL/DIRECT_URL de US-001) permaneçam intactos — fácil de regredir se substituir blocos grandes em vez de fazer append no fim.
 ---
 
+## 2026-05-11 20:05 - US-004
+- Implementado: Documentar setup local completo no README.md
+- Files changed:
+  - README.md: nova seção "## Rodando localmente (branch hospedagem_local)" inserida ANTES de "## Re-seeding after the UUID migration" (mais próxima de uma seção 'Setup' existente). Conteúdo: pré-requisitos (Node 20+, Docker, Postgres 16 nativo com link para `scripts/db-migration/01-provision-postgres.sh`, credenciais Firebase/Gemini), 6 passos numerados (cp .env, docker compose up -d redis, opcional --profile optional-db, prisma migrate deploy, npm run seed, npm run dev), validação curl /health/ready, subseção "Feature flags de debug" (DISABLE_WORKERS + DISABLE_RAG_VALIDATION), subseção "Notas" (Firebase Admin SDK vs Auth0, Gemini 5 RPM free tier, WhatsApp ngrok), referência a 3 PRDs (emergency-localhost-migration, supabase-to-localhost-db-migration, hospedagem-local).
+  - Seção "## Re-seeding after the UUID migration" pré-existente preservada exatamente — nenhuma deleção.
+- Quality checks:
+  - `npx tsc --noEmit`: 4 erros pré-existentes em supportTicket*.ts (Codebase Patterns) — nenhum NOVO erro. README.md não afeta TS, rodado como sanity check exigido pelo AC.
+  - Ordem dos passos confere com AC: (1) cp .env.example .env → (2) docker compose up -d redis → (3) opcional perfil optional-db (5433) → (4) npx prisma migrate deploy → (5) npm run seed → (6) npm run dev.
+  - Subseção Notas inclui exatamente os 3 itens (a, b, c) pedidos no AC.
+  - 3 PRDs referenciados como links Markdown.
+- **Learnings for future iterations:**
+  - README pré-existente já tinha seção "## Re-seeding after the UUID migration" com credenciais/portas antigas (admin@5433/alphatoca, do Docker original). Não foi tocada nesta US porque o AC exige preservação de docs existentes; futuras refatorações podem opcionalmente atualizar essa seção para refletir o novo perfil optional-db (alphatoca_postgres em 5433 com vars do .env via POSTGRES_USER/PASSWORD/DB).
+  - Posicionar seções novas no README: "antes ou logo após qualquer seção 'Getting Started' / 'Setup' existente" — neste repo, a seção mais próxima de setup era "Re-seeding after the UUID migration"; inserir imediatamente antes funciona como ancoragem.
+  - Quando o AC pede passos numerados em ordem específica, redigir como lista numerada Markdown (1., 2., ...) com bloco de código bash imediatamente abaixo de cada passo torna o documento agradável de seguir e fácil de validar contra o AC.
+  - Subseções com ### dentro da seção principal (## Rodando localmente) é o padrão Markdown; AC pediu "Subseção 'Feature flags de debug'" e "Subseção 'Notas'" — ### é a profundidade correta.
+---
+

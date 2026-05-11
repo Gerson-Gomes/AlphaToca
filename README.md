@@ -68,6 +68,83 @@ A API possui respostas curtas, técnicas e padronizadas. Sempre que ocorrer um e
    - O tráfego de entrada e as notificações da WhatsApp Cloud API são direcionados aos endpoints de webhook. 
    - A API valida a carga e a enfileira imediatamente em uma fila do BullMQ (retornando `200 OK` instantaneamente para o WhatsApp). O processamento complexo das mensagens e a interação com o LangChain ocorrem de forma assíncrona.
 
+## Rodando localmente (branch hospedagem_local)
+
+Esta seção descreve o setup completo para rodar a API I-Moveis end-to-end em `http://localhost:3000`, com **Postgres nativo + Redis Docker + integrações reais** (Firebase Auth, Gemini, WhatsApp Cloud API, LangSmith). Estratégia adotada: feature flags reversíveis em `src/server.ts`, sem alterar lógica de negócio, controllers, services, routes ou schemas Prisma.
+
+### Pré-requisitos
+
+- **Node.js 20+** (LTS recomendado).
+- **Docker** (necessário para Redis; Postgres em Docker é opcional via perfil `optional-db`).
+- **Postgres 16 nativo** em `127.0.0.1:5432`, com role `imoveis` e database `imoveis` — provisione executando [`scripts/db-migration/01-provision-postgres.sh`](scripts/db-migration/01-provision-postgres.sh).
+- **Credenciais de dev** preenchidas no `.env` (a partir de `.env.example`):
+  - Firebase service account: `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`.
+  - `GOOGLE_API_KEY` (Google AI Studio — Gemini 2.5 Flash + embeddings).
+  - `FIREBASE_API_KEY` (Firebase Web API Key — usada para login via REST API).
+
+### Setup passo-a-passo
+
+1. **Copiar e editar o `.env`:**
+   ```bash
+   cp .env.example .env
+   # editar .env: preencher credenciais reais (Firebase, Gemini, WhatsApp, LangSmith)
+   ```
+
+2. **Subir Redis (Docker, porta host `6380`):**
+   ```bash
+   docker compose up -d redis
+   ```
+
+3. **(Opcional) Subir Postgres em Docker** caso não tenha Postgres nativo instalado. O perfil `optional-db` mapeia o container na porta host `5433` para evitar conflito com Postgres nativo em `5432`:
+   ```bash
+   docker compose --profile optional-db up -d
+   # após este passo, ajuste DATABASE_URL e DIRECT_URL no .env para porta 5433
+   ```
+
+4. **Aplicar migrations Prisma:**
+   ```bash
+   npx prisma migrate deploy
+   ```
+
+5. **Popular o banco com dados de demo:**
+   ```bash
+   npm run seed
+   ```
+
+6. **Subir o servidor de desenvolvimento:**
+   ```bash
+   npm run dev
+   ```
+
+### Validação
+
+Após `npm run dev`, valide o setup chamando o health check:
+
+```bash
+curl http://localhost:3000/health/ready
+```
+
+A resposta deve ser **HTTP 200** com `status: ready` e todos os checks (`db`, `redis`, `gemini`) reportando `ok`. Caso algum check falhe, o endpoint retorna 503 com o componente em estado `fail`.
+
+### Feature flags de debug
+
+Duas flags reversíveis em `src/server.ts` permitem rodar a API em modos degradados durante debug local. Ambas têm default `false` (comportamento normal preservado) e estão documentadas como entradas comentadas no `.env.example`:
+
+- **`DISABLE_WORKERS=true`** — pula os imports dinâmicos dos workers BullMQ (`whatsappWorker`, `visitReminderWorker`). Útil para testar apenas endpoints HTTP/WebSocket sem disparar jobs reais. Atenção: enquanto a flag estiver ativa, filas de WhatsApp e lembretes de visita **não** processam jobs.
+- **`DISABLE_RAG_VALIDATION=true`** — pula `assertRagSecrets()` no boot. Útil para iniciar a API rapidamente em sessões sem chave Gemini válida. Atenção: endpoints RAG vão falhar em runtime quando esta flag estiver ativa.
+
+### Notas
+
+- **Auth real (Firebase Admin SDK):** o middleware `checkJwt` (`src/middlewares/authMiddleware.ts`) valida tokens via **Firebase Admin SDK** — não Auth0, apesar de `.env.example` ainda conter as vars `AUTH0_*` como artefato histórico. Testes locais de rotas autenticadas exigem um token Firebase real, gerado via Firebase REST API ou app cliente.
+- **Gemini cota free:** Google AI Studio tem limite de **5 RPM** no free tier. Para smoke tests RAG sequenciais, ajuste `EVAL_INTER_QUESTION_DELAY_MS` ou espace as chamadas manualmente para evitar `429 Too Many Requests`.
+- **WhatsApp webhook:** a Meta exige URL pública para validar o webhook. Em local, use **ngrok** (ou similar) para expor `http://localhost:3000/api/webhook` — fora do escopo do setup local básico.
+
+### PRDs relacionados
+
+- [`tasks/prd-emergency-localhost-migration.md`](tasks/prd-emergency-localhost-migration.md) — migração emergencial de URLs de produção para localhost.
+- [`tasks/prd-supabase-to-localhost-db-migration.md`](tasks/prd-supabase-to-localhost-db-migration.md) — migração do banco de Supabase para Postgres nativo.
+- [`tasks/prd-hospedagem-local.md`](tasks/prd-hospedagem-local.md) — PRD desta feature (rodar API end-to-end em localhost com feature flags).
+
 ## Re-seeding after the UUID migration
 
 Older demo seeds inserted human-readable ids like `user-demo-landlord-1` and `prop-demo-rj-1`. These fail the strict `z.string().uuid()` validators in `src/utils/`, so any environment holding those legacy rows must be dropped and re-seeded with the new canonical UUID literals exported from `prisma/demoIds.ts`.

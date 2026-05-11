@@ -78,7 +78,7 @@
         "Typecheck passes (npx tsc --noEmit — sanity check)"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Última story do PRD. Após esta passar, todas devem estar passes:true e Ralph deve responder COMPLETE."
     }
   ]
