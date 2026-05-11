@@ -26,6 +26,12 @@ const server = http.createServer(app);
 // Anexa WebSocket (Socket.IO) ao servidor HTTP
 initializeSocket(server);
 
+// Task 2: Inicializa o Consumidor Kafka
+import { startChatWorker } from './workers/chatWorker';
+startChatWorker().catch((err) => {
+    logger.error({ err }, '[server] Falha ao iniciar ChatWorker (Kafka)');
+});
+
 server.listen(port, '0.0.0.0', () => {
     logger.info({ port }, '[server] HTTP + WebSocket running on 0.0.0.0');
 });

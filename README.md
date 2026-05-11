@@ -72,7 +72,7 @@ A API possui respostas curtas, técnicas e padronizadas. Sempre que ocorrer um e
 
 Older demo seeds inserted human-readable ids like `user-demo-landlord-1` and `prop-demo-rj-1`. These fail the strict `z.string().uuid()` validators in `src/utils/`, so any environment holding those legacy rows must be dropped and re-seeded with the new canonical UUID literals exported from `prisma/demoIds.ts`.
 
-> **Warning:** Never run `prisma migrate` or `prisma db seed` against the Supabase `DATABASE_URL` in `.env` — that URL points at production. Always override `DATABASE_URL` inline to the local Docker database (`alphatoca_db` on `127.0.0.1:5433`, user `admin`, password `admin_pwd`, database `alphatoca`).
+> **Warning:** Never run `prisma migrate` or `prisma db seed` against the production `DATABASE_URL` in `.env`. Always override `DATABASE_URL` inline to your local database (e.g., `localhost:5432`).
 
 ### Local re-seed flow
 
@@ -80,14 +80,14 @@ From a clean local database:
 
 ```bash
 # 1. Drop every table, re-run all migrations, and skip the default seed hook
-DATABASE_URL='postgresql://admin:admin_pwd@127.0.0.1:5433/alphatoca?schema=public' \
-DIRECT_URL='postgresql://admin:admin_pwd@127.0.0.1:5433/alphatoca?schema=public' \
+DATABASE_URL='postgresql://postgres:postgres@localhost:5432/alphatoca?schema=public' \
+DIRECT_URL='postgresql://postgres:postgres@localhost:5432/alphatoca?schema=public' \
   npx prisma migrate reset --force
 
 # 2. Or, if the schema is already up-to-date and you only need fresh demo rows,
 #    the seed script's own deleteMany() chain is enough on its own:
-DATABASE_URL='postgresql://admin:admin_pwd@127.0.0.1:5433/alphatoca?schema=public' \
-DIRECT_URL='postgresql://admin:admin_pwd@127.0.0.1:5433/alphatoca?schema=public' \
+DATABASE_URL='postgresql://postgres:postgres@localhost:5432/alphatoca?schema=public' \
+DIRECT_URL='postgresql://postgres:postgres@localhost:5432/alphatoca?schema=public' \
   npm run seed
 ```
 
@@ -98,8 +98,8 @@ DIRECT_URL='postgresql://admin:admin_pwd@127.0.0.1:5433/alphatoca?schema=public'
 After re-seeding, confirm every user and property row carries a canonical UUID v4:
 
 ```bash
-DATABASE_URL='postgresql://admin:admin_pwd@127.0.0.1:5433/alphatoca?schema=public' \
-DIRECT_URL='postgresql://admin:admin_pwd@127.0.0.1:5433/alphatoca?schema=public' \
+DATABASE_URL='postgresql://postgres:postgres@localhost:5432/alphatoca?schema=public' \
+DIRECT_URL='postgresql://postgres:postgres@localhost:5432/alphatoca?schema=public' \
   npx tsx -e "import prisma from './src/config/db'; Promise.all([prisma.user.findMany(), prisma.property.findMany()]).then(([us, ps]) => { const re=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\$/i; const badU=us.filter(u=>!re.test(u.id)); const badP=ps.filter(p=>!re.test(p.id)); if(badU.length||badP.length){console.error('NON-UUID users:',badU.map(u=>u.id),'properties:',badP.map(p=>p.id)); process.exit(1);} console.log('OK users:',us.length,'properties:',ps.length); process.exit(0); });"
 ```
 
