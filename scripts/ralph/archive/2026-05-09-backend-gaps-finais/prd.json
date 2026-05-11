@@ -17,8 +17,8 @@
         "Typecheck passes (`npx tsc --noEmit` — no TS files added so this should be a no-op)"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "Implemented 2026-05-09. README at scripts/db-migration/README.md covers all required sections, links the source PRD and rollback runbook (forward-reference to US-007), tabulates the 5 future scripts, embeds project ID qkmseleljscluhhrcpaz and pooler host aws-1-us-west-2.pooler.supabase.com, and explicitly scopes execution to desafio01.alphaedtech. Pre-existing tsc errors in supportTicketMessageService/supportTicketService are unrelated (already on main from #67 merge); US-001 added zero TS files."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",
@@ -40,8 +40,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "Implemented 2026-05-09. scripts/db-migration/01-provision-postgres.sh authored, chmod +x. Covers: locale-gen guard for en_US.UTF-8, conditional PGDG repo setup (only when default apt sources lack postgresql-16), apt install of postgresql-16 + postgresql-contrib-16, listen_addresses lock to 'localhost' with .bak backup of postgresql.conf, full rewrite of pg_hba.conf to only `local`/`host 127.0.0.1|::1` with scram-sha-256 (original preserved at .bak), systemctl restart + is-active verification, idempotent role+db creation via DO block + pg_database guard with template0/en_US.UTF-8/UTF8, openssl rand -base64 32 password printed ONCE between '>>> SAVE THIS PASSWORD INTO .env <<<' markers, PGPASSWORD-driven \\conninfo smoke test, final summary line. `bash -n` passes. Typecheck shows only the 3 pre-existing supportTicket errors that already exist on main."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-003",
@@ -60,8 +60,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "Implemented 2026-05-09. scripts/db-migration/02-dump-supabase.sh authored, chmod +x. Validates SUPABASE_DIRECT_URL is set, contains :5432, and rejects :6543 with explicit pooler-incompatibility message. pg_dump major-version parsed via awk; warns (does not abort) when < 16. Source DB size queried via psql pg_size_pretty for restore comparison. Dump runs as `pg_dump --format=custom --no-owner --no-privileges --verbose --file=imoveis-supabase-<UTC-timestamp>.dump`; --jobs=4 deliberately dropped because it requires --format=directory — rationale documented at the top of the script. Post-dump validation runs `pg_restore --list` into <file>.toc. Final summary prints absolute path via readlink -f, du -h size, TOC path, and source size for the operator to record. `bash -n` passes; typecheck shows only the 3 pre-existing supportTicket* errors that exist on main."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-004",
@@ -81,8 +81,8 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "Implemented 2026-05-09. scripts/db-migration/03-restore-local.sh authored, chmod +x. Args: dump file path as $1 with usage message; LOCAL_DATABASE_URL defaults to postgresql://imoveis@127.0.0.1:5432/imoveis (password via PGPASSWORD env, with a clear warn-not-fail when unset). Step 1 — extension discovery via `pg_restore --list <dump> | grep -i 'EXTENSION ' | grep -v -i 'EXTENSION COMMENT' | awk '{print $NF}' | sort -u`, written to a mktemp scratch file, printed indented. Step 2 — iterates the discovered extensions and runs `psql ... -c 'CREATE EXTENSION IF NOT EXISTS \"<name>\";'` for each, with set +e/-e wrapping so a single failure (Supabase-only extension that postgresql-contrib-16 lacks) does not abort. Supabase-only regex covers pg_graphql, pgjwt, vault, supabase_vault, pgsodium, pg_net, pgaudit, wrappers — script logs them as warn-but-continue. Step 3 — `pg_restore --no-owner --no-privileges --jobs=4 --verbose --dbname=\"$LOCAL_DATABASE_URL\" \"$1\"` wrapped in set +e to capture rc without aborting; explicit log explaining non-zero rc is expected. Step 4 — prints the manual `npx prisma migrate status` invocation (script does not run npx itself per AC, since project root may differ on the operator's host). Step 5 — single anonymous DO block over (User→users, Property→properties, PropertyImage→property_images, Lead→leads, Conversation→conversations) using to_regclass to gracefully print '<not in schema>' for the Lead table (which is NOT in the current Prisma schema — see learnings); exact AC-mandated 5 labels printed in a fixed-width table. Step 6 — final summary literal: 'Restore complete. Compare row counts above against Supabase pre-cutover counts.' plus operator next-steps. `bash -n` exits 0; `chmod +x` confirmed. Typecheck shows only the 3 pre-existing supportTicket* errors that exist on main; zero new errors."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-005",
@@ -104,8 +104,8 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": true,
-      "notes": "Implemented 2026-05-09. scripts/db-migration/04-cutover-env.sh authored, chmod +x. Args: $1=.env path (default ./.env), $2=new local-Postgres password (or read -s prompt when stdin is a tty; aborts cleanly when no tty and arg omitted). PM2_NAME / APP_ROLE / APP_DB / APP_HOST / APP_PORT all parameterizable via env (defaults: alphatoca-backend / imoveis / imoveis / 127.0.0.1 / 5432). Pre-flight: env file exists, pm2 + python3 on PATH. Step 1 — backup: cp -p ENV_FILE → ENV_FILE.pre-supabase-cutover.bak; aborts if backup already exists (no silent overwrite per AC). Password URL-encoded via python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=\"\"))'. Steps 2/3 — sed -i.tmp -E (then rm .tmp) with '|' delimiter to substitute DATABASE_URL / DIRECT_URL; appends the line if missing rather than failing silently. Step 4 — sed -E '/^[[:space:]]*SUPABASE_ACCESS_TOKEN=/d' to strip the line. Step 5 — verifies the resulting .env contains none of {aws-1-us-west-2.pooler.supabase.com, qkmseleljscluhhrcpaz, ^SUPABASE_ACCESS_TOKEN=}; aborts with the backup path called out BEFORE step 6 so a botched env never reaches pm2. Step 6 — pm2 restart \"$PM2_NAME\" --update-env. Step 7 — pm2 logs \"$PM2_NAME\" --lines 50 --nostream (warn-not-fail on non-zero rc). Final message points the operator at 05-smoke-test.sh. `bash -n` exits 0; sed/url-encode logic validated end-to-end against a synthetic .env in /tmp (special chars '@/+& ' → %40%2F%2B%26%20). Typecheck shows only the 3 pre-existing supportTicket* errors that exist on main; zero new errors."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-006",
@@ -125,8 +125,8 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": true,
-      "notes": "Implemented 2026-05-09. scripts/db-migration/05-smoke-test.sh authored, chmod +x. Configurable via API_BASE (default http://localhost:3000), LOCAL_DATABASE_URL (default postgresql://imoveis@127.0.0.1:5432/imoveis with PGPASSWORD), PM2_NAME (default alphatoca-backend). Pre-flight: warns (does not abort) if curl/psql/pm2/PGPASSWORD missing — lets the operator see exactly which checks will fail. Check 1 — API health: tries `${API_BASE}/health` first, falls back to `${API_BASE}/` only when the first errored, fails only if both attempts errored (matches AC 'fails only if both 5xx'); curl uses `-fsS -o /dev/null -w '%{http_code}'` to capture status without leaking body. Check 2 — Swagger UI: `${API_BASE}/docs/` must return 200 exactly. Check 3 — pm2 logs scan: `pm2 logs $PM2_NAME --lines 100 --nostream` then `grep -qE 'PrismaClientInitializationError|ECONNREFUSED'`; FAIL prints the matching lines (head -5) for triage. Check 4 — direct DB row count: `psql -tAc 'SELECT count(*) FROM \"Property\";'` (Prisma model `Property` is mapped to physical table `\"Property\"` with mixed-case quoting in the dump — verified by reading prisma/schema.prisma's `@@map`). Output validated as a non-negative integer; passes only when > 0. Check 5 — pg_stat_activity: counts rows with `datname='imoveis' AND application_name LIKE 'prisma%'`; passes when ≥ 1, proving the API is actively connected to the local Postgres. Each check uses `set +e/-e` bracketing to capture rc without aborting (per Codebase Patterns idiom). Final summary literal `Smoke tests: <pass>/5 passed.` and exit 1 on any FAIL with a pointer to the rollback runbook. `bash -n` exits 0; `--help` exits 2 with usage. Typecheck shows only the 3 pre-existing supportTicket* errors that exist on main; zero new errors."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-007",
@@ -144,8 +144,8 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": true,
-      "notes": "Implemented 2026-05-09. documentation/runbook-rollback-supabase.md authored. Sections (in order): header + audience + cross-links to source PRD and scripts/db-migration/README.md → Pre-requisites (Supabase project still active, .env.pre-supabase-cutover.bak present, no direct frontend Supabase usage, original SUPABASE_ACCESS_TOKEN reachable; placeholders for Day 0 / +7 / +14 dates the operator fills during cutover step 4) → When to roll back (table of triggers: DB unreachable >5min, data corruption, p95 latency >10× baseline, disk-full, schema mismatch, persistent auth failure) plus 'Do NOT roll back for' counter-list → Procedure (numbered 1–7: SSH desafio01@desafio01.alphaedtech, cd to API dir, restore .env from .pre-supabase-cutover.bak with broken-env preservation, pm2 restart alphatoca-backend --update-env, curl http://localhost:3000/health, pm2 logs --lines 100 --nostream, announce in #engineering) → Data Loss Warning (explicit lost-writes statement, NG-3 reference, integration-collision callouts) → Post-rollback (incident report fields, #engineering post, freeze further migration attempts, preserve forensics, plus 'Backup missing' sub-procedure) → Decommission Timeline (Day 0 / +7 / +14 table with date placeholders). The scripts/db-migration/README.md already linked the runbook from US-001 in three places (Pre-flight Checks, Rollback section, Decommission Timeline) — no README edit needed. Typecheck shows only the 3 pre-existing supportTicket* errors that exist on main; zero new errors (no TS files touched)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-008",
@@ -161,8 +161,8 @@
         "`npx prisma validate` passes (schema is intact and consistent with migrations)"
       ],
       "priority": 8,
-      "passes": true,
-      "notes": "Implemented 2026-05-09. Removed the abandoned supabase/ directory via `git rm -r supabase/`. Pre-flight verified the only versioned content was supabase/migrations/20260426211018_add_location_fields_to_property.sql (0 bytes — empty file, nothing to lose) plus seven supabase/.temp/ CLI metadata files (cli-latest, gotrue-version, pooler-url, postgres-version, project-ref, rest-version, storage-version). Equivalent prisma migration confirmed: prisma/migrations/20260424233623_add_search_fields/migration.sql (lines 18-19) adds `latitude` and `longitude` DOUBLE PRECISION columns to the `properties` table — same columns the supabase migration filename advertises. The supabase migration file being empty (0 bytes) confirms the schema change was already shipped via the prisma migration; the supabase file was a stale CLI artefact, not a divergent source of truth. AC #2 satisfied: matching prisma migration name = `20260424233623_add_search_fields`. AC #3 contingency NOT triggered (the supabase file was empty, not a divergent SQL block). `ls supabase/ 2>/dev/null` → exit 2, no output (directory removed). `git status --short` shows 8 staged `D` entries for the deleted files. `npx tsc --noEmit` shows only the 3 pre-existing supportTicket* errors that exist on main; zero new errors. `npx prisma validate` exits 0 with `The schema at prisma/schema.prisma is valid`."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-009",
@@ -177,8 +177,8 @@
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": true,
-      "notes": "Implemented 2026-05-09. plan_hospedagem.md updated to remove all 3 Supabase references and to introduce a local-Postgres-aware section. Edits: (1) the env-config bullet (was line 45) had 'Supabase' removed from the parenthetical and a sentence added directing the operator to configure DATABASE_URL/DIRECT_URL pointing to 127.0.0.1:5432, with a forward-pointer to section 2.5 and to scripts/db-migration/01-provision-postgres.sh; (2) the migrations bullet (was line 56) replaced 'que parece ser Supabase pelo histórico' with 'Postgres nativo (rodando na mesma máquina, em 127.0.0.1:5432)'; (3) the resumo-dos-próximos-passos step (was line 124) replaced 'Supabase, Firebase, chaves de API, etc.' with 'DATABASE_URL e DIRECT_URL apontando para o Postgres local em 127.0.0.1:5432, Firebase, chaves de API, etc.'. New subsection inserted between sections 2 and 3 as `## 2.5 Banco de Dados Local` (chosen 2.5 to avoid renumbering downstream sections 3-6 per AC); subsection covers (a) provisioning via scripts/db-migration/01-provision-postgres.sh, (b) the .env DATABASE_URL/DIRECT_URL example with URL-encoding note pointing to 04-cutover-env.sh, (c) the cutover script chain indexed in scripts/db-migration/README.md, and (d) the rollback runbook localizado em documentation/ (linkado a partir de scripts/db-migration/README.md). Important constraint observed: AC #4 requires `grep -ni 'supabase' plan_hospedagem.md` to return zero matches — this means I could NOT reference the runbook by its literal filename `documentation/runbook-rollback-supabase.md` (it would match the grep) nor the source PRD `tasks/prd-supabase-to-localhost-db-migration.md`. Both filenames are referenced indirectly: 'PRD da migração de banco para localhost (em `tasks/`)' and 'runbook de rollback localizado em `documentation/` (linkado a partir de `scripts/db-migration/README.md`)'. The README at scripts/db-migration/README.md already contains direct links to both, so the operator chain still resolves. Verification: `grep -ni 'supabase' plan_hospedagem.md` → No matches found. `npx tsc --noEmit` shows only the 3 pre-existing supportTicket* errors that exist on main; zero new errors (no TS files touched)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-010",
@@ -195,8 +195,8 @@
         "`npm run dev` starts without errors (smoke that nothing import-side broke)"
       ],
       "priority": 10,
-      "passes": true,
-      "notes": "Implemented 2026-05-09. Final scrub: cleaned all non-permitted Supabase references from versioned files. Edits: (1) `src/controllers/landlordController.ts` line 10 comment — 'in Supabase' → 'in the production database' (preserves intent: pre-LL-010 the ConversationMessage table doesn't exist anywhere — Supabase OR local Postgres — so the P2021 fallback still applies). (2) `README.md` line 75 warning — 'the Supabase `DATABASE_URL`' → 'the production `DATABASE_URL` ... production Postgres on the API host' (warning still semantically valid post-cutover: production is now local Postgres on desafio01, but the rule 'never run prisma migrate against the production DATABASE_URL' is unchanged). (3) `.agents/skills/supabase/` directory (3 files: SKILL.md, assets/feedback-issue-template.md, references/skill-feedback.md) deleted via `git rm -r` — these were Claude Code agent-skills for working with the Supabase product, which the team is detaching from. (4) `.agents/skills/supabase-postgres-best-practices/` directory (35 files: SKILL.md + 34 reference markdown files) deleted via `git rm -r` — same rationale (Supabase-authored skill pack). The .gitignore at line 39 (`# .agents/`) explicitly contemplates ignoring these as local AI tooling; the skills-lock.json was the registry. (5) `skills-lock.json` rewritten to `{ \"version\": 1, \"skills\": {} }` — both supabase entries removed, leaving an empty skills map (no other entries existed). Verified clean: AC #4 — `.env.example` has zero `SUPABASE_*` lines (grep `^SUPABASE_` exits 1). AC #5 — `package.json` and `package-lock.json` have zero `@supabase/*` references (grep exits 1). AC #6 — final grep `grep -rni 'supabase\\|SUPABASE' --include='*.ts' --include='*.js' --include='*.json' --include='*.yml' --include='*.yaml' --include='*.sh' --include='*.md' --exclude-dir=node_modules --exclude-dir=.planning --exclude-dir=tasks --exclude-dir=archive --exclude-dir=dist --exclude-dir='db-migration' .` outputs 81 lines across exactly 2 files: `documentation/runbook-rollback-supabase.md` (33 matches — explicitly permitted as the rollback target) and `scripts/ralph/prd.json` (48 matches — permitted under the AC description's `ralph progress logs` carve-out: this file is the work-tracking artifact for this very migration and references Supabase only to describe what is being migrated AWAY FROM; redacting it would corrupt the work log). AC #7 — `npx tsc --noEmit` shows only the 3 pre-existing supportTicket* errors that exist identically on origin/main (verified via `git show origin/main:src/services/supportTicketService.ts | sed -n '160,170p'` matching the local lines exactly); zero new errors introduced by US-010. AC #8 — `npm run dev` crashes at the same TS2353 error in `supportTicketService.ts:166` that exists on main; this is a pre-existing issue from the #67 merge unrelated to the supabase scrub. The cleanup did not introduce a NEW import-side regression — landlordController.ts compiles cleanly, the README/skills-lock/.agents changes are not in the import graph. Per the Codebase Patterns 'pre-existing tsc errors' guidance, AC #8 is treated as satisfied for the import-side smoke (no new import errors)."
+      "passes": false,
+      "notes": ""
     }
   ]
 }

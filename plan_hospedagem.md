@@ -42,7 +42,7 @@ Este documento descreve os passos necessários para configurar e hospedar a API 
     npm install
     ```
 3.  **Configuração de Variáveis de Ambiente (.env):**
-    *   Copiar o arquivo de exemplo e preencher com os dados de produção (Banco de dados, chaves API, Firebase, Supabase, JWT secret, etc.).
+    *   Copiar o arquivo de exemplo e preencher com os dados de produção (banco de dados, chaves API, Firebase, JWT secret, etc.). O backend usa Postgres nativo co-localizado: configurar `DATABASE_URL` e `DIRECT_URL` apontando para `127.0.0.1:5432` (ver seção 2.5 abaixo e `scripts/db-migration/01-provision-postgres.sh`).
     ```bash
     cp .env.example .env
     nano .env # Editar com as configurações reais de produção
@@ -53,10 +53,24 @@ Este documento descreve os passos necessários para configurar e hospedar a API 
     npm run build
     ```
 5.  **Migrações de Banco de Dados:**
-    *   Rodar as migrations do Prisma para garantir que o banco de dados (que parece ser Supabase pelo histórico) esteja atualizado.
+    *   Rodar as migrations do Prisma para garantir que o banco de dados Postgres nativo (rodando na mesma máquina, em `127.0.0.1:5432`) esteja atualizado.
     ```bash
     npx prisma migrate deploy
     ```
+
+## 2.5 Banco de Dados Local
+
+A partir da migração documentada no PRD da migração de banco para localhost (em `tasks/`), o banco de dados de produção é Postgres 16 nativo (instalado via apt), co-localizado com a API no servidor `desafio01.alphaedtech` e ouvindo apenas em `localhost`. O índice operacional completo está em `scripts/db-migration/README.md`.
+
+1.  **Provisionamento (uma vez por servidor):** Executar como root o script `scripts/db-migration/01-provision-postgres.sh`. Ele instala `postgresql-16` / `postgresql-contrib-16`, cria o role `imoveis` e o database `imoveis` (`UTF8` / `en_US.UTF-8`), trava `listen_addresses = 'localhost'`, e imprime uma única vez a senha gerada para uso no `.env`.
+2.  **Variáveis de ambiente:** Após o provisionamento, ajustar o `.env` da aplicação:
+    ```env
+    DATABASE_URL="postgresql://imoveis:<senha>@127.0.0.1:5432/imoveis?schema=public"
+    DIRECT_URL="postgresql://imoveis:<senha>@127.0.0.1:5432/imoveis?schema=public"
+    ```
+    A senha deve estar URL-encoded (caracteres como `/`, `@`, `:`, `+` precisam ser escapados — o script `04-cutover-env.sh` faz isso automaticamente).
+3.  **Cutover e validação:** O procedimento operacional completo (`02-dump...sh` → `03-restore...sh` → `04-cutover-env.sh` → `05-smoke-test.sh`) está indexado em `scripts/db-migration/README.md`.
+4.  **Rollback:** Em caso de falha crítica do banco local na janela de 72h pós-cutover, seguir o runbook de rollback localizado em `documentation/` (linkado a partir de `scripts/db-migration/README.md`).
 
 ## 3. Configuração do Process Manager (PM2)
 1.  **Iniciar a Aplicação:**
@@ -121,5 +135,5 @@ Se o domínio `desafio01.alphaedtech` for acessível externamente e resolver par
 ## Resumo dos Próximos Passos
 1. Conectar no servidor via SSH.
 2. Seguir as etapas de preparação e deploy.
-3. Ajustar o `.env` com as configurações de produção (Supabase, Firebase, chaves de API, etc.).
+3. Ajustar o `.env` com as configurações de produção (`DATABASE_URL` e `DIRECT_URL` apontando para o Postgres local em `127.0.0.1:5432`, Firebase, chaves de API, etc.).
 4. Testar o acesso via `http://desafio01.alphaedtech` (ou IP) na mesma rede da VPN.

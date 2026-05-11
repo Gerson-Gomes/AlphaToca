@@ -7,9 +7,10 @@ const PROFILE_VIEW_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 async function countUnreadMessages(landlordId: string): Promise<number> {
   // LL-010 will add the ConversationMessage model. Until that migration lands
-  // the table does not exist in Supabase, so the COUNT below would throw a
-  // P2021 "table does not exist" error. Swallow exactly that case and return
-  // 0 so the dashboard top-card renders without falling back to mocks.
+  // the table does not exist in the production database, so the COUNT below
+  // would throw a P2021 "table does not exist" error. Swallow exactly that
+  // case and return 0 so the dashboard top-card renders without falling back
+  // to mocks.
   try {
     return await (prisma as any).conversationMessage.count({
       where: {

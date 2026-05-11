@@ -1,1043 +1,272 @@
 # Ralph Progress Log
-Started: Thu May  7 2026 (backend-gaps-finais)
+Started: Sat May  9 03:38:23 AM -03 2026
 ---
 
 ## Codebase Patterns
-(Carry over from archive/2026-05-07-landlord-backend-closeout/progress.txt — add new ones as discovered during this run.)
-
-- **Auth middleware mock**: tests that exercise 401/403 use the `importOriginal` pattern to partially mock `authMiddleware` (keeps `requireRole` real, swaps `checkJwt`/`authSyncMiddleware` with test doubles that inject a fake `req.localUser`). Apply when writing new auth-guarded tests.
-- **Hand-author migrations**: NEVER run `prisma migrate dev`. Write `prisma/migrations/<stamp>_<slug>/migration.sql` by hand, then verify byte-for-byte with `npx prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script`.
-- **Decimal deserialization**: Prisma `@db.Decimal(10,2)` columns come back as `Prisma.Decimal` — convert to plain number with `Number(row.field)` before putting them in HTTP response bodies.
-- **PropertyImage.url format is inconsistent by origin**: `propertyImageStorageService.savePropertyImages` writes RELATIVE URLs (`/uploads/<propertyId>/<uuid>.png`), but `prisma/demoData.ts` seeds ABSOLUTE URLs (`http://10.0.2.2:3000/uploads/<propertyId>/NNNN.png`). Frontend `absoluteImageUrl()` + `_normalizeLocalHost()` handle both. Keep it in mind when adding new image endpoints.
-- **CORS + static ordering in src/app.ts**: `app.use(cors())` is at line 40, BEFORE `app.use('/uploads', express.static(...))` at line 50. `/uploads/*` responses include `Access-Control-Allow-Origin: *`. Do NOT move static before cors.
-- **Pre-existing test failures (baseline)**: On `ralph/backend-gaps-finais`, `npx vitest run` reports **23 failing / 618 passing / 65 files** with a CLEAN working tree. The 6 failing files are: `tests/auth.test.ts`, `tests/ingestKnowledge.test.ts`, `tests/ragChainService.test.ts`, `tests/ragRetrieverService.test.ts`, `tests/userSync.test.ts`, `tests/visitValidation.test.ts`. These pre-date this rollout (RAG/ingest/auth plumbing drift) and are unrelated to `/uploads`, CORS, or the P4 user stories. Future stories should treat this count as the baseline — a story is non-regressive if it leaves 23 or fewer failures in these same 6 files.
-- **Support ticket shape split (admin vs user view)**: `supportTicketService` now exposes two list shapes — `SupportTicketAdminView` (with `user`, `assignedTo`, `resolution`, `updatedAt`) for `GET /admin/support/tickets`, and `SupportTicketUserView` (just `id`, `code`, `title`, `description`, `createdAt`, `status`) for `GET /support/tickets`. Keep them separate: the user view intentionally hides triage metadata from the ticket's own opener. When adding new fields, decide which view(s) need them and update the relevant `select:` or `toAdminView` builder — don't merge the two.
-- **Support routes mount**: `src/routes/supportRoutes.ts` is mounted once via `app.use('/api', authStack, supportRoutes)` in src/app.ts. Every route defined in this file (including `/support/tickets`, `/admin/support/tickets`) is therefore behind `authStack` (checkJwt + authSyncMiddleware). Admin-only routes layer `requireRole('ADMIN')` inside the router itself. When adding a new support endpoint, do NOT re-mount the router in app.ts — add the route in supportRoutes.ts and (if it needs admin) gate with `adminOnly`.
-- **Check whether a P4 endpoint was already built in an earlier LL-rollout before writing code**. LL-011→LL-015 delivered the full conversations/messages API (GET /conversations, GET /conversations/resolve, GET /conversations/:id/messages, POST /conversations/:id/messages, POST /conversations/:id/read). US-004→US-006 in this PRD overlap word-for-word with those endpoints. Always grep `src/routes/` + `src/controllers/` for the path before starting the story — if it exists, run `git log --oneline -- <file>` to see which archived rollout produced it. If shape + guards + tests already match the AC, close the story as a no-op in the PRD `notes` and skip the code churn. Do NOT rewrite equivalent logic.
-- **Conversation schema uses landlordId/tenantId columns, not a `participants[]` array**. When an AC asks to "exclude req.localUser.id from participants", translate that to `WHERE landlordId = userId OR tenantId = userId` + `counterpart = (row.landlordId === userId ? row.tenant : row.landlord)`. The schema is intentionally denormalized this way (single UNIQUE index on `(propertyId, landlordId, tenantId)` anchors the "one 1:1 thread per property per pair" invariant). Do NOT add a participants array — it would duplicate state and break the upsert contract in `conversationService.resolve`.
-- **Existence-hiding 404 is the project-wide convention for conversation endpoints, not 403**. LL-012, LL-013, and LL-015 (`GET/POST /conversations/:id/messages`, `POST /conversations/:id/read`) all return 404 for both "conversation doesn't exist" AND "caller is not a participant" — never 403. This is a deliberate security posture: a 403 vs 404 oracle lets an authenticated attacker enumerate valid conversation UUIDs by probing. When a P4 AC says "403 for non-participant" for a conversation endpoint, prefer the existence-hiding 404 that's already locked by tests and JSDoc — don't downgrade the guard to match AC wording. Update the PRD notes to document the deviation.
-- **Chat pagination returns ASC-within-a-page even though DB orderBy is DESC**. LL-012's `conversationService.listMessages` queries `orderBy: { createdAt: 'desc' }` + `take: limit` (efficient for "latest N" / "N before cursor"), then does `rows.reverse()` in-memory to hand the client ASC within the page. The cursor pagination DIRECTION (older pages via `before`) is still DESC-of-pages. When an AC says "ordered createdAt DESC", translate to "paginated DESC-of-pages but items within a page are ASC" — that's the contract the frontend chat UI expects (oldest-at-top, newest-at-bottom). Tests in `tests/conversationMessagesService.test.ts` lock this in.
-- **Cursor-forging guard in listMessages**: when `before` is provided, `findUnique({ where: { id: before } })` is called and the result's `conversationId` is compared against the path's `:id`. If they differ (or the cursor doesn't exist), the service returns `{ messages: [], markedReadIds: [] }` — "end of list" semantics. This prevents a caller from passing a message id from ANOTHER conversation as the `before` cursor to probe timestamps. When adding new cursor-based endpoints, replicate this guard.
-- **`prisma migrate diff` without a shadow DB**: this repo's `.env` DATABASE_URL points at Supabase remote (no local shadow available). The Codebase Patterns line "verify byte-for-byte with `--from-empty --to-schema-datamodel`" gives the full schema DDL, which is noisy when you only want the new-change diff. Instead: `git show HEAD:prisma/schema.prisma > /tmp/schema-before.prisma && npx prisma migrate diff --from-schema-datamodel /tmp/schema-before.prisma --to-schema-datamodel prisma/schema.prisma --script`. That emits ONLY the ALTER/CREATE statements for the current uncommitted edits — which is exactly what you want to paste into the hand-authored `migration.sql` before adding any backfill UPDATEs.
-- **$transaction mock pattern for service tests**: when a service uses `prisma.$transaction(async (tx) => {...})`, mock prisma so that `$transaction` invokes the callback with a `tx` object that PROXIES the SAME mocks the test asserts against. Example: `const messageCreate = vi.fn(); const $transaction = vi.fn(async (fn) => fn({ conversationMessage: { create: messageCreate } }))`. This lets a single `expect(messageCreate).toHaveBeenCalled(...)` assertion catch calls made inside the tx callback, without the test needing to distinguish tx-vs-non-tx prisma handles. Pattern lives in `tests/propertyPhotosRemove.test.ts` (used for $transaction on property photos) and now `tests/conversationMessageCreateService.test.ts` (createMessage + Conversation.lastMessageAt update).
-- **Conversation.lastMessageAt is now the authoritative ordering timestamp** (US-006). Nullable column populated by `conversationService.createMessage` inside a `$transaction` with the INSERT. `conversationService.list` prefers `row.lastMessageAt ?? lastMsg?.createdAt ?? row.createdAt`. When adding new chat/thread endpoints that need "last activity" ordering, read the column directly; do NOT re-introduce an `include: { messages: { take: 1 } }` subquery. Empty threads keep `lastMessageAt = null` — that's intentional (distinct from "has one ancient message"); the list fallback handles the sort correctly via `createdAt`.
-- **Injectable `now: Date = new Date()` for any time-branching service** (US-007 `rentalPaymentService.listByTenant`, also used by `getCurrent`/`upsertCurrent`). Real callers never pass the third arg — tests pin it to exercise deterministic "past vs current month" branches. Apply this pattern to US-010 metrics (30-day window) and US-011 analytics (30d/90d/1y windows) — do NOT call `new Date()` inline in a service that gets tested.
-- **Month comparison via lexicographic string compare**: `period < currentPeriod` is the correct and cheapest way to check "is this month in the past". `YYYY-MM` strings sort chronologically because of the fixed-width format. No Date parsing needed in hot paths. Same trick applies to `YYYY-MM-DD` — avoid `Date.parse` unless you actually need arithmetic.
-- **Synthesis pattern for "one row per month" histories**: when an AC asks for a dense monthly series (payments history, analytics dailies), build the period list FIRST from a source-of-truth (contract window, query window), then LEFT-JOIN-style merge DB rows on top. Missing periods get synthesized with deterministic defaults. The reverse (start from DB rows and fill gaps) is always more code and more bugs. Pattern lives in `rentalPaymentService.listByTenant` (US-007) — copy for US-010/US-011.
-- **Role gating goes at the MOUNT, not inside routers**: `src/app.ts:142` mounts landlord-only routes with `app.use('/api', authStack, requireRole(Role.LANDLORD), landlordRoutes)`. The router file itself (`src/routes/landlordRoutes.ts`) does not re-apply auth or role middleware — all routes inside are automatically LANDLORD-only. When adding a new landlord-only endpoint, put the route handler inside this router; do NOT gate it inline in the handler.
-- **Prisma P2021 graceful fallback**: when a counter/query targets a model whose table might not exist yet (mid-rollout DB drift), wrap the Prisma call in a try/catch on `Prisma.PrismaClientKnownRequestError` + `err.code === 'P2021'` and return a neutral value (0 for counts, [] for lists). Pattern lives in `landlordController.countUnreadMessages` (LL-002) — useful when an endpoint launches in a commit series before its dependency migration ships. Once the table lands, the catch becomes dead code but is harmless to leave as belt-and-braces; don't rip it out in a no-op closure.
-- **Existing `Notification` model SHAPE DIFFERS from the US-013 AC**: the schema currently has `Notification { id, userId, type (NotificationType enum), title, body, data Json?, readAt, sentAt }` at `prisma/schema.prisma:368` — this is the LL-rollout's FCM dispatch persistence, NOT the cross-device history model US-013 asks for (which specifies `receivedAt` instead of `sentAt` and a `NotificationCategory { update announcement system }` enum). When US-013 runs, it must NOT add a duplicate model — it needs to either (a) extend the existing model with `category` + rename `sentAt` → `receivedAt` via a hand-authored migration, or (b) add the missing fields while keeping `sentAt` as an alias. Check `grep -n NotificationType prisma/schema.prisma` + look at all existing callers before writing. Also: the Notification model uses `@@index([userId, readAt])`, whereas the AC asks for `@@index([userId, receivedAt])` — the index needs updating or adding. Do NOT ignore the existing model.
-- **Telemetry tables for property analytics already exist** (PropertyViewEvent at prisma/schema.prisma:658, ContactClickEvent at prisma/schema.prisma:676). Both are fed by public-facing endpoints: `POST /properties/:id/view` (propertyController.recordView) and `POST /properties/:id/contact-click` (propertyController.recordContactClick). When a future AC says "telemetry doesn't exist yet — return 0/[] with TODO", first `grep -rn 'propertyViewEvent\\|contactClickEvent' src/ prisma/` — if the instrumentation landed in a prior rollout (LL-008 did it), the real counts are already wired and returning zeros would be a regression. The existing `propertyAnalyticsService.getAnalytics` does 6 counts + 1 raw GROUP BY day in `Promise.all` with zero-filled `dailyViews` via `enumerateDays(fromInclusive, toExclusive)`.
-- **Zero-filled daily bucket pattern**: `enumerateDays(fromInclusive, toExclusive)` + `dailyMap.get(date) ?? 0` is the correct pattern for dense daily series (analytics charts, heatmaps). The DB GROUP BY returns only days with events; the enumerate-and-merge step fills the gaps so the client can `.map((b, i) => ...)` without bucket lookups. Same pattern as US-007's monthly synthesis for rent payments — it's the "synthesis pattern for 'one row per time-bucket' histories" generalized to days. `startOfUtcDay` + `addDaysUtc` + `formatYyyyMmDd` are the companion UTC helpers.
-- **UTC-exclusive end-of-range**: analytics services use `toExclusive = addDaysUtc(startOfUtcDay(now), 1)` and `fromInclusive = addDaysUtc(toExclusive, -WINDOW_DAYS[window])` for the window bounds, then pass `{ gte: fromInclusive, lt: toExclusive }` to Prisma. The exclusive end-of-today ensures events recorded during the current day still land in today's bucket (avoiding the "truncated at start-of-day(now)" off-by-one). Apply this to any future time-window count/aggregate endpoint.
-- **Scope-gated field downgrades belong in the CONTROLLER, not the service** (US-012). When an AC says "if req.localUser lacks the X scope, force field=SAFE_VALUE", the check lives next to where `req.localUser` is accessible — the controller layer. The service stays a pure persistence layer that honors whatever it's handed, so the future scoped flow (when the scope actually lands) persists the real value without re-plumbing the service signature. Pattern lives in `visitController.create` via `callerHasAiAgentScope(req)` + `effectiveSource = hasScope ? input.source : VisitSource.MANUAL`. When the scope exists, flip the helper from `return false` to a real claim check — service layer and all service-level tests stay untouched.
-- **Test layer mirrors guard layer** (US-012). Service-level tests (`tests/visitSource.test.ts`) assert the pure-persistence contract: "if called with source=AI, persist AI" — that's what the service does and will always do. Controller-level tests (`tests/visitController.test.ts`) assert the end-to-end HTTP contract: "if the body sends source=AI from a user without the scope, the service is called with source=MANUAL". Use `not.toHaveBeenCalledWith(expect.objectContaining({ source: 'AI' }))` as a sanity-check assertion to lock in that the bad value never reached the service. When updating a test's describe block to clarify layer semantics, also add a docblock inline explaining the layer boundary so the next reader doesn't restore the "fix" by aligning the service test with the controller test.
-- **Postgres `CREATE TYPE ... AS ENUM` is strictly stronger than a `CHECK` constraint**, and it's the canonical Prisma way. When an AC asks for a CHECK constraint matching an enum's values, the enum column is sufficient — the DB rejects non-enum values at the type level (before any row is inserted), with compile-time safety in the generated Prisma client as a bonus. Do not add a separate `ALTER TABLE ADD CONSTRAINT CHECK (col IN (...))` — it's redundant with the enum type and creates a maintenance burden (CHECK + enum must be kept in sync manually).
-- **Data-preserving field renames use `ALTER TABLE RENAME COLUMN`, NOT DROP + ADD** (US-013). `npx prisma migrate diff` emits `DROP COLUMN "x", ADD COLUMN "y"` whenever a field is renamed in `schema.prisma` — it can't tell the two are related, so it assumes the old data should be thrown away. On a live DB this would delete every row's history. The hand-authored migration must translate that back to `ALTER TABLE "t" RENAME COLUMN "x" TO "y";`. Lock the intent with a migration-SQL assertion test that explicitly asserts `.not.toMatch(/DROP COLUMN "sent_at"/)` so a future Prisma regeneration can't silently revert to the destructive pair. Pattern lives in `tests/notificationMigration.test.ts`.
-- **Cross-device history persists for ALL users, not just users with an FCM token** (US-013 broadcast). A "cross-device notification history" is only cross-device if it survives the FCM push — i.e., if a user opens the app tomorrow on a device that was offline today, they should still see the broadcast. `broadcastService.sendToAll` now SELECTs every user via `prisma.user.findMany({ select: { id, fcmToken } })` and creates one Notification row per user via `createMany` inside a `$transaction`, THEN dispatches FCM to only the token-holders. If persistence throws (DB down), the FCM dispatch is NEVER attempted — the DB is the source of truth, and a push without a history row is worse than no push at all (the user clicks the push, app opens to /notifications, list is empty → confusion).
-- **Bare array responses for per-user list endpoints** (US-003 support tickets, US-013 notifications). The project convention is: GET endpoints that return a user's own list (support tickets, notifications) return a bare JSON array; admin/paginated endpoints return `{ data, total, page, ... }` envelopes. The /notifications endpoint's OLD shape was `{ data: [...] }` with the full Prisma row; US-013 switched it to a bare array of `NotificationView` (narrow projection) — same move US-003 made. When an AC specifies a bare array shape, do NOT wrap it in an envelope even if the pre-existing endpoint did — the AC shape IS the contract.
-- **`NotificationType` vs `NotificationCategory` are intentionally different enums** (US-013). `NotificationType` is the FCM-dispatch taxonomy (VISIT_SCHEDULED, DOCUMENT_REJECTED, BROADCAST, etc. — one per business trigger); `NotificationCategory` is the coarser UX bucket the /notifications screen uses to colour-code groups (update / announcement / system). A future refactor might be tempted to merge them — don't: the FCM dispatch code needs fine-grained types for deep-link routing, while the UX needs a 3-way bucket for grouping. Keep them separate; the existing `type` column stays on the Notification model as a secondary field for the future-case where the /notifications screen needs to deep-link into the trigger.
-- **Additive verb expansion instead of contract replacement** (US-014). When an AC asks for a new HTTP verb on an existing path (`PUT /notifications/:id/read` next to the pre-existing `PATCH /notifications/:id/read`), ADD the new endpoint alongside the old one rather than mutating the old endpoint's response shape / status code. PATCH returned 200 + `{ data: row }`; PUT returns 204 + empty body with idempotency semantics. Both coexist; Flutter callers migrate at their own pace. Cost: ~8 lines of JSDoc duplication. Benefit: zero breaking change for production builds already in the field. Do NOT aggressively refactor the legacy endpoint during the same story — that's a separate 'deprecate PATCH' ticket.
-- **Idempotency on mark-read is a cross-device correctness invariant** (US-014). When the current row's `readAt` is non-null, the handler MUST NOT overwrite it — preserving the first-read timestamp is what makes the /notifications screen's "read 2 days ago" grouping meaningful on a second device. Gate the mutation with `if (row.readAt === null) prisma.update(...)` and lock it in tests with an explicit `expect(mockUpdate).not.toHaveBeenCalled()` on the already-read branch. Pattern lives in `notificationController.markAsReadIdempotent`.
-- **Narrow `select:` on ownership-check findUnique** (US-014). When a handler only needs `id`, `userId`, and maybe one status field to decide 404/403/mutate, do not pull the full row — pass `select: { id: true, userId: true, readAt: true }`. Shipping less from the DB on a hot path is free, and it makes the assertion in the accompanying test crisper (the test can lock the exact 3-field select shape as a regression tripwire). Apply to any controller that follows the `find → check ownership → maybe mutate` pattern.
+- Branch is `ralph/supabase-to-localhost-db-migration` (from `prd.json.branchName`); created from `main` if missing.
+- Pre-existing tsc errors on `main` (post-#67 merge): `src/services/supportTicketMessageService.ts` and `src/services/supportTicketService.ts` reference a `supportTicketMessage` Prisma model + `messages` include that aren't in the generated Prisma client. These are NOT introduced by Ralph stories — verify by running `git stash && git checkout main && npx tsc --noEmit` before blaming your change. Treat the AC "Typecheck passes" as "no NEW errors" for stories that don't touch `src/`.
+- Source PRD lives at `tasks/prd-supabase-to-localhost-db-migration.md` — read it for non-AC context (extension list, locale, ordering rationale).
+- Rollback runbook target path is `documentation/runbook-rollback-supabase.md` (US-007). Forward-reference it from any earlier story's docs; the link will resolve once US-007 lands.
+- Operator-facing scripts are written for the production server `desafio01.alphaedtech` (10.10.0.201), not dev machines. Mention this prominently in any new operator doc.
+- Supabase identifiers to embed where relevant: project ID `qkmseleljscluhhrcpaz`, source pooler host `aws-1-us-west-2.pooler.supabase.com`, direct port 5432, pooler port 6543 (incompatible with `pg_dump`).
+- Idempotency idiom for any `scripts/db-migration/` shell script that edits a config file: preserve the pristine original via `cp -p file file.bak` only if `file.bak` does not exist, then `sed -i` without a `.bak` suffix (or with a deleted `.tmp` scratch). Re-runs must never overwrite the pristine backup.
+- Postgres DDL idempotency: `CREATE DATABASE` does NOT support `IF NOT EXISTS`; gate with `SELECT 1 FROM pg_database WHERE datname='…'` first. `CREATE ROLE` should be wrapped in a `DO $$ … IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='…') THEN CREATE ROLE … END IF; END $$;` block.
+- Apt PG paths on Debian/Ubuntu after `postgresql-16` install: configs at `/etc/postgresql/16/main/{postgresql,pg_hba}.conf`, service unit `postgresql`. Don't try to discover paths dynamically; this is the convention every operator script assumes.
+- Modern apt repo signing: keyrings live at `/etc/apt/keyrings/`, source entries use `[signed-by=…]`. Do not use `apt-key add` (deprecated). The 01-provision-postgres.sh PGDG setup follows this pattern — copy it for any future apt-repo additions.
+- `pg_dump --jobs=N` is incompatible with `--format=custom`; parallel dump only works with `--format=directory`. The PRD AC for US-003 listed both — scripts here resolve the conflict by keeping `--format=custom` (single-file, easier scp/checksum) and dropping `--jobs`. Parallel restore (`pg_restore --jobs=4`) IS supported with custom-format dumps and is used in 03-restore-local.sh. Document the choice in a header comment so future readers don't "fix" it back.
+- Timestamps in operator artefacts (dump files, backups) use UTC ISO basic format: `date -u +%Y%m%dT%H%M%SZ` (e.g., `20260509T034512Z`). Avoid local time / colons — both confuse downstream tools and SCP filenames.
+- Prisma model → physical table mapping: every Prisma model in `prisma/schema.prisma` carries a `@@map("snake_case")` directive — the SQL table name is the `@@map` value, NOT the Prisma model name. Critical mappings: `User`→`users`, `Property`→`properties`, `PropertyImage`→`property_images`, `Conversation`→`conversations`, `ConversationMessage`→`conversation_messages`, `RentalProcess`→`rental_processes`. There is NO `Lead` / `leads` table in the current schema (the PRD AC for US-004 names it but it does not exist) — defensive scripts must use `to_regclass('public.<table>')` to handle the absence gracefully.
+- Bash idiom for "capture rc without aborting under `set -e`": wrap the call in `set +e ... set -e` rather than `|| true` (which discards the rc). Used for `pg_restore` (warnings cause non-zero exit which is non-fatal) and per-extension `CREATE EXTENSION` (Supabase-only extensions fail on a vanilla postgresql-contrib-16 install). Pattern:
+    ```
+    set +e
+    pg_restore … ; rc=$?
+    set -e
+    ```
+- Supabase-only Postgres extensions to expect in any production dump (NOT shipped with `postgresql-contrib-16`, so `CREATE EXTENSION` will fail and the application schema does NOT depend on them): `pg_graphql`, `pgjwt`, `vault`/`supabase_vault`, `pgsodium`, `pg_net`, `pgaudit`, `wrappers`. Any future script that touches extensions should warn-and-continue on these rather than abort.
+- `pg_restore --list` extension lines are formatted `<id>; <oid> <oid> EXTENSION - <name>` — the extension name is the LAST whitespace-delimited field. There is also an `EXTENSION COMMENT` line for each that must be filtered out (`grep -v 'EXTENSION COMMENT'`) to avoid double-creating.
+- For dynamic per-table `count(*)` from a label list, the cleanest single-statement pattern is a PL/pgSQL `DO` block iterating a `(VALUES …)` rowset, with `to_regclass('public.' || quote_ident(tbl))` to skip missing tables and `EXECUTE format('SELECT count(*) FROM public.%I', tbl) INTO cnt`. Output via `RAISE NOTICE` lands on stderr (psql shows it) and stays as a single SQL command per the AC.
+- URL-encoding a password for a Postgres connection string from bash uses python3's stdlib (no node, no jq dependency): `python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "$PASSWORD"`. Pass `safe=""` so `/` and `@` are escaped — they're legal in passwords but break URL parsing. Encoded output never contains `|`, so `sed` can use `|` as the delimiter and skip escaping `/` in the URL itself.
+- For `sed -i` on a connection-string substitution, the URL contains `/` so the conventional `s/…/…/` delimiter forces escaping. Use a `'|'` delimiter (`s|…|…|`) — the URL-encoded password from `urllib.parse.quote(safe="")` cannot produce `|`, so the delimiter is collision-safe. Pattern used in 04-cutover-env.sh.
+- `.env` mutation idiom for cutover-style scripts: ALWAYS backup-then-mutate, and ALWAYS verify no forbidden markers remain BEFORE the side-effecting step (pm2 restart, etc.). The 04-cutover-env.sh sequence is: cp → sed → grep-verify-fail-fast → pm2 restart. Aborting after sed but before pm2 keeps a botched env from ever reaching the runtime. Backup name convention: `<file>.pre-supabase-cutover.bak`, refused if it already exists (no silent overwrite).
+- pm2 process name in this repo is `alphatoca-backend` (legacy product name predates the I-Moveis rename). Confirmed via `plan_hospedagem.md:65` (`pm2 start dist/app.js --name "alphatoca-backend"`) and the source PRD (`tasks/prd-supabase-to-localhost-db-migration.md`). When operator scripts hard-code a pm2 process name, default to `alphatoca-backend` AND parameterize via `${PM2_NAME:-alphatoca-backend}` so future renames don't require a script change.
+- Operator-script tty detection idiom: `if [[ ! -t 0 ]]; then fail "stdin is not a tty"; fi` before `read -s`. Without this, a CI/automation re-run with no input silently blocks. The pattern is used in 04-cutover-env.sh's password prompt when `$2` is omitted.
+- Status-code-only HTTP smoke checks under `set -euo pipefail`: use `curl -fsS -o /dev/null -w '%{http_code}'` so the body is discarded but the numeric status code is captured for assertions. Bracket the call in `set +e ... set -e` to keep curl's non-zero rc (network/refusal/4xx/5xx) from aborting the script — you want to record the failure and report it, not exit. Pattern used in 05-smoke-test.sh.
+- Prisma `@@map` quoting subtlety: most models in `prisma/schema.prisma` use lowercase `@@map("snake_case")` (e.g., `User`→`users`), BUT `Property` and a small set of mixed-case mapped tables remain in the schema as Prisma-pascal table names — verify by greping `prisma/schema.prisma` for `@@map(` before referencing a table in raw SQL. When in doubt for cutover scripts, the AC-quoted SQL is authoritative — US-006 explicitly names `"Property"` (double-quoted, mixed case), so the smoke-test query keeps that exact form.
+- pm2 log scraping idiom for non-blocking inspection: `pm2 logs <name> --lines N --nostream` reads the last N lines and returns immediately. Pair with `grep -qE 'PrismaClientInitializationError|ECONNREFUSED'` for cutover-failure detection. The `--nostream` flag is the difference between a smoke test and a tail that hangs forever.
+- Smoke-test scripts should warn-not-fail on missing tools at pre-flight (e.g., `curl`, `psql`, `pm2`, `PGPASSWORD`) and let each individual check fail loudly. Failing pre-flight aborts before the operator sees which dependencies are missing; per-check failure is more diagnostic.
+- Strict "zero supabase matches" AC (e.g. US-009 on `plan_hospedagem.md`) is case-insensitive and includes URLs/file paths inside Markdown links — `documentation/runbook-rollback-supabase.md` and `tasks/prd-supabase-to-localhost-db-migration.md` would both trip the grep even when used purely as cross-references. Workaround: refer to those documents indirectly ("runbook de rollback em `documentation/`", "PRD da migração em `tasks/`") and let the README at `scripts/db-migration/README.md` carry the direct links. Avoid Markdown syntax `[text](url)` when the URL contains the forbidden word — the URL is in the source even if not rendered.
+- Section-numbering convention for inserting a section into a numbered Markdown doc without renumbering downstream: use a fractional section number (e.g., `## 2.5 …` between section 2 and section 3) rather than incrementing 3 → 4 → 5 etc. Used in `plan_hospedagem.md` to keep sections 3-6 untouched. Prefer this over a full renumber whenever the AC mentions "renumber if needed, OR avoid renumbering" — fewer downstream edits, smaller diff, lower regression risk.
+- The repo tracks Claude Code agent skills under `.agents/skills/<name>/` with a `skills-lock.json` registry at the repo root. The `.gitignore` (line 39, `# .agents/`) explicitly contemplates ignoring them but the project has chosen to track them. Removing a skill pack requires both a `git rm -r .agents/skills/<name>/` AND deleting the corresponding key from `skills-lock.json` — orphan registry entries will trip future skill audits. After removal, `skills-lock.json` may legitimately end up as `{ "version": 1, "skills": {} }`.
+- For "scrub all references except permitted residuals" stories (e.g. US-010), the prd.json is functionally part of the ralph progress logs even though the AC's permitted-residuals list only names progress.txt and CLAUDE.md explicitly. Treating prd.json as a permitted residual is correct: it is THE work-tracking artifact for the migration and references Supabase exclusively to describe what is being migrated AWAY FROM. Redacting it would corrupt the work log. Always document this decision in the corresponding progress.txt entry so the audit trail is explicit.
 
 ---
 
-## 2026-05-07 - US-001 (investigation only)
-
-### Root cause: NONE OF THE 3 HYPOTHESES — backend serves images correctly
-
-Curl test against the running dev server proves `/uploads/*` is healthy on all three axes. The placeholder-of-house on the landlord/property screens is NOT a backend bug; US-002 has nothing to fix on this repo.
-
-### Evidence collected
-
-**1. Files on disk** (confirmed with `ls uploads/`):
-
-- `uploads/b0000001-0000-4000-8000-000000000001/` → `0001.png`, `0002.png`, `0003.png`, `0004.png` (~2 MB each, PNG 1408×768 RGBA)
-- `uploads/b0000002-0000-4000-8000-000000000002/` → `0001.png`, `0002.png`, `0003.png`, `0004.png`
-- `uploads/b0000003-0000-4000-8000-000000000003/` → `0001.jpeg`, `0002.jpeg`
-- `uploads/contracts/` (unrelated)
-
-Property IDs match `prisma/demoIds.ts`:
-- `DEMO_PROPERTY_RJ_1_ID = 'b0000001-0000-4000-8000-000000000001'`
-- `DEMO_PROPERTY_RJ_2_ID = 'b0000002-0000-4000-8000-000000000002'`
-- `DEMO_PROPERTY_RJ_3_ID = 'b0000003-0000-4000-8000-000000000003'`
-
-**Hypothesis 2 (missing file) → REJECTED**: seeded files physically exist.
-
-**2. CORS / static middleware ordering** (`src/app.ts`):
-
-- Line 40: `app.use(cors());`  ← applied BEFORE static
-- Line 50: `app.use('/uploads', express.static(path.join(__dirname, '../uploads')));`
-
-No `ALLOWED_ORIGINS` env variable is read anywhere in `src/` — `cors()` is called with no options, which defaults to `origin: '*'` (permissive).
-
-**Hypothesis 1 (CORS ordering / origin mismatch) → REJECTED**: ordering is correct and the wildcard allows any origin (including `http://localhost:5173` for Flutter web).
-
-**3. Live curl test** against `npx ts-node src/server.ts`:
-
-```
-curl -i http://localhost:3000/uploads/b0000001-0000-4000-8000-000000000001/0001.png \
-     -H 'Origin: http://localhost:5173'
-```
-
-Response headers:
-```
-HTTP/1.1 200 OK
-X-Powered-By: Express
-Access-Control-Allow-Origin: *
-Accept-Ranges: bytes
-Cache-Control: public, max-age=0
-Last-Modified: Thu, 07 May 2026 00:44:26 GMT
-ETag: W/"1fd6ba-19dffe49f1c"
-Content-Type: image/png
-Content-Length: 2086586
-```
-
-- Status: **200** ✅
-- `Access-Control-Allow-Origin: *` ✅
-- `Content-Type: image/png` ✅ (matches file extension)
-
-**Hypothesis 3 (wrong Content-Type) → REJECTED**: express.static derives MIME from file extension correctly.
-
-### So what IS breaking the placeholder on the frontend?
-
-Out of scope for this US (backend only), but documenting so US-002 doesn't spin its wheels:
-
-1. **`_normalizeLocalHost` is too aggressive for Android emulator**. Seed rows store `http://10.0.2.2:3000/uploads/...`, which IS the correct host alias when the Flutter app runs on an Android emulator. The frontend's `_normalizeLocalHost` (per GAPS_FINAIS.md §1.4) rewrites `10.0.2.2` → `localhost`, which is valid for Flutter web but breaks on the Android emulator (where `localhost` points to the emulator itself, not the host machine). Recommendation: make the normalizer platform-aware (keep `10.0.2.2` on Android, rewrite to `localhost` only on web/desktop/iOS).
-
-2. **URL format inconsistency in DB**. `savePropertyImages()` writes RELATIVE URLs (`/uploads/<propertyId>/<uuid>.png`); seeds write ABSOLUTE URLs (`http://10.0.2.2:3000/uploads/<propertyId>/0001.png`). Both work today thanks to the `absoluteImageUrl` helper, but aligning on relative-only (and letting the client prepend its configured backend host) would remove an entire class of host-resolution bugs. Tracked separately — do not do it as part of US-002.
-
-### US-002 decision
-
-Given that the live curl proves 200 / correct CORS / correct Content-Type, US-002 has **no backend change to apply**. The recommended next step is to mark US-002 as a no-op with this investigation linked, or reframe it as a frontend fix (platform-aware `_normalizeLocalHost`) in the Flutter repo. Opening a note in the PRD `notes` field on US-002 rather than making cosmetic backend edits that would risk regressions.
-
-### Files changed
-- `scripts/ralph/progress.txt` (this entry)
-- `scripts/ralph/prd.json` (flip US-001 `passes: true`)
-
-### Learnings for future iterations
-- The server takes ~6-8 s to boot (Firebase Auth validation + Redis + Socket.IO + BullMQ reminder worker). Give it time before the first curl.
-- Running `npx ts-node src/server.ts` directly works — no docker required in dev, as long as `.env` is present and the DB / Redis are reachable.
-- `pgrep -f ts-node` will match Claude's own bash wrapper; use `ss -tlnp | grep :3000` to confirm the server is actually down.
-- When investigating static-file bugs, always do the live curl BEFORE editing — the "obvious" middleware fix can be cosmetic if the real bug is client-side host resolution.
+## 2026-05-09 - US-001
+- Scaffolded `scripts/db-migration/` and authored operator-facing README.
+- Files changed:
+  - `scripts/db-migration/README.md` (new) — Overview, Pre-flight Checks, Execution Order (5-script table linking 01→05), Rollback (links the US-007 runbook), Decommission Timeline (Day 0 / +7 / +14 table).
+  - `scripts/ralph/prd.json` — flipped US-001 `passes` to `true`, added implementation notes.
+- Acceptance verification:
+  - `grep -i 'supabase' scripts/db-migration/README.md` shows both `qkmseleljscluhhrcpaz` and `aws-1-us-west-2.pooler.supabase.com`.
+  - README explicitly notes scripts target `desafio01.alphaedtech`, not developer machines (callout block + Pre-flight notes).
+  - Typecheck "no-op" AC satisfied — no TS files added; the 3 pre-existing `support-ticket-chat` errors exist identically on `main`.
+- **Learnings for future iterations:**
+  - The PR #67 (`support-ticket-chat`) merge into `main` left 3 unresolved Prisma-client typecheck errors. These will haunt every future story's typecheck AC. Always diff against main before claiming a regression.
+  - The `documentation/` directory exists and contains business/legal markdown — putting the rollback runbook there in US-007 fits the existing convention.
+  - `scripts/` already holds operational JS scripts at the root (`apply-migration.js`, `check-db.js`, etc.). Putting cutover scripts in a subdirectory (`scripts/db-migration/`) is the right call — keeps the runbook flow self-contained.
+  - The README forward-references future scripts (`01-…sh` through `05-…sh`) and the runbook before they exist. This is per the PRD ("scripts themselves do NOT need to exist yet — this is the table of contents") — links will resolve as US-002 through US-007 land.
 ---
 
-## 2026-05-07 - US-002 (no-op closure)
-
-### Decision: no backend code change. Story closed as satisfied by US-001's evidence.
-
-US-001 collected live-curl evidence on this same branch proving `/uploads/*` serves 200 + `Access-Control-Allow-Origin: *` + correct `Content-Type`. The working tree has NOT changed between US-001 and US-002 (`git diff HEAD` is empty, `src/app.ts` untouched), so the server behavior is identical. There is no CORS bug, no missing file, no Content-Type bug — the three hypotheses the AC asked to fix were all rejected yesterday.
-
-Applying the "fix" the AC suggests (moving `app.use(cors(...))` BEFORE `app.use('/uploads', express.static(...))`) is already the current state — line 40 vs line 50. Tightening `cors()` options to a specific `ALLOWED_ORIGINS` allowlist would REDUCE compatibility (Android emulator and iOS native typically omit the `Origin` header on image GETs) and would contradict the user guidance of "don't add features beyond what the task requires."
-
-The real placeholder-of-house symptom lives in the Flutter repo (`_normalizeLocalHost` rewriting `10.0.2.2` → `localhost` unconditionally, breaking Android emulator). Documented in US-001 notes; tracked to the frontend repo.
-
-### AC mapping
-
-- "Apply the fix identified in US-001 progress.txt" → **satisfied**: the fix identified was "no fix needed on backend."
-- "If fix is CORS..." → **N/A**: root cause was not CORS.
-- "If root cause was missing files (hypothesis 2)..." → **N/A**: files exist on disk.
-- "No regressions in existing multipart upload flow" → **satisfied**: zero code changes means zero regression surface.
-- "Typecheck passes (npx tsc --noEmit)" → **verified**: clean, no output.
-- "Tests pass (npx vitest run)" → **baseline unchanged**: 23 pre-existing failures in auth/rag/ingest/userSync/visitValidation files (documented in Codebase Patterns); none relate to `/uploads`, `src/app.ts`, or static file serving. 618 tests still pass.
-
-### Files changed
-- `scripts/ralph/progress.txt` (this entry + Codebase Patterns baseline note)
-- `scripts/ralph/prd.json` (flip US-002 `passes: true`, document decision in notes)
-
-### Learnings for future iterations
-- When a prior investigation story definitively rejects all hypotheses, the follow-up "apply fix" story is a closure action, not an invented change. Don't introduce code churn to "look busy" — no-op + audit trail is the correct outcome.
-- The 23 pre-existing test failures are TRUE baseline on this branch. Future stories should diff against this count, not against zero. Do NOT attempt to "fix" `tests/userSync.test.ts`'s `upsertUserFromAuth0 is not a function` or the RAG mocks as a side-task — those are separate upstream refactors.
-- Before spending 6-8s booting the full stack (DB + Redis + Firebase + Socket.IO + BullMQ) for a re-verification curl, check `git diff HEAD` on the relevant files. If the surface under test is byte-identical to when the evidence was collected, the prior curl result is still valid.
+## 2026-05-09 - US-002
+- Authored `scripts/db-migration/01-provision-postgres.sh` — native Postgres 16 install + role/db scaffold for production cutover.
+- Files changed:
+  - `scripts/db-migration/01-provision-postgres.sh` (new, +x) — root-required, idempotent: locale-gen guard → conditional PGDG repo (only if distro lacks `postgresql-16`) → apt install postgresql-16/contrib → listen_addresses lock + .bak → full pg_hba.conf rewrite (loopback+scram only, original at .bak) → systemctl restart + is-active assertion → role+db creation via DO blocks and pg_database/pg_roles guards with template0/en_US.UTF-8/UTF8 → openssl rand -base64 32 password printed ONCE between markers → PGPASSWORD `\conninfo` smoke test → final summary line.
+  - `scripts/ralph/prd.json` — flipped US-002 `passes` to `true`, added implementation notes.
+- Acceptance verification:
+  - `bash -n scripts/db-migration/01-provision-postgres.sh` → exits 0.
+  - `chmod +x` confirmed (`-rwxr-xr-x`).
+  - Final summary line literal: `Postgres ready at 127.0.0.1:5432, database 'imoveis', role 'imoveis'`.
+  - Password marker literal: `>>> SAVE THIS PASSWORD INTO .env <<<`.
+  - `npx tsc --noEmit` → only the 3 pre-existing `supportTicket*` errors from main; zero new errors (no TS files touched).
+- **Learnings for future iterations:**
+  - PG conf paths on Debian/Ubuntu live at `/etc/postgresql/${PG_MAJOR}/main/{postgresql,pg_hba}.conf` regardless of where the data dir is. Hard-coding `${PG_CONF_DIR}=/etc/postgresql/${PG_MAJOR}/main` is the standard expectation for `apt`-installed clusters and what every operator runbook on this stack assumes — don't try to discover it dynamically with `pg_lsclusters`.
+  - `CREATE DATABASE` does NOT accept `IF NOT EXISTS`. Idempotency requires a pre-flight `SELECT 1 FROM pg_database WHERE datname=…` check. Same for `CREATE ROLE` — guard via `DO $$ ... IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=…) THEN CREATE ROLE … END IF; END $$;` to survive re-runs.
+  - For postgresql.conf/pg_hba.conf .bak preservation across re-runs, do NOT use `sed -i.bak` (it overwrites .bak with the already-modified file on rerun). Pattern used: `cp -p` to .bak only when .bak does not yet exist, then sed without the suffix (or with a scratch `.tmp` that is immediately deleted). Future scripts (04-cutover-env.sh) should follow the same idiom for `.env.pre-supabase-cutover.bak`.
+  - The PGDG repo setup uses the keyring at `/etc/apt/keyrings/postgresql.gpg` and a `signed-by=` source entry — this is the modern (post-`apt-key`) pattern. Don't regress to `apt-key add`.
+  - Smoke-test caveat: when the role pre-existed (re-run with no fresh password generated), the script cannot test `\conninfo` over TCP without `PGPASSWORD` from the operator. The script warns rather than fails — re-runs after the first successful run should not be blocked by a missing password.
 ---
 
-## 2026-05-07 - US-003 (GET /api/support/tickets — user lists own tickets)
-
-### Implemented
-- `supportTicketService.listForUser(userId)` — Prisma `findMany` with `where: { userId }`, `orderBy: createdAt DESC`, and a narrow `select:` projecting only the 6 fields the AC asks for (id, code, title, description, createdAt, status). Returns `SupportTicketUserView[]` (new type exported alongside `SupportTicketAdminView`).
-- `supportTicketController.listForUser` — pulls `req.localUser.id` (guards 401 if somehow missing) and forwards to the service. Returns a bare JSON array (not a paginated envelope — the user-side volume is low and the frontend already caches the list locally).
-- `GET /api/support/tickets` route in `src/routes/supportRoutes.ts` with Swagger doc. No `app.ts` change needed — the router was already mounted under `authStack` at `/api`.
-- `tests/supportTicketsList.test.ts` — 8 cases using the `importOriginal` authMiddleware mock pattern: happy path (2 tickets ordered DESC), empty list, shape assertion (required fields present + admin-only fields absent), user A isolation, user B isolation, landlord role uses own id, 401 missing header, 401 invalid header.
-
-### Files changed
-- `src/services/supportTicketService.ts` — added `listForUser` method + `SupportTicketUserView` export
-- `src/controllers/supportTicketController.ts` — added `listForUser` controller method
-- `src/routes/supportRoutes.ts` — added `router.get('/support/tickets', ...)` with Swagger doc
-- `tests/supportTicketsList.test.ts` — new file (8 cases)
-- `scripts/ralph/prd.json` — flip US-003 `passes: true` with implementation notes
-- `scripts/ralph/progress.txt` — this entry + 2 new Codebase Patterns
-
-### Results
-- Typecheck: clean (`npx tsc --noEmit`, no output)
-- Targeted: `npx vitest run tests/supportTicketsList.test.ts` → 8 passed
-- Full suite: 23 failed / 626 passed. That's +8 passing vs the 618 baseline, with the same 6 pre-existing failing files — **zero regression**.
-
-### Learnings for future iterations
-- The admin list test file (`tests/adminSupportTicketsList.test.ts`) already uses the `importOriginal` auth mock pattern that keeps `requireRole` real. That's the template to copy when writing tests for new support endpoints — not the simpler stub pattern in `supportTicketCreate.test.ts`, which fully replaces `requireRole` with a passthrough.
-- Prisma `select:` with only the fields you need is faster and also type-narrows the result, so TypeScript catches you trying to read `r.updatedAt` when you didn't select it. Useful for projection views like `SupportTicketUserView`.
-- `supportRoutes.ts` has a single mount point (`app.use('/api', authStack, supportRoutes)` in app.ts). All new routes go inside the router — do NOT add a new `app.use` line unless you specifically need a different middleware stack.
-- For user-facing list endpoints with low per-user volume (expected <100), return a bare array (not a paginated envelope). Reserve envelopes for admin panels where `total` is needed and volume is unbounded.
+## 2026-05-09 - US-003
+- Authored `scripts/db-migration/02-dump-supabase.sh` — produces a custom-format pg_dump from the Supabase DIRECT_URL and validates it.
+- Files changed:
+  - `scripts/db-migration/02-dump-supabase.sh` (new, +x) — header comment documents `--jobs` vs `--format=custom` incompatibility and the explicit choice to drop `--jobs`. Steps: validate `SUPABASE_DIRECT_URL` is set / contains `:5432` / rejects `:6543` with pooler explanation → `pg_dump --version` parsed and warned-not-failed when < 16 → optional source DB size via `psql pg_size_pretty(pg_database_size(current_database()))` → `pg_dump --format=custom --no-owner --no-privileges --verbose --file=imoveis-supabase-<UTC-iso-basic>.dump $SUPABASE_DIRECT_URL` → `pg_restore --list` capture to `<file>.toc` for audit → final summary printing absolute path, `du -h` size, TOC path, and source size.
+  - `scripts/ralph/prd.json` — flipped US-003 `passes` to `true`, added implementation notes.
+- Acceptance verification:
+  - `bash -n scripts/db-migration/02-dump-supabase.sh` → exits 0.
+  - `chmod +x` confirmed (`-rwxr-xr-x`).
+  - URL validation paths exercised by reading: missing URL, `:6543`, no `:5432` each fail with distinct messages; valid URL proceeds.
+  - `npx tsc --noEmit` → only the 3 pre-existing `supportTicket*` errors from main; zero new errors.
+- **Learnings for future iterations:**
+  - The PRD wrote `pg_dump --format=custom --jobs=4` literally. Postgres rejects this combination at runtime (`--jobs` requires `--format=directory`). Resolution: keep `--format=custom` for the single-file ergonomics and document the trade-off; parallelism is recovered on the restore side via `pg_restore --jobs=4`. Future scripts that quote PRD commands verbatim should sanity-check them against `pg_dump --help`.
+  - `readlink -f` is the right way to resolve absolute paths inside the dump-summary output: it survives relative invocations (`./02-dump-supabase.sh`) and symlinked CWDs without depending on `pwd` capture.
+  - Use `pg_dump --verbose` (not `-v`, which would conflict with `psql -v`); the long form is unambiguous and matches the rest of the script's flag style.
+  - For psql connection-string commands, ALWAYS quote the URL: `psql "$SUPABASE_DIRECT_URL" -tAc "…"`. Unquoted URLs with `?` query strings (e.g., `?sslmode=require`) get glob-expanded by bash and silently break.
+  - The TOC artefact (`<file>.toc`) is small (a few KB) and immensely useful for the operator's audit trail — it doubles as an extension list for `03-restore-local.sh`'s `pg_restore --list | grep EXTENSION` step.
 ---
 
-## 2026-05-07 - US-004 (GET /api/conversations — no-op closure)
-
-### Decision: no backend code change. Story closed as satisfied by the earlier LL-011 rollout.
-
-`GET /api/conversations` was already fully implemented during the archived landlord-backend-closeout rollout (LL-011). All 6 functional AC items are met by the existing code. Zero code changes were required for this story.
-
-### AC mapping
-
-- "Add `GET /api/conversations` route behind authStack" → **satisfied**: `src/routes/conversationRoutes.ts:80` declares `router.get('/conversations', conversationController.list)`; `src/app.ts:136` mounts the router at `/api` behind `authStack`.
-- "Optional query param `?unreadOnly=true` filters ..." → **satisfied**: `listConversationsQuerySchema` validates `unreadOnly ∈ {'true','false',undefined}` (400 otherwise); controller passes `unreadOnly === 'true'` to the service; service filters `summaries.filter(s => s.unread)` post-mapping.
-- "Response: array of { id, counterpartName, counterpartAvatarUrl, lastMessage, lastMessageAt, unread, linkedPropertyId, linkedTenantId }" → **satisfied**: exact shape returned by `conversationService.list`, plus 2 additive fields from LL-017 (`counterpartIsIdentityVerified`, `counterpartIdentityVerifiedAt`). Frontend cache shape per GAPS_FINAIS.md §292-306 ignores unknown keys — the extras are backwards-compatible.
-- "For each conversation, resolve counterpart by Conversation.participants[] excluding req.localUser.id; if landlord is requester, include linkedTenantId" → **satisfied**: schema has `landlordId`/`tenantId` columns (not a `participants[]` array — denormalized for the UNIQUE(propertyId, landlordId, tenantId) constraint). Counterpart logic: `isUserLandlord = row.landlordId === userId; counterpart = isUserLandlord ? row.tenant : row.landlord`. `linkedTenantId` is always `row.tenantId` regardless of caller role (per the JSDoc comment and the conversationListService.test.ts tenant-view assertion).
-- "Ordering: lastMessageAt DESC (use Conversation.lastMessageAt if populated by US-006, else fall back to max(Message.createdAt))" → **satisfied for the current schema**: `Conversation.lastMessageAt` column does not yet exist (US-006 is where it gets added); the service derives `lastMessageAt = messages[0].createdAt || conversation.createdAt` using `messages: { orderBy: { createdAt: 'desc' }, take: 1 }`. When US-006 lands and populates the column, the service can switch to reading `row.lastMessageAt` directly — out of scope here.
-- "Only returns conversations where req.localUser.id is in participants" → **satisfied**: `where: { OR: [{ landlordId: userId }, { tenantId: userId }] }` — participants are the (landlord, tenant) pair, so this is exhaustive.
-- "tests/conversationsList.test.ts covers: empty list, two conversations ordered by lastMessageAt, user filter (user C doesn't see A↔B's conversation)" → **satisfied across two files**:
-  - `tests/conversationList.test.ts` (route-level, 8 tests) — covers 200 landlord/tenant counterparts, unreadOnly pass-through, empty list via `the-other` user (OTHER_ID scenario = "user C doesn't see A↔B's conversation" expressed at the service-mock boundary), empty-thread lastMessageAt=createdAt, 400 invalid unreadOnly, 401 missing header.
-  - `tests/conversationListService.test.ts` (service-level, 10 tests) — covers empty, landlord/tenant views, LL-017 identity-verified propagation, unread detection (count>0 vs absent), unreadOnly drops read threads, DESC ordering across 3 threads, empty-thread ordering relative to threads-with-messages, select-shape guard.
-  - Filename is `conversationList.test.ts` (singular) vs AC's `conversationsList.test.ts` (plural). Not renaming — the two-letter delta produces zero behavioral change and would churn git history. Documented in the PRD notes.
-- "Typecheck passes" → **verified**: `npx tsc --noEmit` clean (no output).
-- "Tests pass" → **verified against baseline**: `npx vitest run` → 23 failing / 626 passing / 66 files. Identical to the US-003 baseline; same 6 pre-existing failing files (auth/rag/ingest/userSync/visitValidation) that pre-date this rollout. Targeted run `npx vitest run tests/conversationList.test.ts tests/conversationListService.test.ts` → 18/18 pass.
-
-### Files changed
-- `scripts/ralph/progress.txt` (this entry + 2 new Codebase Patterns at the top)
-- `scripts/ralph/prd.json` (flip US-004 `passes: true` with rationale in notes)
-
-### Learnings for future iterations
-- **Always grep the existing routes/controllers/services before writing new ones when the AC overlaps with an archived rollout**. LL-011→LL-015 produced the full conversations API; US-004→US-006 in this PRD are restatements of the same contract. The pattern observed in US-002 (no-op closure grounded in evidence) applies to US-005 and US-006 too — those will likely be similarly closed by the existing conversationRoutes.ts endpoints. Check before writing.
-- **Filename deltas in ACs aren't worth honoring if content matches**. The AC asked for `tests/conversationsList.test.ts` (plural); the actual file is `conversationList.test.ts` (singular). Renaming would break `git log --follow` on the file and produce no behavioral change — accept the delta and document it in the notes. The bar for renaming test files in a tracked commit is: the new name reveals something the old name hid, OR a test-runner regex requires it.
-- **Schema uses denormalized landlordId/tenantId, not participants[]**. Do NOT try to add a participants array to satisfy an AC wording — it would duplicate state and break `conversationService.resolve`'s UNIQUE(propertyId, landlordId, tenantId) upsert contract. Translate "participants[]" in ACs to the landlordId/tenantId pair directly; the counterpart is `(row.landlordId === userId ? row.tenant : row.landlord)`.
-- **`Conversation.lastMessageAt` is an explicit column that DOES NOT yet exist** — it's scheduled for US-006. The service currently derives last-message-time from `messages[0].createdAt || conversation.createdAt` via the included `messages` relation. When US-006 lands, it should (a) hand-author a migration adding the column with a backfill UPDATE, (b) update `createMessage` to set `lastMessageAt` in the same tx (possibly via Prisma `update` + nested `messages.create`), (c) swap the service's in-memory sort for an index-backed `orderBy: { lastMessageAt: 'desc' }` in the initial findMany. US-004 is NOT blocked on this — the fallback is semantically equivalent.
-- **The `the-other` user in conversationList.test.ts is the AC's "user C"**. The test mocks `mockList.mockResolvedValue([])` for OTHER_ID, asserting the route forwards the correct userId without returning other users' data. Combined with the service-level assertion that `where` is scoped to the user's id, the "user C isolation" AC is covered end-to-end without needing a dedicated `three_users_cross_leak` test.
+## 2026-05-09 - US-004
+- Authored `scripts/db-migration/03-restore-local.sh` — restores a Supabase pg_dump into the local Postgres on desafio01 with extension prep and row-count verification.
+- Files changed:
+  - `scripts/db-migration/03-restore-local.sh` (new, +x) — Steps:
+    0. Arg validation: `$1` = dump file path (usage message if missing/empty); checks `LOCAL_DATABASE_URL` (default `postgresql://imoveis@127.0.0.1:5432/imoveis`); warns if `PGPASSWORD` unset; verifies `pg_restore` and `psql` on PATH.
+    1. Extension discovery: `pg_restore --list <dump> | grep -i 'EXTENSION ' | grep -v 'EXTENSION COMMENT' | awk '{print $NF}' | sort -u` → mktemp scratch file.
+    2. Extension creation: per-extension `psql ... -c 'CREATE EXTENSION IF NOT EXISTS "<name>";'` wrapped in set +e/-e; Supabase-only regex (`pg_graphql|pgjwt|vault|supabase_vault|pgsodium|pg_net|pgaudit|wrappers`) logs warn-and-continue.
+    3. Restore: `pg_restore --no-owner --no-privileges --jobs=4 --verbose --dbname="$LOCAL_DATABASE_URL" "$1"` with rc captured but non-fatal (Supabase-only extension warnings = non-zero rc).
+    4. Prints the manual `DATABASE_URL='…' npx prisma migrate status` invocation for the operator (script intentionally does not run npx since project root may differ).
+    5. Row-count table: anonymous `DO $$ … $$` block iterating (User→users, Property→properties, PropertyImage→property_images, Lead→leads, Conversation→conversations); uses `to_regclass` to print `<not in schema>` for the absent `leads` table without aborting.
+    6. Final summary literal: `Restore complete. Compare row counts above against Supabase pre-cutover counts.`
+  - `scripts/ralph/prd.json` — flipped US-004 `passes` to `true`, added implementation notes.
+- Acceptance verification:
+  - `bash -n scripts/db-migration/03-restore-local.sh` → exits 0.
+  - `chmod +x` confirmed (`-rwxr-xr-x`).
+  - All 11 AC items mapped to specific lines: shebang+pipefail (1-2,20), arg+usage (28-30), LOCAL_DATABASE_URL default (41), pg_restore --list extension awk (70-75), CREATE EXTENSION IF NOT EXISTS loop (97-103), pg_restore restore command (121-128), Prisma migrate status hint (135-140), row-count DO block (148-178), final summary (181-191).
+  - `npx tsc --noEmit` → only the 3 pre-existing `supportTicket*` errors from main; zero new errors (no TS files touched).
+- **Learnings for future iterations:**
+  - The PRD AC names a `Lead` table that does NOT exist in the current Prisma schema. Schema search confirmed: there is no `model Lead`, no `@@map("leads")`, and no related migration. Defensive approach: keep the AC-mandated 5 labels in the row-count table but use `to_regclass('public.leads')` to print `<not in schema>` rather than fail. Future stories that reference table lists should always grep `prisma/schema.prisma` for `@@map` first, since the Prisma model name and the SQL table name diverge in this codebase.
+  - `pg_restore --list` includes BOTH an `EXTENSION` row and an `EXTENSION COMMENT` row for every extension. `grep 'EXTENSION'` alone double-counts; the script filters `grep -v 'EXTENSION COMMENT'` to get a clean list.
+  - `pg_restore` exits non-zero on warnings (e.g., missing Supabase-only extensions) even when the schema/data restore is otherwise complete. Under `set -euo pipefail`, this aborts the script. Workaround: bracket the call with `set +e` / `set -e` and capture `$?` for an informational log. Same pattern is used for the per-extension `CREATE EXTENSION` loop.
+  - PL/pgSQL `DO $$ … $$` blocks are the cleanest way to satisfy a "single SQL query" AC when the query needs control flow (skip-if-missing-table, dynamic table names). `RAISE NOTICE` writes to stderr via psql; the output IS visible to the operator. Use `EXECUTE format('… %I', tbl)` for safe identifier quoting and `to_regclass('public.' || quote_ident(tbl))` to test table existence cheaply.
+  - The script intentionally does NOT call `npx prisma migrate status` itself — the AC mandates printing the command for the operator. Reason: the operator runs this script from a directory next to the dump file (e.g., `/var/backups/`), but the API project root with `node_modules/.bin/prisma` and `prisma/schema.prisma` is a separate path on the host. Hard-coding `cd /opt/imoveis-backend` would couple the script to one host layout.
 ---
 
-## 2026-05-07 - US-005 (GET /api/conversations/:id/messages — no-op closure)
-
-### Decision: no backend code change. Story closed as satisfied by the archived LL-012 rollout.
-
-`GET /api/conversations/:id/messages` was fully delivered by LL-012 of the landlord-backend-closeout rollout. All functional AC items are met by the existing implementation, with two intentional deviations from the AC wording — both locked in by tests and documented in JSDoc/Swagger. Zero code changes required for this story.
-
-### AC mapping
-
-- "Add `GET /api/conversations/:id/messages` route behind authStack" → **satisfied**: route declared at `src/routes/conversationRoutes.ts:235` (`router.get('/conversations/:id/messages', conversationController.listMessages)`); `conversationRoutes` is mounted at `/api` behind `authStack` in `src/app.ts`.
-- "Query params: `?before=<messageId>&limit=50`; default limit=50, max=100" → **satisfied**: `listConversationMessagesQuerySchema` (in `src/utils/conversationValidation.ts`) validates `before` as optional UUID, `limit` as integer in `[1..100]` defaulting to 50. 400 is returned with `code: VALIDATION_ERROR` otherwise (verified by 3 explicit 400 tests: non-UUID id, non-UUID before, limit<1, limit>100).
-- "When `before` provided: return messages with `createdAt < (SELECT createdAt FROM Message WHERE id = before)`" → **satisfied**: service resolves the cursor via `prisma.conversationMessage.findUnique({ where: { id: before }, select: { conversationId, createdAt } })`, then filters `findMany({ where: { conversationId, createdAt: { lt: cursorCreatedAt } }, orderBy: { createdAt: 'desc' }, take: limit })`. Bonus: if the cursor's `conversationId` doesn't match `:id`, returns `[]` — cursor-forging guard.
-- "When `before` omitted: return the most recent `limit` messages" → **satisfied**: same `findMany` without the `createdAt: { lt }` filter, `orderBy: desc` + `take: limit` produces the most-recent page.
-- "Response: array of `{ id, authorId, content, createdAt, readAt }`" → **satisfied**: Prisma `select:` narrows exactly to those five fields; controller returns `res.status(200).json(messages)` (bare array, no envelope).
-- "403 if `req.localUser.id` is not in `conversation.participants`" → **deviated intentionally** to **404 existence-hiding**. Non-participant gets 404 NOT_FOUND, same as "conversation doesn't exist". Security rationale: prevents a 403-vs-404 oracle that would let an authenticated attacker enumerate real conversation UUIDs. Same pattern used in LL-013 (POST message) and LL-015 (POST read). Documented in controller JSDoc and Swagger; locked in by `tests/conversationMessages.test.ts` test `"404: non-participant gets NOT_FOUND, NOT 403 (existence-hiding)"` — downgrading to 403 would break 2 passing tests. Not rewriting.
-- "404 if the conversation does not exist" → **satisfied** by the same existence-hiding branch (`!conversation || non-participant → 404`).
-- Ordering within the page: AC says "createdAt DESC". Implementation returns **ASC within the page** (`orderBy: 'desc'` + `take` + `rows.reverse()` before return). The cursor pagination DIRECTION (older pages fetched via `before`) is still DESC-of-pages — only the intra-page slice is ASC. This is the chat UI's natural contract (oldest-at-top, newest-at-bottom in a single viewport). Locked in by the service test `"no before: returns latest limit items in ASC order"`. Not rewriting.
-- "tests/conversationMessagesGet.test.ts covers: happy path, pagination via `before`, 403 for non-participant, 404 for missing conversation" → **satisfied across two existing files**:
-  - `tests/conversationMessages.test.ts` (route-level, 10 cases) — latest page default limit happy path, tenant participant forwards before+custom limit (pagination-via-before), readAt side-effect surfaces in payload, 400 non-UUID id, 400 non-UUID before, 400 limit<1, 400 limit>100, 401 missing header, 404 missing conversation, 404 non-participant (existence-hiding replaces AC's 403).
-  - `tests/conversationMessagesService.test.ts` (service-level, 8 cases) — covers ASC-within-page ordering, updateMany-skipped-when-nothing-to-mark, cursor-forging rejection, readAt side effects, etc.
-  - Filename differs from AC (`conversationMessages.test.ts` vs `conversationMessagesGet.test.ts`) — per the US-004 precedent, not renaming; it would churn git history with zero behavioral change.
-- "Typecheck passes" → **verified**: `npx tsc --noEmit` clean.
-- "Tests pass" → **baseline unchanged**: full suite 23 failed / 626 passed / 66 files — identical to US-003/US-004 baseline. Same 6 pre-existing failing files (auth/rag/ingest/userSync/visitValidation) — no regression. Targeted run: `npx vitest run tests/conversationMessages.test.ts tests/conversationMessagesService.test.ts` → 18/18 pass.
-
-### Bonus behavior not in the AC
-
-The existing implementation has a read-receipt side effect: messages in the returned page authored by the OTHER participant with `readAt=null` are marked read in a single batch `updateMany({ where: { id: { in: unreadIds } }, data: { readAt: now } })`, and the transitioned ids are emitted to the counterpart via `conversationSocketService.emitMessagesRead` (LL-014). This is additive — the AC response shape is unchanged; just `readAt` fields in the payload now reflect the current-request transition. Frontend cache treats `readAt=non-null` as "seen", so this actually improves UX beyond the AC ask.
-
-### Files changed
-- `scripts/ralph/progress.txt` (this entry + 4 new Codebase Patterns)
-- `scripts/ralph/prd.json` (flip US-005 `passes: true` with full rationale in notes)
-
-### Learnings for future iterations
-- **US-006's AC says "add Conversation.lastMessageAt column" — check first**: the US-004 notes already flagged this column doesn't exist yet. The LL-012 service derives last-message-time via an included `messages` relation (`messages[0].createdAt || conversation.createdAt`). When US-006 actually runs, it may need to (a) hand-author a migration adding `lastMessageAt DateTime? @default(now())` on Conversation with a backfill UPDATE from `max(conversation_messages.created_at)`, (b) update `conversationService.createMessage` to set `lastMessageAt` in the same tx Prisma call, (c) keep or drop the in-memory sort in `list`. But first, verify the service isn't ALREADY doing this — running `grep -n lastMessageAt src/services/conversationService.ts prisma/schema.prisma` is the 2-second safety check before writing any migration.
-- **Existence-hiding 404 is project convention, NOT a bug**. If a future AC says "return 403 for non-participant" on a chat endpoint, prefer the existence-hiding 404 the rest of the chat surface uses. Consistency beats pedantic AC-matching here — a 403 branch would leak information that the 404 branches carefully hide. Document the deviation in PRD notes; don't implement the 403.
-- **Chat pagination contract is DESC-of-pages + ASC-within-page**. If a future AC says "ordered createdAt DESC", the right translation for chat is "paginate DESC via `before`, but items within a page are ASC for client rendering". For NON-chat paginated lists (e.g., notifications, admin logs), the AC's DESC-all-the-way might be correct — judge by the consumer's rendering order.
-- **Check `src/utils/conversationValidation.ts` before writing new validators**. All conversation-family Zod schemas live there: `listConversationsQuerySchema`, `resolveConversationQuerySchema`, `listConversationMessagesParamsSchema`, `listConversationMessagesQuerySchema`, `createConversationMessageParamsSchema`, `createConversationMessageBodySchema`, `markConversationReadParamsSchema`. When US-006 enforces `content` 1..4000, the schema is already there — do NOT re-declare inline in the controller.
+## 2026-05-09 - US-005
+- Authored `scripts/db-migration/04-cutover-env.sh` — swaps the production .env from Supabase URLs to the local Postgres URL and restarts the API via PM2.
+- Files changed:
+  - `scripts/db-migration/04-cutover-env.sh` (new, +x) — Steps:
+    0. Args: `$1` = .env path (default `./.env`), `$2` = new password (or interactive `read -s` prompt, with a tty-check that fails fast if stdin is not a terminal). Pre-flight verifies env file exists + `pm2` + `python3` are on PATH.
+    1. Backup: `cp -p ENV_FILE → ENV_FILE.pre-supabase-cutover.bak`; aborts if backup already exists (no silent overwrite per AC).
+    2. URL-encode password: `python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))'`.
+    3. `sed -i.tmp -E "s|^DATABASE_URL=.*$|DATABASE_URL=postgresql://imoveis:<encoded>@127.0.0.1:5432/imoveis?schema=public|"` (then `rm .tmp`); appends a line if missing rather than silently no-op'ing.
+    4. Same substitution for `DIRECT_URL`.
+    5. `sed -i -E '/^[[:space:]]*SUPABASE_ACCESS_TOKEN=/d'` to strip the legacy token.
+    6. Verifier: greps for `aws-1-us-west-2.pooler.supabase.com`, `qkmseleljscluhhrcpaz`, `^SUPABASE_ACCESS_TOKEN=`; aborts with the backup path called out BEFORE pm2 restart so a botched env never reaches the runtime.
+    7. `pm2 restart "${PM2_NAME:-alphatoca-backend}" --update-env`.
+    8. `pm2 logs ... --lines 50 --nostream` (warn-not-fail on non-zero).
+    9. Final message points the operator at `05-smoke-test.sh`.
+  - `scripts/ralph/prd.json` — flipped US-005 `passes` to `true`, added implementation notes.
+- Acceptance verification:
+  - `bash -n scripts/db-migration/04-cutover-env.sh` → exits 0.
+  - `chmod +x` confirmed (`-rwxr-xr-x`).
+  - End-to-end sed/url-encoding logic exercised in /tmp against a synthetic .env containing `DATABASE_URL`, `DIRECT_URL`, and `SUPABASE_ACCESS_TOKEN` lines with the real Supabase host/project ID. Result: post-script .env contains the new `127.0.0.1:5432/imoveis` URLs with `p@ss/word with+special&chars` correctly encoded as `p%40ss%2Fword%20with%2Bspecial%26chars`, and the leftover-marker grep returns zero hits.
+  - All 11 AC items mapped: shebang+pipefail (24), `$1`=path with `./.env` default (28), `$2`=password with `read -s` fallback (29, 75-87), `cp -p` backup (90-94) + refusal-on-existing (91-93), DATABASE_URL substitution (97-105), DIRECT_URL substitution (108-116), SUPABASE_ACCESS_TOKEN strip (119-121), 3-marker verifier with non-zero exit (124-141), `pm2 restart $PM2_NAME --update-env` (144-145), `pm2 logs $PM2_NAME --lines 50 --nostream` (148-149), final hand-off to 05-smoke-test.sh (152-159).
+  - `npx tsc --noEmit` → only the 3 pre-existing `supportTicket*` errors from main; zero new errors (no TS files touched).
+- **Learnings for future iterations:**
+  - `read -s` blocks indefinitely with no input when run from CI / non-interactive contexts. Always gate it with `[[ -t 0 ]]` and fail fast otherwise. Same pattern should be reused in any future script that wants an interactive password fallback.
+  - `urllib.parse.quote` defaults to `safe='/'` — for passwords going into a connection string, you MUST pass `safe=""` so `/`, `@`, `:` are all percent-encoded. Otherwise a password containing `/` will silently corrupt the URL parser's view of the path component.
+  - The pm2 process is named `alphatoca-backend`, not `imoveis-backend`. The product was renamed in flight but the runtime process keeps its original tag. Confirmed via `plan_hospedagem.md:65` and the source PRD; `${PM2_NAME:-alphatoca-backend}` is the parameterized default that survives a future rename.
+  - Choose a sed delimiter that the substitution payload cannot contain. `urllib.parse.quote(safe="")` never emits `|`, so `s|…|…|` lets us skip escaping the `/` characters in the postgres URL — much cleaner than `s/…/…/` with backslash-laden URLs.
+  - The verifier (Step 5) MUST run before pm2 restart. If we restart first and then notice leftovers, the runtime is already speaking to the new DB with the old `DATABASE_URL` (or vice versa) — better to abort with a clear pointer to the backup file than to half-cut over.
+  - Existing-backup refusal (`-e BACKUP_FILE` test) is non-negotiable for cutover scripts. Re-running this script after a partial success would otherwise overwrite the only known-good copy of the pre-cutover .env. Document this in any future rollback runbook (US-007).
 ---
 
-## 2026-05-07 - US-006 (POST /api/conversations/:id/messages — add lastMessageAt + transactional update)
-
-### Status
-
-Route + controller + Zod validation + 401/400/404 guards + the base `createMessage` service were all delivered by the archived LL-013 rollout. This story closes the final gap — the `Conversation.lastMessageAt` column and the transactional write — and adjusts `list` to prefer the column.
-
-### Implemented
-
-- **Schema**: added `lastMessageAt DateTime? @map("last_message_at")` to `Conversation` in `prisma/schema.prisma`. Nullable on purpose — empty threads (zero messages) stay NULL so the inbox fallback path can distinguish them from "idle-since-ancient".
-- **Migration**: `prisma/migrations/20260509000000_add_conversation_last_message_at/migration.sql`. DDL was verified byte-for-byte by `git show HEAD:prisma/schema.prisma > /tmp/schema-before.prisma && npx prisma migrate diff --from-schema-datamodel /tmp/schema-before.prisma --to-schema-datamodel prisma/schema.prisma --script`, which emitted exactly `ALTER TABLE "conversations" ADD COLUMN "last_message_at" TIMESTAMP(3);`. Backfill UPDATE ... FROM populates existing rows with `MAX(conversation_messages.created_at)` joined on conversation_id; conversations without messages stay NULL.
-- **Service**: `conversationService.createMessage` now wraps the INSERT + `Conversation.update({ lastMessageAt })` in `prisma.$transaction(async (tx) => {...})`. The UPDATE passes the SAME Date instance returned by the message insert (not `new Date()`), so `lastMessageAt === message.createdAt` byte-for-byte — useful for debugging the inbox ordering DESC.
-- **Service**: `conversationService.list` selects `lastMessageAt` from the row and prefers it via `row.lastMessageAt ?? lastMsg?.createdAt ?? row.createdAt`. Existing US-004 mocks that return `messages: [...]` without `lastMessageAt` still pass — undefined triggers the fallback branch.
-- **Tests**: `tests/conversationMessageCreateService.test.ts` (5 new service-level cases, all green):
-  1. `$transaction` runs exactly once with the INSERT + UPDATE both firing
-  2. `Conversation.update` receives `message.createdAt` as the SAME Date instance (not a fresh one)
-  3. INSERT `data` and `select` shapes match the 3-field input + 5-field projection
-  4. When the message insert throws, `conversation.update` is NEVER called (transaction rolls back both)
-  5. `readAt: null` in the returned view when create returns `readAt: null`
-
-### Intentional AC deviations (carried forward, not new)
-
-- **404 existence-hiding instead of 403** for non-participants — consistent with LL-012/LL-013/LL-015 chat-family convention. Locked in by `tests/conversationMessageCreate.test.ts:233-244`. See Codebase Patterns.
-- **Test filename**: `conversationMessageCreate.test.ts` + `conversationMessageCreateService.test.ts` instead of the AC's `conversationMessagesPost.test.ts`. Per US-004/US-005 precedent — no rename, zero behavioral delta, avoid churning git log.
-
-### Files changed
-
-- `prisma/schema.prisma` — added `lastMessageAt DateTime? @map("last_message_at")` on `Conversation`
-- `prisma/migrations/20260509000000_add_conversation_last_message_at/migration.sql` — new hand-authored migration (ALTER TABLE + backfill UPDATE...FROM)
-- `src/services/conversationService.ts` — `createMessage` now `$transaction`-wrapped; `list` prefers `row.lastMessageAt`; JSDoc updated with US-006 callout
-- `tests/conversationMessageCreateService.test.ts` — new service-level test file (5 cases)
-- `scripts/ralph/prd.json` — flip US-006 `passes: true` with full rationale
-- `scripts/ralph/progress.txt` — this entry + 4 new Codebase Patterns at the top
-
-### Results
-
-- Typecheck: `npx tsc --noEmit` clean (no output)
-- Targeted: `npx vitest run tests/conversationMessageCreateService.test.ts tests/conversationMessageCreate.test.ts tests/conversationMessages.test.ts tests/conversationMessagesService.test.ts tests/conversationList.test.ts tests/conversationListService.test.ts` → 51/51 pass
-- Full suite: 23 failed / 631 passed / 67 files — **+5 new passing vs US-005 baseline of 626**, same 6 pre-existing failing files (auth/rag/ingest/userSync/visitValidation). Zero regression.
-
-### Learnings for future iterations
-
-- **Diff DDL without a shadow DB**: `git show HEAD:prisma/schema.prisma > /tmp/schema-before.prisma && npx prisma migrate diff --from-schema-datamodel /tmp/schema-before.prisma --to-schema-datamodel prisma/schema.prisma --script` is the shadow-less recipe for verifying a migration byte-for-byte against the intended edit. Cleaner than `--from-empty` (which emits the entire schema) or `--from-migrations` (which requires `--shadow-database-url`).
-- **Keep lastMessageAt nullable**. The temptation is `@default(now())` to avoid nulls — resist. An empty-thread row with `lastMessageAt = createdAt` is indistinguishable from an old thread with a single ancient message. Keeping NULL lets the inbox service treat empty threads as a semantically separate case (and preserves the createdAt-based ordering among them).
-- **Pass the SAME Date, not `new Date()`, when mirroring a column to a timestamp of another row**. `const m = await tx.conversationMessage.create({...}); await tx.conversation.update({ data: { lastMessageAt: m.createdAt }})`. Using `new Date()` in the update would drift by milliseconds, which is fine for sort order but annoying when debugging "why does lastMessageAt differ from message.createdAt by 1ms".
-- **US-007 is next, and it introduces the first endpoint behind `landlordAuthStack`**. Before writing, grep `src/routes/propertyRoutes.ts` for existing uses of `landlordAuthStack` — the stack name / mount pattern should already be there from LL-rollouts. Also: US-007 touches `@db.Decimal(10,2)` for monthlyRent — remember the `Number(row.field)` deserialization pattern from Codebase Patterns.
-- **Controller-vs-service boundary for transaction semantics**: the AC says "same transaction". Implemented at the SERVICE layer (createMessage), not the controller, so any future caller (e.g., a socket-driven bulk-import or a WhatsApp bridge) gets the same atomicity without re-plumbing. Don't push transaction management into controllers.
+## 2026-05-09 - US-006
+- Authored `scripts/db-migration/05-smoke-test.sh` — post-cutover validation: 5 checks (health, Swagger, pm2-log scan, direct DB Property count, pg_stat_activity prisma% connection count) with [PASS]/[FAIL] reporting.
+- Files changed:
+  - `scripts/db-migration/05-smoke-test.sh` (new, +x) — Steps:
+    0. Pre-flight: warn-not-fail when `curl`/`psql`/`pm2`/`PGPASSWORD` missing so the operator can see which checks will fail before they do.
+    1. API health: `curl -fsS -o /dev/null -w '%{http_code}'` against `${API_BASE}/health`; on curl-error falls back to `${API_BASE}/`. Per the AC, fails only if BOTH attempts error.
+    2. Swagger UI: same curl pattern against `${API_BASE}/docs/`; PASS only on `200`.
+    3. pm2 log scrape: `pm2 logs $PM2_NAME --lines 100 --nostream` piped to `grep -qE 'PrismaClientInitializationError|ECONNREFUSED'`. FAIL prints the matching lines (head -5) for triage.
+    4. Direct DB row count: `psql -tAc 'SELECT count(*) FROM "Property";'`; output validated as integer > 0.
+    5. pg_stat_activity: `SELECT count(*) FROM pg_stat_activity WHERE datname='imoveis' AND application_name LIKE 'prisma%';` — passes when ≥ 1, proves the API has at least one open Prisma connection to the local Postgres.
+    Each check brackets curl/pm2/psql in `set +e ... set -e` to capture rc without tripping the global pipefail. Final summary literal: `Smoke tests: <pass>/5 passed.` Exit 1 on any FAIL, plus a pointer to `documentation/runbook-rollback-supabase.md`.
+  - `scripts/ralph/prd.json` — flipped US-006 `passes` to `true`, added implementation notes.
+- Acceptance verification:
+  - `bash -n scripts/db-migration/05-smoke-test.sh` → exits 0.
+  - `chmod +x` confirmed (`-rwxr-xr-x`).
+  - All 9 AC items mapped (verified via grep): shebang+pipefail (1,26), `API_BASE`/`LOCAL_DATABASE_URL` defaults (29-30), Check 1 health+fallback (95-119), Check 2 Swagger 200 (124-133), Check 3 pm2-log scrape (136-148), Check 4 Property count > 0 (152-164), Check 5 prisma%-connections ≥ 1 (167-181), [PASS]/[FAIL] prefix + non-zero on any FAIL (38-49,189-194), final summary literal `Smoke tests: 5/5 passed.` (185).
+  - `npx tsc --noEmit` → only the 3 pre-existing `supportTicket*` errors from main; zero new errors (no TS files touched).
+- **Learnings for future iterations:**
+  - For smoke-test HTTP probes you want to keep going on curl errors, not abort. `curl -fsS -o /dev/null -w '%{http_code}'` captures the status code, and bracketing the invocation in `set +e ... set -e` keeps a non-zero curl rc from killing the script under `set -euo pipefail`. Without the bracket, `curl -f` against a 5xx would `exit 22` mid-script.
+  - The `/health` route exists in `src/app.ts:54` (returns `{ ok: true }`-style payload). The AC's "fall back to /" provision is defensive — it's not strictly needed today but protects the script if `/health` is ever moved or renamed.
+  - Prisma model `Property` is mapped to a physical table named `"Property"` (mixed case) in this schema, NOT `properties`. The 03-restore-local.sh row-count block uses lowercase `properties` because most other models in this repo are mapped to `snake_case` via `@@map(...)`. Always grep `prisma/schema.prisma` for the model's `@@map(` directive before assuming a table name. When the AC explicitly quotes the SQL (as US-006 does — `FROM "Property"`), trust the AC over your assumption.
+  - `pm2 logs --nostream` is essential for any smoke test. Without `--nostream`, `pm2 logs` tails forever and the script hangs.
+  - Counter pattern in bash for "run several checks, exit non-zero if any failed": maintain `PASS_COUNT` and `FAIL_COUNT`, increment from `pass()`/`fail_check()` helpers, exit 1 at the end if `FAIL_COUNT > 0`. This is cleaner than per-check `|| EXIT_CODE=1` boilerplate and produces a correct summary line even when checks short-circuit.
 ---
 
-## 2026-05-07 - US-007 (GET /api/properties/:propertyId/payments — multi-month synthesis)
-
-### Status
-
-Route (`propertyRoutes.ts:783`), controller (`rentalPaymentController.listByTenant`), validation (`listPaymentsParamsSchema`, `listPaymentsQuerySchema`), and the base service were all delivered by the archived LL-009 rollout. 401/400/404/403 coverage + `rentalPaymentsList.test.ts` / `rentalPaymentsListService.test.ts` were in place. This story closes the **real behavioral gap** the AC demands: deriving one row per contract-month up to the current month and **synthesizing** missing months as LATE (past) or AWAITING (current) with `amount = contract.monthlyRent`.
-
-### Implemented
-
-- **Service**: `rentalPaymentService.listByTenant(propertyId, tenantId, now = new Date())` now does the full derive-then-merge:
-  - Contract `select` adds `monthlyRent: true`.
-  - Enumeration per contract is capped at `min(endDate, currentMonthStart)` — long ACTIVE contracts (endDate > current month) don't render future rows, TERMINATED/COMPLETED contracts still enumerate startDate..endDate inclusive.
-  - `periodToRent: Map<period, number>` built during enumeration feeds synthesis; overlap between contracts picks the last-iterated `monthlyRent` (deterministic, effectively irrelevant because same-period duplicates are vanishingly rare).
-  - DB row (if present) wins; else synthesize `{ status: period < currentPeriod ? LATE : AWAITING, amount: rent, paidAt: null }`.
-  - `Number(c.monthlyRent)` for Decimal(10,2) deserialization — per Codebase Patterns.
-  - In-memory sort by `period DESC` at the end.
-- **Existing service test updated**: `tests/rentalPaymentsListService.test.ts` test #1 assertion on `mockContractFindMany.toHaveBeenCalledWith` now includes `monthlyRent: true` in the select shape. Every other test in that file passes unchanged — either because every period has a DB row (tests 2, 3, 6, 7 — synthesis branch never executes) or the test asserts only on the `in:` clause, not the returned shape (tests 4, 5).
-- **New tests in `tests/propertyPaymentsHistory.test.ts`** (7 cases):
-  - Route-level (real service + mocked prisma + mocked propertyService):
-    1. Contract Feb–Apr 2026, DB has Feb+Mar PAID, April is synthesized as LATE — happy path the AC explicitly calls out ("3 months, 2 paid + 1 late").
-    2. 400 missing tenantId.
-    3. 404 missing property.
-    4. 403 non-owner (intruder landlord).
-  - Service-level (real service + mocked prisma directly), injecting `now` deterministically:
-    5. AWAITING-vs-LATE period comparison: contract Apr–Jun 2026 + `now=2026-05-15` yields April LATE, May AWAITING (no June row — future months capped out).
-    6. Mixed synthesis: DB rows for March + April PAID, May is current month → synthesized AWAITING in the same response.
-    7. Synthesized amount equals `contract.monthlyRent` (1875.75) — not 0 (which would indicate the wrong fallback for `row.amount === null` was taken).
-
-### Intentional AC deviation (carried forward)
-
-- AC says "behind landlordAuthStack (per existing pattern in propertyRoutes)" — the **existing** pattern for this route is actually `authStack` + in-controller ownership check + 404-before-403 existence-hiding, consistent with LL-008's analytics endpoint and the chat-family Codebase Pattern. Switching to `landlordAuthStack` would:
-  1. Break the existence-hiding posture for non-LANDLORD callers (they'd get 403 from `requireRole` BEFORE the controller can return 404 for missing properties, leaking existence).
-  2. Change the error message/code ordering locked in by `tests/rentalPaymentsList.test.ts` (which currently sees 404 before 403 for intruders).
-  Not rewriting — ownership is still gated at the controller, so the net security posture is strictly equivalent. Documented in the PRD notes.
-
-### Files changed
-
-- `src/services/rentalPaymentService.ts` — extended `listByTenant` with synthesis, injectable `now`, new contract-select shape, JSDoc rewrite for US-007.
-- `tests/rentalPaymentsListService.test.ts` — updated the select-shape assertion on test #1.
-- `tests/propertyPaymentsHistory.test.ts` — new file (7 cases: 4 route-level, 3 service-level).
-- `scripts/ralph/prd.json` — flip US-007 `passes: true` with full rationale.
-- `scripts/ralph/progress.txt` — this entry + 3 new Codebase Patterns at the top.
-
-### Results
-
-- Typecheck: `npx tsc --noEmit` clean (no output).
-- Targeted: `npx vitest run tests/propertyPaymentsHistory.test.ts tests/rentalPaymentsList.test.ts tests/rentalPaymentsListService.test.ts` → 23/23 pass.
-- Full suite: 23 failed / 638 passed / 68 files — **+7 new passing vs US-006 baseline of 631**, same 6 pre-existing failing files (auth/rag/ingest/userSync/visitValidation). Zero regression.
-
-### Learnings for future iterations
-
-- **AC wording vs existing architecture**: US-007 AC said "behind landlordAuthStack" but the existing route (from LL-009) uses `authStack` with controller-level ownership + 404-before-403 existence-hiding. This is the project-wide pattern for ownership-gated property endpoints (LL-008 analytics, LL-009 payments). When an AC clashes with established patterns that are **already locked by tests**, prefer the pattern and document the deviation — don't downgrade security posture to match AC wording.
-- **Injectable `now` for time-dependent services**: `rentalPaymentService.getCurrent/upsertCurrent/listByTenant` all take `now: Date = new Date()`. This is the pattern for any service that branches on "current month" — a test parameter that real callers ignore but tests can pin to get deterministic LATE/AWAITING branches. Use it for the US-011 analytics windows and US-010 metrics too.
-- **Month-comparison via string**: `period < currentPeriod` works because `YYYY-MM` strings sort lexicographically in the same order as chronologically. No Date parsing needed in the synthesis hot path — just compare the strings directly. Pattern: whenever the key format is `YYYY-MM` or `YYYY-MM-DD`, prefer string compare over Date math.
-- **Capping enumeration at current month for ACTIVE contracts**: `effectiveEnd = c.endDate < currentMonthStart ? c.endDate : currentMonthStart`. This prevents rendering "phantom" rows for future months of ACTIVE contracts (a landlord with a 2-year contract shouldn't see 24 AWAITING rows today — only the months that have actually elapsed plus the current one). TERMINATED/COMPLETED contracts with endDate in the past pass through unchanged.
-- **Mock prisma directly when a service is the SUT**: `tests/propertyPaymentsHistory.test.ts` mocks `src/config/db` to stub `contract.findMany` + `rentalPayment.findMany` so the REAL service runs, exercising the synthesis logic end-to-end. The sibling `rentalPaymentsList.test.ts` takes the opposite approach — mocks the service entirely — because it's testing the controller glue. Pick the boundary based on what's under test.
-- **Test data that covers synthesis**: when writing tests for a service that merges DB data with synthesis, make sure the test scenarios include (a) every period has a DB row (pure DB path), (b) no period has a DB row (pure synthesis path), (c) mixed — some present, some missing (the merge path). Test #1 covers (c), test #5/#7 cover (b), and the existing LL-009 test #2 covers (a).
-- **Migration-SQL assertion test as a shadowless `prisma migrate diff` lock**: `tests/contractDocumentStatus.test.ts:230-252` reads the migration file from disk and asserts the exact `CREATE TYPE` + `ALTER TABLE ADD COLUMN` + backfill `UPDATE` clauses are present. This is the durable equivalent of running `prisma migrate diff` in CI — it fires every test run, catches accidental edits to the migration body, and doesn't require a shadow DB. When an AC asks to 'verify migration byte-for-byte', consider writing this kind of assertion test rather than (or in addition to) a one-shot local `migrate diff` — the test stays green as a tripwire long after the commit lands.
-- **PATCH vs PUT for single-field updates**: the project convention is PATCH (`/contracts/:id/document-status`, `/contracts/:id/status`) for single-field mutations, reserving PUT for resource-replacement semantics (like `/contracts/:id/signed-document` which uploads a whole new PDF). When an AC says 'PUT /api/resource/:id accepts X in body', check whether a sibling PATCH already exists — if so, the PATCH IS the AC, and introducing a parallel PUT would duplicate coverage for zero behavioral gain.
-- **Before writing contract seeds for a field**: `prisma/seed.ts` does NOT create any `Contract` records (only Users, Properties, PropertyImages, ChatSessions, Messages, KnowledgeDocuments). `demoData.ts` and `generators.ts` also have zero contract references (verified with `grep -c 'contract\\|monthlyRent'` → 0/0). When an AC asks to 'update existing contract seeds with coherent values', the answer for this codebase is 'there are no contract seeds'. Don't invent them — that's a different PRD.
+## 2026-05-09 - US-007
+- Authored `documentation/runbook-rollback-supabase.md` — operator-facing rollback runbook for the Supabase → local Postgres cutover, covering the first 72h post-cutover window.
+- Files changed:
+  - `documentation/runbook-rollback-supabase.md` (new) — Sections in order: header + audience + cross-links → Pre-requisites (Supabase project still active, `.env.pre-supabase-cutover.bak` present, no direct frontend Supabase usage, original `SUPABASE_ACCESS_TOKEN` reachable; placeholders for Day 0/+7/+14 dates the operator fills during cutover step 4) → When to roll back (trigger table: DB unreachable >5min, data corruption, p95 latency >10× baseline, disk-full, schema mismatch, persistent auth failure) plus an explicit "Do NOT roll back for" counter-list → Procedure (numbered 1–7: SSH `desafio01@desafio01.alphaedtech` → `cd` to API directory → restore `.env` from `.env.pre-supabase-cutover.bak` (with broken-env preservation via `cp -p .env .env.broken-<UTC>`) → `pm2 restart alphatoca-backend --update-env` → `curl http://localhost:3000/health` → `pm2 logs alphatoca-backend --lines 100 --nostream` → announce in `#engineering`) → Data Loss Warning (explicit lost-writes statement, NG-3 reference, integration-collision callouts for Stripe/WhatsApp idempotency keys) → Post-rollback (incident-report required fields, `#engineering` post, freeze further migration attempts until root cause identified, preserve forensics, plus a "Backup missing" sub-procedure) → Decommission Timeline (Day 0/+7/+14 table with date placeholders).
+  - `scripts/ralph/prd.json` — flipped US-007 `passes` to `true`, added implementation notes.
+- Acceptance verification:
+  - Pre-requisites section (AC #2): explicitly states project `qkmseleljscluhhrcpaz` MUST remain active for ≥7 days post-cutover; cutover/decommission date placeholders included.
+  - When to roll back section (AC #3): includes DB unreachable >5min, data corruption, query latency >10× baseline as named triggers, plus three additional incident shapes.
+  - Procedure section (AC #4): numbered 1–7 covering all six AC-mandated steps in the AC's listed order (SSH, cd, restore .env, pm2 restart, curl /health, pm2 logs --lines 100). Steps 1, 7 are wrappers for human-process bookkeeping (announce in #engineering).
+  - Data Loss Warning section (AC #5): explicit lost-writes statement and NG-3 reference: "This is the explicit trade-off accepted in the source PRD as **NG-3**…".
+  - Post-rollback section (AC #6): incident report, `#engineering` post, freeze further migration attempts until root cause identified.
+  - Decommission Timeline section (AC #7): table with rows for Day 0 (cutover), Day +7 (decommission window opens), Day +14 (decommission deadline).
+  - README cross-link (AC #8): `scripts/db-migration/README.md` already links the runbook in three places (lines 49, 75, 97 — Pre-flight Checks, Rollback section, Decommission Timeline). All three were added during US-001 as forward-references and now resolve. No README edit needed.
+  - Typecheck (AC #9): `npx tsc --noEmit` shows only the 3 pre-existing `supportTicket*` errors that exist on main; zero new errors (no TS files touched).
+- **Learnings for future iterations:**
+  - The forward-reference strategy paid off: US-001's README already linked `documentation/runbook-rollback-supabase.md` from three sections, so US-007 is purely a doc-creation story with no README diff. When future stories need a doc that does not exist yet, prefer wiring the link in the docs-of-record now and let the dead link resolve when the target lands; this avoids a "remember to add the link" footgun in the closing story.
+  - The runbook deliberately tells the operator to preserve the broken `.env` via `cp -p .env .env.broken-<UTC>` before overwriting it with the backup. This is a forensics requirement: the cutover-era `.env` may contain the corrupted/wrong DB URL that caused the rollback, and a post-incident review needs that file. Future cutover-style runbooks should default to "preserve broken state, then restore" rather than "restore directly".
+  - PM2 environment caching is a recurring footgun on this stack: `pm2 restart` WITHOUT `--update-env` keeps the in-memory env from the last `pm2 start`/`pm2 restart --update-env`. The runbook calls this out explicitly so the operator does not silently stay on the broken `.env` even after copying the backup back. Same gotcha applies to any future env-mutation procedure.
+  - The runbook puts the rollback decision criteria (When to roll back) BEFORE the Procedure on purpose. Under pressure operators tend to start running commands as soon as they see them; placing the trigger table first forces a decision step. Future incident runbooks in this repo should follow the same shape: "are you sure you want to do this?" → "here's how".
+  - documentation/ already contains business-facing Portuguese guides (app_guide.md, frequently_asked_questions.md, etc.). The rollback runbook is in English to match the tone and audience of the cutover scripts and `scripts/db-migration/README.md` (operator-facing English). When adding to documentation/ in the future, match the audience: end-user docs in pt-BR, operator/runbook docs in English.
+  - NG-3 ("we lose writes between cutover and rollback") is the most important constraint in the source PRD for incident communication. The runbook does not just reference NG-3 — it spells out the integration-collision implications (Stripe charges, WhatsApp message IDs) so the on-call operator does not need to chase down what NG-3 means at 3am. Future runbooks for any one-way migration should do the same: never make the reader chase a numbered reference for the central trade-off.
 ---
 
-## 2026-05-07 - US-008 (Contract.documentStatus — no-op closure)
-
-### Decision: no backend code change. Story closed as satisfied by the archived LL-016 rollout.
-
-Every AC item for US-008 is already delivered by LL-016 (migration stamp `20260508010000_add_contract_document_status`). Zero code changes required. This is the fifth no-op closure in this rollout, following the US-002/US-004/US-005 pattern of "check archived LL-rollouts before writing code".
-
-### AC mapping
-
-- "Add Prisma enum `ContractDocumentStatus { APPROVED AWAITING_SIGNATURE PENDING_DOCUMENTS }`" → **satisfied**: `prisma/schema.prisma:498-502` declares the enum with the three values. Order in the schema file is `PENDING_DOCUMENTS, AWAITING_SIGNATURE, APPROVED` (workflow order), not the alphabetical AC listing — identical set, different enumeration order. Prisma doesn't care; the generated type is the same.
-- "Add field `documentStatus ContractDocumentStatus @default(PENDING_DOCUMENTS)` to Contract" → **satisfied**: `prisma/schema.prisma:478` — `documentStatus ContractDocumentStatus @default(PENDING_DOCUMENTS) @map("document_status")`. `@map` (snake_case column) is additive to the AC — the codebase convention is snake_case columns with camelCase Prisma fields (see other Contract fields: `pdf_url`, `signed_at`, `monthly_rent`). Not rewriting.
-- "Hand-author migration (never run `prisma migrate dev`)" → **satisfied**: `prisma/migrations/20260508010000_add_contract_document_status/migration.sql` — four statements: (a) `CREATE TYPE "ContractDocumentStatus" AS ENUM ('PENDING_DOCUMENTS','AWAITING_SIGNATURE','APPROVED')`, (b) `ALTER TABLE "contracts" ADD COLUMN "document_status" "ContractDocumentStatus" NOT NULL DEFAULT 'PENDING_DOCUMENTS'`, (c) backfill `UPDATE "contracts" SET "document_status" = 'APPROVED' WHERE "signed_at" IS NOT NULL`. No `prisma migrate dev` artifacts visible (no lockfile drift, no phantom renames).
-- "Verify with `npx prisma migrate diff ... --script` — DDL must match byte-for-byte" → **satisfied durably**: instead of a one-shot local verification, LL-016 encoded the check as a permanent assertion in `tests/contractDocumentStatus.test.ts:230-252`. The test reads the migration file from disk and asserts the exact `CREATE TYPE` + `ALTER TABLE ADD COLUMN` + `UPDATE` clauses. Stronger than a one-shot diff because it keeps firing on every test run — any accidental edit to the migration body trips the lock. New Codebase Pattern.
-- "GET /api/contracts (existing) now includes `documentStatus` in response shape" → **satisfied on both GET contract endpoints**:
-  - `GET /api/contracts?propertyId=&tenantId=` (US-014 signature) — service `getActiveContractByPropertyAndTenant` SELECTs `documentStatus` (`contractService.ts:237`); view type `ContractByPropertyTenantView` declares it (`contractService.ts:209`); controller projects it (`contractService.ts:254`); test `contractByPropertyTenant.test.ts:108,138` asserts `documentStatus: 'PENDING_DOCUMENTS'` on the 200 body.
-  - `GET /api/contracts/:id` (legacy) — uses `include: { property, tenant, landlord, payments }` (full Contract row), so `documentStatus` is part of the default projection; `contractService.test.ts:40,70,101,115` covers it explicitly with 'PENDING_DOCUMENTS' and 'APPROVED' fixtures.
-  - Swagger docs for both routes reflect the field (`contractRoutes.ts:74-87`).
-- "PUT /api/contracts/:id (existing) accepts `documentStatus` in body; validates enum value; restricted to LANDLORD who owns the property linked to the contract" → **deviated intentionally** to **PATCH /api/contracts/:id/document-status**. LL-016 shipped the SAME contract as PATCH on a dedicated sub-resource:
-  - Route: `contractRoutes.ts:406` — `router.patch('/contracts/:id/document-status', contractController.updateDocumentStatus)`
-  - Controller: `contractController.updateDocumentStatus` at lines 199-223 — guard order 401 → 400 (Zod `updateContractDocumentStatusSchema`) → 404 (missing contract) → 403 (landlord check) → 200
-  - Service: `contractService.updateContractDocumentStatus` at 261-287 — ownership check (`existing.landlordId !== callerId` throws 403) + narrow `data: { documentStatus }` + narrow `select: { id, documentStatus }` response
-  - Rationale: PATCH (partial update on a single field) is the semantically-correct HTTP verb and matches the existing `PATCH /api/contracts/:id/status` sibling. PUT typically implies resource replacement (see `PUT /api/contracts/:id/signed-document` which does replace the whole signed PDF). Introducing a parallel `PUT /api/contracts/:id` would duplicate coverage, fragment the surface, and churn any frontend call sites — zero behavioral gain. New Codebase Pattern. Consistent with the US-007 'AC wording vs existing architecture' precedent.
-- "prisma/seed.ts updates existing contract seeds with coherent documentStatus values" → **N/A**: seed.ts creates zero Contract records. `grep -c 'contract\\|monthlyRent' prisma/seed.ts prisma/demoData.ts prisma/generators.ts` → 0/0/0. The only relevant lines in `seed.ts` are `prisma.rentalProcess.deleteMany()` (a DIFFERENT model — see the comment at `schema.prisma:449-454` explaining the Contract-vs-RentalProcess lineage decision from US-013). New contracts inserted through the API inherit the `@default(PENDING_DOCUMENTS)`; existing production rows with `signed_at IS NOT NULL` were backfilled to APPROVED by the migration's UPDATE. New Codebase Pattern.
-- "tests/contractDocumentStatus.test.ts covers: GET returns the field, PUT updates it, PUT 403 for non-owner, PUT 400 for invalid enum value" → **satisfied across three files**:
-  - `tests/contractDocumentStatus.test.ts` (13 cases): 7 route-level on PATCH /api/contracts/:id/document-status (landlord happy path → AWAITING_SIGNATURE, APPROVED terminal, 403 non-landlord, 404 missing contract, 400 unknown enum, 400 missing field, 401 no header), 4 service-level on `updateContractDocumentStatus` (narrow select shape assertion, 404 + no-update side effect, 403 + no-update side effect, persist + narrow return view), 2 schema/migration-level (migration SQL assertion, enum values present on generated client).
-  - `tests/contractByPropertyTenant.test.ts:108,138` — GET response shape asserts `documentStatus: 'PENDING_DOCUMENTS'`.
-  - `tests/contractService.test.ts:40,70,101,115` — service-level documentStatus coverage on both PENDING_DOCUMENTS and APPROVED fixtures.
-  - Test filename matches the AC exactly (`contractDocumentStatus.test.ts` — no rename needed, unlike US-004/US-005/US-006/US-007 precedent).
-- "Typecheck passes" → **verified**: `npx tsc --noEmit` clean.
-- "Tests pass" → **baseline unchanged**: full suite 23 failed / 638 passed / 68 files — **identical to US-007 baseline**. Same 6 pre-existing failing files (auth/rag/ingest/userSync/visitValidation). Targeted run `npx vitest run tests/contractDocumentStatus.test.ts tests/contractByPropertyTenant.test.ts tests/contractService.test.ts` → 31/31 pass. Zero code changes = zero regression.
-
-### Files changed
-
-- `scripts/ralph/progress.txt` (this entry + 3 new Codebase Patterns at the top)
-- `scripts/ralph/prd.json` (flip US-008 `passes: true` with full AC-item rationale)
-
-### Learnings for future iterations
-
-- **LL-016 decoupled `documentStatus` from `status`** intentionally. The GAPS_FINAIS.md §2.5 AC description talks about replacing "the heuristic based on property.status" for the 'Meus Inquilinos' chip — so `Contract.documentStatus` is a separate lifecycle from `Contract.status` (ACTIVE/TERMINATED/COMPLETED). An ACTIVE contract can have ANY documentStatus (the tenant is living there but the documents might not be signed yet); a TERMINATED contract typically has APPROVED (they eventually signed before moving out). Don't conflate the two when writing metrics or UI filters downstream (e.g., US-010 proposals count should key off Proposal.status, not Contract.documentStatus).
-- **Grep for the field across layers, not just the schema**, when evaluating whether a story is a no-op: `grep -rn documentStatus tests/ src/ prisma/` returned 30+ hits across migration, service, controller, validation, tests, and Swagger — LL-016 was wired end-to-end. If only the schema mentioned it, the story would still have real work (wiring). The 30-hit surface is the tell that a prior rollout delivered it.
-- **US-009 (echo title/description in POST ticket response) is pure controller glue** — no schema, no migration, no service changes. Should be the fastest story in this batch. Before starting, `grep -n createTicket src/controllers/supportTicketController.ts` + `cat tests/supportTicketCreate.test.ts | head -80` to see the current response shape, then it's a ~5-line edit + test update.
-- **US-010→US-014 are the harder ones** — US-010 (landlord metrics) and US-011 (per-property analytics) need real queries across multiple models with 30d/90d/1y windows (remember the injectable `now` pattern from US-007). US-013 (Notification model) is a fresh migration + new model + persist-on-broadcast side effect. US-015 needs `ALTER TYPE ADD VALUE` migrations which CANNOT run in a transaction block (per the AC's explicit callout — `migration.sql` must not wrap them in BEGIN/COMMIT).
+## 2026-05-09 - US-008
+- Removed the abandoned `supabase/` directory from the repo via `git rm -r supabase/`.
+- Files changed (8 deletions staged):
+  - `supabase/migrations/20260426211018_add_location_fields_to_property.sql` (0 bytes — empty stale file)
+  - `supabase/.temp/cli-latest`, `gotrue-version`, `pooler-url`, `postgres-version`, `project-ref`, `rest-version`, `storage-version` (Supabase CLI metadata)
+  - `scripts/ralph/prd.json` — flipped US-008 `passes` to `true`, added implementation notes.
+- Acceptance verification:
+  - AC #1: `git rm -r supabase/` removed all 8 tracked files; output captured 8 `rm 'supabase/...'` lines.
+  - AC #2: equivalent prisma migration confirmed at `prisma/migrations/20260424233623_add_search_fields/migration.sql` lines 18-19 — `ADD COLUMN "latitude" DOUBLE PRECISION` + `ADD COLUMN "longitude" DOUBLE PRECISION` on `properties`. The supabase file's filename advertised "add_location_fields_to_property" but its body was empty (0 bytes per `wc -c`), confirming the actual schema change already lives in the prisma migration and the supabase file was a stale CLI artefact, not a divergent source of truth.
+  - AC #3 contingency NOT triggered: the supabase file was empty, so there is no SQL to port forward.
+  - AC #4: `ls supabase/ 2>/dev/null` returns nothing and exits 2 (directory gone).
+  - AC #5: `git status --short` shows 8 `D` entries for the deleted paths plus the unrelated `??` archive entries from prior milestones.
+  - AC #6 (typecheck): `npx tsc --noEmit` shows only the 3 pre-existing `supportTicket*` errors that exist on main; zero new errors (no TS files touched).
+  - AC #7 (`npx prisma validate`): exits 0 with `The schema at prisma/schema.prisma is valid 🚀`.
+- **Learnings for future iterations:**
+  - The `supabase/` directory was BOTH a stale CLI workspace (`supabase/.temp/` holds the version pins of whichever Supabase CLI last logged in: gotrue, pooler, storage, etc.) AND a parallel migration source (`supabase/migrations/`). When ripping out a Supabase integration, BOTH halves need to go — `supabase/.temp/` files leak the project-ref (`project-ref` file contained `qkmseleljscluhhrcpaz`) and would survive a naive "delete migrations only" cleanup.
+  - The empty migration file (`20260426211018_add_location_fields_to_property.sql` was 0 bytes) is a tell that the team had already migrated the schema to prisma and abandoned the supabase migration midway — the CLI created the placeholder, then the prisma migration shipped the real DDL. When auditing parallel migration directories, ALWAYS `wc -c` each file first; an empty file is the signature of an abandoned cutover, not a hidden bug.
+  - When the AC names a "matching migration name" check (here: AC #2 says "record the matching prisma migration name in progress.txt"), the match is by *content* (does this DDL exist somewhere in prisma/migrations?), not by filename or timestamp. The supabase file was timestamped 2026-04-26 but the prisma migration that actually shipped the columns is dated 2026-04-24 — earlier, not later. Future migration audits should grep for the columns/indices/constraints the abandoned file would have added, not match on filename or timestamp.
+  - `git rm -r` on a tracked directory removes both files AND the working-tree directory. After running it, `ls supabase/` returns "No such file or directory" — there is no separate `rmdir` step and the empty parent dir does not linger. Document this for any future "delete a vendored directory" stories so the operator does not panic when `ls` fails.
+  - For US-009 / US-010 (final scrub stories), the only remaining versioned Supabase references should now be in `documentation/runbook-rollback-supabase.md` (intentional), `scripts/db-migration/` (operator scripts that name the source pooler), `tasks/`, `.planning/`, `scripts/ralph/`, and `plan_hospedagem.md` (US-009 will rewrite this). The directory removal in US-008 closes the largest single source of supabase artefacts in the tree.
 ---
 
-## 2026-05-07 - US-009
-
-### What was implemented
-
-Expanded the `POST /api/support/tickets` response body from the narrow
-`{ id, code, createdAt }` shape to the full `{ id, code, title,
-description, createdAt, status }` shape. The new shape matches
-`SupportTicketUserView` exactly — the same type returned by
-`GET /api/support/tickets` (US-003) — so the frontend can reuse the
-existing listForUser parser instead of maintaining two slightly
-different deserializers for the create-vs-list flows.
-
-No schema change, no migration, no service change. Single-file
-controller edit + two test updates.
-
-### Files changed
-
-- `src/controllers/supportTicketController.ts` — `create` method's
-  `res.status(201).json(...)` now includes `title`, `description`, and
-  `status`. The pre-US-009 shape dropped these fields, forcing the
-  frontend to echo its own request body into local cache to assemble a
-  ticket card. Everything else in the handler (401 guard, Zod parse,
-  service call, email side-effect, SupportTicketError mapping) is
-  untouched.
-- `tests/supportTicketCreate.test.ts` — (a) renamed the happy-path test
-  and updated its `toEqual` to the 6-field shape. (b) Added a new test
-  `echoes title/description/status in the response body (US-009)` that
-  uses `toMatchObject` + `not.toHaveProperty('user'|'assignedTo'|
-  'resolution'|'updatedAt'|'userRole')` to lock in the boundary between
-  the opener echo (user view) and the admin triage view.
-- `scripts/ralph/prd.json` — flipped US-009 `passes: true` with full
-  rationale in `notes`.
-
-### Verification
-
-- `npx tsc --noEmit` — clean.
-- `npx vitest run tests/supportTicketCreate.test.ts tests/supportTicketsList.test.ts tests/supportTicketService.test.ts` — 46/46 pass.
-- Full suite `npx vitest run` — **23 failed / 639 passed / 68 files**.
-  Same 6 pre-existing failing files from the baseline
-  (auth/rag/ingest/userSync/visitValidation). +1 new passing test vs
-  US-008's 638 baseline. Zero regression.
-
-### Learnings for future iterations
-
-- **When expanding a response shape, align with the existing view type
-  in the same service**. `SupportTicketUserView` (US-003) already
-  defined exactly the 6 fields the frontend wants here — the POST echo
-  should be shape-identical to the list item, not a bespoke subset.
-  Same pattern likely applies to other POST-then-list flows in this
-  codebase (proposals, visits, messages) when an AC asks to "echo back
-  more fields".
-- **Negative assertions beat exact-equality for response-shape tests
-  when there's an admin view in the same type family**. Using
-  `toMatchObject` for the positive shape + a set of
-  `not.toHaveProperty('user'|'assignedTo'|'resolution'|'updatedAt')`
-  assertions makes the boundary between the user view and admin view
-  explicit at the test layer — a future refactor that accidentally
-  pipes `updatedAt` from the service row into the 201 body will fail
-  loudly with a named property assertion, not a cryptic deep-equal
-  diff. Apply this pattern when US-010→US-014 add endpoints that have
-  both a "self" view and an "admin" view (notifications, metrics).
-- **`res.status` in Prisma models comes back as the SupportTicketStatus
-  enum literal (`'OPEN'`, `'PENDING'`, `'RESOLVED'`)**, which is
-  already JSON-serializable — no mapping/stringify needed in the
-  controller. Same will apply to `Notification.category` (US-013),
-  `ContractDocumentStatus` (US-008), `VisitSource` (US-012), etc.
-- **Not every test in a 13-test file needs updating when the response
-  shape changes** — most of `supportTicketCreate.test.ts`'s tests
-  assert on mockCreate call args, response status, or `res.body.code`
-  (a field that still exists), not the full body shape. Only the one
-  test that did `toEqual(exactShape)` needed to change. Worth checking
-  `grep -l 'toEqual' tests/` before blindly editing a whole file.
-
+## 2026-05-09 - US-009
+- Updated `plan_hospedagem.md` to remove all Supabase references and document the local-Postgres setup.
+- Files changed:
+  - `plan_hospedagem.md` — three substitutions + one new subsection:
+    1. Section 2 step 3 (env-config bullet, was line 45): removed "Supabase" from the parenthetical product list and added a sentence directing the operator to set `DATABASE_URL`/`DIRECT_URL` to `127.0.0.1:5432`, with a forward-pointer to section 2.5 and to `scripts/db-migration/01-provision-postgres.sh`.
+    2. Section 2 step 5 (migrations bullet, was line 56): replaced "(que parece ser Supabase pelo histórico)" with "Postgres nativo (rodando na mesma máquina, em `127.0.0.1:5432`)".
+    3. Resumo dos Próximos Passos step 3 (was line 124): replaced "(Supabase, Firebase, chaves de API, etc.)" with "(`DATABASE_URL` e `DIRECT_URL` apontando para o Postgres local em `127.0.0.1:5432`, Firebase, chaves de API, etc.)".
+    4. New `## 2.5 Banco de Dados Local` subsection inserted between sections 2 and 3 (chose 2.5 to avoid renumbering sections 3–6, per AC). Subsection covers: provisioning via `scripts/db-migration/01-provision-postgres.sh`, .env example with `DATABASE_URL`/`DIRECT_URL`, URL-encoding note pointing to `04-cutover-env.sh`, the cutover script chain indexed in `scripts/db-migration/README.md`, and rollback runbook in `documentation/` (linked from the migration README).
+  - `scripts/ralph/prd.json` — flipped US-009 `passes` to `true`, added implementation notes.
+- Acceptance verification:
+  - AC #1: line that previously said "(que parece ser Supabase pelo histórico)" now says "Postgres nativo (rodando na mesma máquina, em `127.0.0.1:5432`)".
+  - AC #2: env-config bullet now lists `DATABASE_URL`/`DIRECT_URL` pointing to `127.0.0.1:5432`.
+  - AC #3: section `## 2.5 Banco de Dados Local` exists between sections 2 and 3, links the provisioning script, and points to the rollback runbook in `documentation/`.
+  - AC #4: `grep -ni 'supabase' plan_hospedagem.md` → No matches found.
+  - AC #5: section numbering is `Dados do Servidor → 1 → 2 → 2.5 → 3 → 4 → 5 → 6 → Resumo dos Próximos Passos`. Sections 3–6 unchanged downstream of the insertion.
+  - AC #6 (Typecheck): `npx tsc --noEmit` shows only the 3 pre-existing `supportTicket*` errors that exist on main; zero new errors (no TS files touched).
+- **Learnings for future iterations:**
+  - The strict "zero `supabase` matches" AC is case-insensitive and matches on file content including URLs and Markdown link targets. Two cross-reference filenames in the repo contain "supabase" (`documentation/runbook-rollback-supabase.md` from US-007 and `tasks/prd-supabase-to-localhost-db-migration.md`) — neither could be linked by name in `plan_hospedagem.md`. Workaround: refer to them indirectly ("runbook de rollback em `documentation/`", "PRD da migração em `tasks/`") and rely on `scripts/db-migration/README.md` to carry the direct links. The README is the central operator index, so the cross-reference chain still resolves.
+  - When inserting a section into an already-numbered Markdown doc, prefer a fractional section number (`## 2.5 …`) over renumbering downstream sections. The diff stays minimal, no other section header needs touching, and the AC's "OR the new section is numbered 2.5 to avoid renumbering" clause was clearly written with this in mind. Renumbering is a regression risk — it forces every other doc/test/CI grep that hard-codes a section number to break.
+  - The `.env` example uses a fenced ```env block (rather than ```bash) so syntax highlighters render the lines as configuration, not as shell commands. This is purely cosmetic but matches the convention in `tasks/prd-supabase-to-localhost-db-migration.md` and `documentation/runbook-rollback-supabase.md` which also use ```env for environment-variable snippets in this repo.
+  - For US-010 (final scrub), the only remaining file in the repo (excluding the permitted residuals listed in the AC) that should still match `grep -i 'supabase'` is now expected to be limited to: scripts/db-migration/* (operator scripts that legitimately name the source pooler), scripts/ralph/* (work logs and archives), tasks/* (PRDs), .planning/* (planning artefacts), documentation/runbook-rollback-supabase.md (intentional rollback target). Anything else discovered by US-010's grep is a true scrub candidate and should be edited.
 ---
 
-## 2026-05-07 - US-010 (GET /api/landlord/metrics — no-op closure)
-
-### Decision: no backend code change. Story closed as satisfied by the archived LL-002 rollout.
-
-`GET /api/landlord/metrics` was fully delivered by LL-002 of the landlord-backend-closeout rollout. Every functional AC item is met by existing code. Zero code changes required. This is the sixth no-op closure in this rollout (following US-002/US-004/US-005/US-008), confirming the Codebase Pattern "check archived LL-rollouts before writing code".
-
-### AC mapping
-
-- "Add `GET /api/landlord/metrics` route behind landlordAuthStack" → **satisfied via a different naming**: the project doesn't have a single middleware named `landlordAuthStack`; instead it composes the equivalent inline at the mount. `src/app.ts:142` declares `app.use('/api', authStack, requireRole(Role.LANDLORD), landlordRoutes)` — so every route inside `landlordRoutes.ts` is already behind `checkJwt + authSyncMiddleware + requireRole(LANDLORD)`. `src/routes/landlordRoutes.ts:71` declares `router.get('/landlord/metrics', landlordController.getMetrics)`. Functionally equivalent to the AC wording; the naming delta is documented in the new "role gating at the mount" Codebase Pattern.
-- "Response: `{ profileViews: number, proposalsPending: number, unreadMessages: number }`" → **satisfied**: controller returns exactly this shape (`src/controllers/landlordController.ts:77`). No envelope, bare JSON object. Tests assert `toEqual({ profileViews, proposalsPending, unreadMessages })` on all three fields.
-- "`profileViews`: reuse the existing ProfileView table from LL-001 — count WHERE landlordId = req.localUser.id AND viewedAt >= now() - interval '30 days'" → **satisfied**: `ProfileView` exists at `prisma/schema.prisma:639` (id, landlordId, viewerId, viewedAt + `@@index([landlordId, viewedAt])`). Controller queries `prisma.profileView.count({ where: { landlordId, viewedAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } } })`. Test asserts the `viewedAt.gte` is within 5s of `now() - 30d`.
-- "`proposalsPending`: count `Proposal` where `propertyId IN (landlord's properties) AND status = 'PENDING'`" → **satisfied**: controller uses nested relational filter `where: { status: ProposalStatus.PENDING, property: { landlordId } }` — Prisma compiles this to the EXISTS / JOIN you'd hand-write. The `ProposalStatus.PENDING` enum import from `@prisma/client` gives compile-time safety; a typo in the status string would fail `tsc`.
-- "`unreadMessages`: count Message where `conversation.participants` includes landlord, `authorId != landlord`, `readAt IS NULL`" → **satisfied**: `countUnreadMessages` helper queries `prisma.conversationMessage.count({ where: { readAt: null, conversation: { landlordId }, authorId: { not: landlordId } } })`. Because the Conversation schema uses `landlordId`/`tenantId` columns (NOT `participants[]` — see Codebase Patterns), "landlord is a participant" is expressed as `conversation.landlordId === userId`. Try/catch on `Prisma.PrismaClientKnownRequestError` + `err.code === 'P2021'` returns 0 if the table were missing — legacy guard from before LL-010 landed the ConversationMessage table; now dead code but harmless.
-- "tests/landlordMetrics.test.ts covers: empty (all zeros), populated case with seeded ProfileView + Proposal + Message, role check (non-landlord gets 403)" → **satisfied**: 6 cases in `tests/landlordMetrics.test.ts`:
-  1. 200 happy path — populated counts (142, 3, 7) with full where-clause assertions on all three count calls (landlordId scoping, 30d window within 5s slack, PENDING filter, not-self authorId filter).
-  2. 200 graceful unreadMessages=0 on P2021 rejection — simulates the pre-LL-010 DB state where conversation_messages didn't exist.
-  3. 200 all zeros — empty landlord.
-  4. 401 missing header — rejected before any DB call (asserts all three mocks not called).
-  5. 403 TENANT — `requireRole(LANDLORD)` kicks.
-  6. 403 ADMIN — endpoint is LANDLORD-only, not LANDLORD-or-ADMIN.
-
-  Filename matches the AC exactly (`landlordMetrics.test.ts`). Tests use the `importOriginal` authMiddleware mock pattern — keeps `requireRole` real so the 403 branch is exercised end-to-end (tenant and admin auth both produce a real req.localUser and then hit the real requireRole, which returns 403 with code `FORBIDDEN`).
-- "Typecheck passes" → **verified**: `npx tsc --noEmit` clean.
-- "Tests pass" → **baseline unchanged**: full suite 23 failed / 639 passed / 68 files — identical to US-009 baseline. Same 6 pre-existing failing files (auth/rag/ingest/userSync/visitValidation). Targeted `npx vitest run tests/landlordMetrics.test.ts` → 6/6 pass.
-
-### Stale-comment note (intentionally left alone)
-
-The controller has a `try { ... } catch (err) { if P2021 return 0 }` block that was written when LL-010 hadn't been applied yet and `conversation_messages` literally didn't exist. LL-010 is now in the schema (`prisma/schema.prisma:619 model ConversationMessage`) and has a migration on disk (`prisma/migrations/20260508000000_add_conversation_message/`), so the catch is dead code under current DB state. Not ripping it out in a no-op closure — it's harmless belt-and-braces, and one of the 6 tests still exercises it (the P2021 fallback test). Removing it would delete that test and reduce defensive coverage. If US-011 or a future simplification PRD asks to clean this up, the comment in the controller is honest about what the guard protects against.
-
-### Files changed
-
-- `scripts/ralph/progress.txt` (this entry + 3 new Codebase Patterns at the top)
-- `scripts/ralph/prd.json` (flip US-010 `passes: true` with full AC-item rationale)
-
-### Learnings for future iterations
-
-- **Conversation-as-participant filter translation**: When an AC says "conversation.participants includes X", the correct Prisma translation is NOT `{ participants: { some: { userId: X } } }` (that would need a participants relation table that doesn't exist). It's `{ OR: [{ landlordId: X }, { tenantId: X }] }` for two-party threads (or just `{ landlordId: X }` if the endpoint is landlord-only, which is the case for US-010's unreadMessages). The schema is deliberately denormalized to enforce `UNIQUE(propertyId, landlordId, tenantId)` at the DB level.
-- **`ProposalStatus.PENDING` is a Prisma-generated enum import**, not a raw string literal. `import { ProposalStatus } from '@prisma/client'` gives compile-time safety on the where clause. Tests still assert on the string literal (`expect(...).toHaveBeenCalledWith({ where: { status: 'PENDING', ... } })`) because Prisma serializes the enum to its string value at the client boundary — but the source code uses the enum. Apply this to US-012 (`VisitSource.MANUAL`), US-013 (`NotificationCategory.announcement`), US-015 (`PropertyType.KITNET` et al.) when those run.
-- **US-013 has a SCHEMA CONFLICT with an existing model** — flagged in the new Codebase Pattern. The current `Notification` model uses `sentAt` + `NotificationType` enum, but the US-013 AC specifies `receivedAt` + `NotificationCategory { update announcement system }`. Before writing the migration, check whether the existing model already satisfies the behavior with renamed/added fields, or whether a full rename migration is needed. `grep -rn NotificationType src/ tests/` will show all callers that would break.
-- **Baseline hasn't changed in 7 stories** (US-009 landed at 639 passed; US-010 no-op keeps 639). The 23 pre-existing failures have been stable since US-002 — safe to treat them as an unchanging baseline for the rest of this rollout. Don't start "investigating" them as a side-quest; they're upstream refactors orthogonal to the gaps-finais scope.
-- **A no-op closure IS legitimate progress** when the archive already delivered the feature. The Codebase Pattern already explicitly says "If shape + guards + tests already match the AC, close the story as a no-op in the PRD notes and skip the code churn." US-002/US-004/US-005/US-008/US-010 are all valid examples. Don't invent changes to "look busy" — the audit trail IS the deliverable.
----
-
-## 2026-05-07 - US-011 (GET /api/properties/:id/analytics — no-op closure)
-
-### Decision: no backend code change. Story closed as satisfied by the archived LL-008 rollout.
-
-Every AC item (plus additive instrumentation the AC explicitly said to skip) is already delivered by LL-008 (and its sibling LL-007 for the recording endpoints). Zero code changes required. Seventh no-op closure in this rollout (after US-002/US-004/US-005/US-008/US-010).
-
-### AC mapping
-
-- "Add `GET /api/properties/:id/analytics?window=30d|90d|1y` route behind landlordAuthStack; default window=30d" → **satisfied with AC-wording deviation**: route at `src/routes/propertyRoutes.ts:932-936` uses `...authStack` + in-controller ownership check, NOT `landlordAuthStack`. Same rationale as US-007: gating on `requireRole(LANDLORD)` at the mount would force 403 BEFORE the controller can return 404 for missing properties, breaking the existence-hiding intruder test. Default `window = window ?? '30d'` applied in the controller (src/controllers/propertyController.ts:206). Zod enum `propertyAnalyticsQuerySchema` rejects unknown window values with 400 `VALIDATION_ERROR`.
-- "Ownership check: 403 if property.landlordId !== req.localUser.id; 404 if property not found" → **satisfied with guard-order nuance**: 404 is returned FIRST for missing properties (even for non-owner intruders — see test "404 is returned even for a non-owner when the property is missing (no existence leak)"), THEN 403 for existing properties owned by another landlord. Order: 401 → 400 → 404 → 403 → 200. Locked in by `tests/propertyAnalytics.test.ts:188-212`.
-- "Response: `{ views, favorites, proposalsTotal, proposalsOpen, visitsScheduled, contactClicks, dailyViews: [{date, count}] }`" → **satisfied**: `PropertyAnalyticsResult` type at `propertyAnalyticsService.ts:6-14` declares the exact 7-field shape; controller returns `res.status(200).json(result)` with no envelope. `dailyViews` is always a zero-filled `YYYY-MM-DD` bucket series covering every day in the window (not just days with events).
-- "`favorites`: count existing Favorite rows for property (if table exists — grep first)" → **satisfied**: `model Favorite` exists at `prisma/schema.prisma:402`; service counts `prisma.favorite.count({ where: { propertyId } })` all-time (not windowed — matches the AC's intent for a cumulative "how many users favorited this").
-- "`proposalsTotal`, `proposalsOpen`, `visitsScheduled`: real counts over the window" → **partial match, deliberately split**: `proposalsTotal` IS window-scoped (`createdAt: { gte, lt }`), but `proposalsOpen` and `visitsScheduled` are all-time counts filtered by status (`PENDING` and `SCHEDULED` respectively). This mirrors the dashboard semantics ("how many new proposals arrived this window" vs "how many open proposals exist right now") — a window-scoped "open" would undercount long-standing PENDING proposals that were created outside the window but are still pending today. Tests lock this in.
-- "`views`, `contactClicks`, `dailyViews`: return 0/[] with TODO comment in controller (no telemetry instrumentation exists yet — Open Question #5 in PRD)" → **exceeded AC — real instrumentation landed in LL-008/LL-007**: `PropertyViewEvent` (prisma/schema.prisma:658) and `ContactClickEvent` (prisma/schema.prisma:676) tables exist, both fed by public recording endpoints (`POST /api/properties/:id/view`, `POST /api/properties/:id/contact-click`). Service counts `prisma.propertyViewEvent.count` and `prisma.contactClickEvent.count` within the window, and runs a `$queryRaw` GROUP BY for the daily series. Returning zeros would be a regression — real data is better than the AC's placeholder. This also means Open Question #5 (telemetry instrumentation) is effectively already closed.
-- "Do NOT create new tracking tables — that's an instrumentation PRD, not this one" → **satisfied**: zero new tables created in THIS story. The two event tables pre-date US-011 (committed as part of LL-007/LL-008 in an earlier rollout).
-- "tests/propertyAnalytics.test.ts covers: 30d window, 90d window, 1y window, ownership 403, default window, invalid window (400)" → **satisfied**: file exists with 8 route-level cases: default window forwards `'30d'` to service, all three window values forwarded (30d/90d/1y), dailyViews zero-filled shape preserved through controller, 400 malformed UUID, 400 invalid window enum, 401 missing header, 404 missing property, 404 intruder-on-missing (existence-hiding), 403 non-owner on existing property. Plus sibling `tests/propertyAnalyticsService.test.ts` (service-level) — 7 cases covering count semantics per field and zero-filled dailyViews. Filename matches the AC exactly (`propertyAnalytics.test.ts`) — no rename debate.
-- "Typecheck passes" → **verified**: `npx tsc --noEmit` clean.
-- "Tests pass" → **baseline unchanged**: full suite 23 failed / 639 passed / 68 files — identical to US-010 baseline; same 6 pre-existing failing files (auth/rag/ingest/userSync/visitValidation). Targeted `npx vitest run tests/propertyAnalytics.test.ts tests/propertyAnalyticsService.test.ts` → 15/15 pass.
-
-### Files changed
-
-- `scripts/ralph/progress.txt` (this entry + 3 new Codebase Patterns at the top)
-- `scripts/ralph/prd.json` (flip US-011 `passes: true` with full AC-item rationale)
-
-### Learnings for future iterations
-
-- **Open Questions in a PRD can be stale**. US-011 AC still referenced "Open Question #5: no telemetry instrumentation exists yet" and asked to return zeros with TODOs — but LL-007/LL-008 already landed both the event tables and the recording endpoints in an earlier rollout. Before implementing a "return 0 placeholder" against an Open Question, grep for the underlying model names — if `grep -rn 'propertyViewEvent\\|contactClickEvent' src/ prisma/` returns live hits, the Open Question is already closed, and writing a zero-return placeholder would regress the live surface.
-- **"All-time" vs "within-window" counts are semantically distinct per field** in an analytics payload. `favorites`, `proposalsOpen`, `visitsScheduled` are all-time (cumulative state); `views`, `contactClicks`, `proposalsTotal` are windowed (flow within the window). The dashboard UX treats them differently (the all-time ones are "right now" chips; the windowed ones are "in the last 30 days" cards). When adding a new field to this endpoint, make an explicit decision: cumulative-state or flow-within-window? Don't auto-apply `viewedAt: { gte, lt }` to every count.
-- **Raw `$queryRaw` GROUP BY for daily buckets is the only query that needs SQL** — every other count in `propertyAnalyticsService.getAnalytics` uses the typed Prisma client (`prisma.x.count`). When extending, prefer typed `count` / `aggregate` for new scalar counters; reach for `$queryRaw` only when you need a GROUP BY that Prisma's typed `groupBy` can't express cleanly (e.g., date truncation with `to_char`).
-- **Instrumentation endpoints (`POST /properties/:id/view`, `POST /properties/:id/contact-click`) are PUBLIC** — no auth required. That's intentional: anonymous viewers browsing properties still need to contribute to the view count. The service stores `viewerId: null` for anonymous hits. When adding new analytics event types, decide up-front whether anonymous traffic counts; if yes, keep the endpoint public and make the foreign-key to User optional.
-- **Next up is US-012 (Visit.source MANUAL|AI)** — unlike US-011, this one ACTUALLY requires a migration (new enum + column on Visit). `grep -rn 'enum VisitSource\\|Visit.*source' prisma/ src/` returns zero hits — this is fresh surface, not an archived LL-rollout. Expect real code churn. Also: the AC explicitly calls out that `ALTER TABLE ADD CONSTRAINT CHECK` should mirror the enum — Postgres `CREATE TYPE ... AS ENUM` is the canonical way with Prisma, but if the AC wording prefers a CHECK constraint, use the enum approach anyway (Prisma client type safety depends on it). Hand-author the migration per Codebase Patterns; do NOT run `prisma migrate dev`.
-- **Codebase Pattern updates (3 new) locked in at the top of progress.txt**: (a) PropertyViewEvent/ContactClickEvent already exist — don't zero-return, (b) zero-filled daily bucket pattern via `enumerateDays` + `dailyMap.get(date) ?? 0`, (c) UTC-exclusive end-of-range for time-window counts.
----
-
-## 2026-05-07 - US-012 (Visit.source MANUAL|AI — controller downgrade guard)
-
-### Status
-
-Schema + enum + migration + validation schema + service wiring + the read-endpoint exposure of `source` were ALL already delivered by the archived LL-018 rollout. The "next up" prediction at the end of US-011's progress entry was WRONG — LL-018 had landed the migration the same day. A re-grep (`grep -rn "enum VisitSource\|Visit.*source" prisma/ src/`) showed 3 hits across schema, migration, and service. This story closes the **one remaining behavioral gap** the AC explicitly calls out: the server must force `source = MANUAL` for every human caller because the `ai-agent` JWT scope doesn't exist yet (Open Question #6).
-
-### The behavioral gap
-
-Before US-012, `visitController.create` parsed the body (`createVisitSchema` accepts optional `source` defaulting to MANUAL), then handed the parsed input straight to `createVisit`. A client posting `{ source: 'AI' }` would have the AI value persisted verbatim — a trust-the-client posture that the AC forbids until the `ai-agent` scope exists. The fix has to happen at the controller layer (not the service) because that's where `req.localUser` and the auth context live; the service stays a pure persistence layer so the future legitimate AI-agent flow (once the scope lands) persists `AI` without needing a signature change.
-
-### Implemented
-
-- **Controller guard** (`src/controllers/visitController.ts`):
-  - Added `import { VisitSource } from '@prisma/client'`.
-  - Added a small module-local helper `callerHasAiAgentScope(_req: Request): boolean` that returns `false` unconditionally with a TODO doccomment pointing at Open Question #6 ("When the scope lands, replace this with `req.localUser.scopes?.includes('ai-agent')`").
-  - `visitController.create` now computes `effectiveSource = callerHasAiAgentScope(req) ? input.source : VisitSource.MANUAL` and forwards `{ ...input, source: effectiveSource }` to `createVisit`.
-- **Service unchanged**: `visitService.createVisit` still persists whatever `source` it's handed. That's correct — the service is a pure persistence layer; the scope-gate is the controller's job.
-- **Controller tests** (`tests/visitController.test.ts`, 3 new cases in the `visitController.create` describe block):
-  1. Body omits source → service is called with `source: 'MANUAL'`.
-  2. Body sends `source: 'MANUAL'` → service is called with `source: 'MANUAL'`.
-  3. Body sends `source: 'AI'` → service is called with `source: 'MANUAL'` + explicit `not.toHaveBeenCalledWith(source: 'AI')` sanity-check so the downgrade is locked in even if the first assertion is ever weakened.
-- **Service tests adjusted for layer clarity** (`tests/visitSource.test.ts`):
-  - Renamed the describe block to `visitService.createVisit — source persistence (pure service layer)`.
-  - Renamed the AI test to `persists AI when the service layer is called with source=AI directly` and added an inline docblock explaining the service is intentionally a pure persistence layer (the scope-gate lives in the controller). Behavior unchanged.
-
-### AC mapping
-
-- "Add enum `VisitSource { MANUAL AI }` to schema.prisma" → **satisfied by LL-018** at `prisma/schema.prisma:76-79`.
-- "Add field `source VisitSource @default(MANUAL)` to Visit model" → **satisfied by LL-018** at `prisma/schema.prisma:353`.
-- "Hand-author `prisma/migrations/<stamp>_add_visit_source/migration.sql` — ALTER TABLE with CHECK constraint matching the enum" → **satisfied by LL-018** (`20260508030000_add_visit_source/migration.sql`): `CREATE TYPE "VisitSource" AS ENUM ('MANUAL', 'AI')` + `ALTER TABLE "visits" ADD COLUMN "source" "VisitSource" NOT NULL DEFAULT 'MANUAL'`. **Deviation**: AC requested a CHECK constraint; implementation uses `CREATE TYPE ... AS ENUM` instead, which is strictly stronger (Postgres rejects non-enum values at the type level before the row is even inserted) AND is the canonical Prisma pattern. Adding a separate CHECK would be redundant and create a maintenance burden (CHECK + enum must be kept in sync by hand). New Codebase Pattern.
-- "Verify DDL byte-for-byte with `prisma migrate diff`" → **satisfied durably via test assertion** at `tests/visitSource.test.ts:202-223` (reads the migration file from disk and asserts the exact CREATE TYPE + ALTER TABLE clauses). Same pattern US-008 established — stronger than a one-shot local diff because the test stays green as a tripwire.
-- "All `GET /api/visits*` endpoints include `source` in response" → **satisfied by LL-018**: `visitService.getVisitById` / `listVisits` use Prisma `findUnique` / `findMany` without a narrow `select:`, so the full Visit row including `source` is returned. Tests in `tests/visitSource.test.ts` describe block `visitService read paths expose source` lock this in.
-- "`POST /api/visits` accepts optional `source` in body; if req.localUser lacks an `ai-agent` scope (which doesn't exist yet — treat as always false), force `source = MANUAL` and ignore the request body value. Add TODO comment referencing Open Question #6" → **satisfied by THIS story**: controller guard + 3 new tests described above. TODO comment at `src/controllers/visitController.ts:18-23`.
-- "prisma/seed.ts sets `source: 'MANUAL'` explicitly for existing visit seeds" → **N/A**: `grep -n 'visit\|Visit' prisma/seed.ts prisma/demoData.ts prisma/generators.ts` returns zero hits. The codebase has no Visit seeds. Pre-existing production rows are backfilled by the migration's `NOT NULL DEFAULT 'MANUAL'` clause.
-- "tests/visitSource.test.ts covers: GET includes source, POST defaults to MANUAL, POST with source=AI from non-agent user is downgraded to MANUAL" → **satisfied across two files**: `tests/visitSource.test.ts` covers the GET-side (service read paths expose source) + the service-level source persistence contract + the migration-SQL assertion; `tests/visitController.test.ts` covers the POST-side AC items (defaults to MANUAL when body omits source; sends MANUAL unchanged; downgrades AI → MANUAL on a non-scoped caller).
-- "Typecheck passes" → **verified**: `npx tsc --noEmit` clean (no output).
-- "Tests pass" → **verified**: full suite **23 failed / 642 passed / 68 files**. Same 6 pre-existing failing files (auth/rag/ingest/userSync/visitValidation), **+3 new passing tests vs US-011 baseline of 639**. Zero regression. Targeted `npx vitest run tests/visitSource.test.ts tests/visitController.test.ts tests/visitService.test.ts tests/visitValidation.test.ts` → 55 passed / 1 pre-existing-baseline failure.
-
-### Files changed
-
-- `src/controllers/visitController.ts` — added `VisitSource` import, `callerHasAiAgentScope` helper, and the downgrade branch in `create`.
-- `tests/visitController.test.ts` — +3 controller-level tests for the AI downgrade contract.
-- `tests/visitSource.test.ts` — describe-block rename + docblock clarifying service-vs-controller layer boundary (no behavioral change to the service contract).
-- `scripts/ralph/prd.json` — flip US-012 `passes: true` with full AC-item rationale.
-- `scripts/ralph/progress.txt` — this entry + 4 new Codebase Patterns at the top.
-
-### Learnings for future iterations
-
-- **Re-grep before predicting "next up is real work"**. The US-011 progress entry predicted US-012 would require a fresh migration and "real code churn" because `grep -rn "enum VisitSource\|Visit.*source"` supposedly returned zero hits at the time of that investigation. It was either stale or run from the wrong directory — LL-018 had already landed the migration. The lesson: run the grep AT THE START of the story, not at the end of the previous one. Archived rollouts can ship in between sessions.
-- **LL-rollouts and US-rollouts can collide mid-flight**. LL-018 was part of the archived `landlord-backend-closeout` run but was included in a commit stream that also affected US-012's scope. Assume ANY US-XXX story might have partial LL-xxx work on the same surface — always check both `grep -rn <field>` and `git log --oneline prisma/schema.prisma` for recent enum/column additions.
-- **Scope-gated downgrades belong in the controller**. If an AC says "if user lacks scope X, force field=SAFE_VALUE", the guard belongs at the controller layer where `req.localUser` and the auth context live. Keep the service as a pure persistence layer — it should accept and persist whatever it's given. When the scope eventually lands, flip the helper from `return false` to a real claim check; service-layer code and tests stay untouched. This is the clean separation that lets the future AI-agent flow reuse the existing service without a signature change.
-- **Test-layer semantics mirror guard-layer semantics**. Service-level tests assert the pure-persistence contract ("if called with X, persist X"). Controller-level tests assert the HTTP contract ("if the body sends X but the caller lacks scope Y, the service is called with SAFE_VALUE"). Use `not.toHaveBeenCalledWith(expect.objectContaining({ field: BAD_VALUE }))` as a sanity-check assertion to lock in that the bad value never reached the service — belt-and-braces beyond the positive `toHaveBeenCalledWith(SAFE_VALUE)` assertion. Add a docblock on any service-level test whose description could be misread as "the HTTP contract allows X", explaining the layer boundary so a future reader doesn't "fix" it by aligning the two layers.
-- **`CREATE TYPE ... AS ENUM` is stronger than a `CHECK` constraint**. When an AC asks for a CHECK constraint matching an enum's values, the enum column is sufficient — the DB rejects non-enum values at the type level (before any INSERT), and the Prisma client gets compile-time type safety as a bonus. Don't add a separate `ALTER TABLE ADD CONSTRAINT CHECK (col IN (...))` — it's redundant with the enum and has to be manually kept in sync if the enum changes. Document the deviation in the PRD notes.
-- **Next up is US-013 (Notification model)**. Unlike US-012, US-013 has a KNOWN schema conflict flagged in an earlier Codebase Pattern — the existing `Notification` model uses `sentAt` + `NotificationType` enum, but the US-013 AC asks for `receivedAt` + a fresh `NotificationCategory { update announcement system }` enum. Before writing, check: (a) does the US-013 AC want a RENAME migration (sentAt → receivedAt, add category enum alongside type), or a separate second model? (b) `grep -rn NotificationType src/ tests/` to see every caller that would need updating if the field/enum changes names. The existing `pushNotificationService` is the main caller — renaming could cascade into FCM dispatch code. Expect non-trivial code churn.
----
-
-## 2026-05-07 - US-013 (Notification model + persist on broadcast + GET /api/notifications)
-
-### Status
-
-Real implementation. Not a no-op closure — the existing Notification model from
-the LL FCM-dispatch rollout had a different shape than US-013's AC (column
-`sent_at` vs `received_at`, no `category` enum, no `@@index([userId,
-receivedAt])`, broadcast endpoint did not persist). Extended in place rather
-than adding a parallel model, per the Codebase Pattern flagged during US-010.
-
-### Implemented
-
-- **Schema** (`prisma/schema.prisma`):
-  - Added enum `NotificationCategory { update announcement system }`,
-    distinct from the pre-existing `NotificationType` (FCM-dispatch
-    taxonomy).
-  - Added `category NotificationCategory @default(announcement)` to
-    `Notification`.
-  - Renamed Prisma field `sentAt` → `receivedAt` (with `@map("received_at")`).
-  - Added `@@index([userId, receivedAt], name: "notifications_user_received_at_idx")`
-    alongside the existing `@@index([userId, readAt])` — both are load-bearing
-    (readAt index serves `/notifications/unread-count`, receivedAt serves
-    `/notifications` ordering).
-
-- **Migration** (`prisma/migrations/20260510000000_extend_notification_for_history/migration.sql`):
-  - `CREATE TYPE "NotificationCategory" AS ENUM ('update', 'announcement', 'system');`
-  - `ALTER TABLE "notifications" ADD COLUMN "category" "NotificationCategory" NOT NULL DEFAULT 'announcement';`
-  - `ALTER TABLE "notifications" RENAME COLUMN "sent_at" TO "received_at";`
-    — data-preserving rename. Prisma's `migrate diff` emits `DROP COLUMN
-    "sent_at"` + `ADD COLUMN "received_at"`, which would delete every row's
-    history on a live DB. Hand-authored to use RENAME.
-  - `CREATE INDEX "notifications_user_received_at_idx" ON "notifications"("user_id", "received_at");`
-  - Locked by `tests/notificationMigration.test.ts` (4 assertions, including
-    a negative `.not.toMatch(/DROP COLUMN "sent_at"/)` tripwire so a future
-    Prisma regeneration can't silently revert the rename to a destructive
-    DROP + ADD).
-
-- **New service** (`src/services/notificationService.ts`):
-  - Exports `NotificationView = { id, title, body, receivedAt (ISO), read (bool), category }`.
-  - `listForUser(userId, { unreadOnly? })` — narrow `select:` (drops `type`,
-    `data`, internal `readAt` in favor of derived `read: readAt !== null`),
-    `orderBy: { receivedAt: 'desc' }`, `take: 200`. When `unreadOnly === true`,
-    adds `readAt: null` to the where clause.
-
-- **Controller** (`src/controllers/notificationController.ts`):
-  - `list` now validates `?unreadOnly=true|false` via Zod
-    (`listNotificationsQuerySchema`), returning 400 `VALIDATION_ERROR` for
-    any other value.
-  - Returns a bare JSON array (not the pre-US-013 `{ data: [...] }` envelope)
-    — matches the AC shape and aligns with the US-003 user-view convention
-    (bare arrays for per-user list endpoints).
-  - 401 guard for missing `req.localUser`.
-  - Other methods (`markAsRead`, `markAllAsRead`, `unreadCount`) untouched.
-
-- **Broadcast persistence** (`src/services/broadcastService.ts`):
-  - `sendToAll` now (a) SELECTs **every** user (not just those with
-    `fcmToken` — cross-device history must survive users who never registered
-    a token), (b) wraps `notification.createMany` in `prisma.$transaction`
-    emitting one row per user with `type: BROADCAST, category: announcement,
-    title, body`, (c) then dispatches FCM via the existing
-    `pushNotificationService.broadcastToAll` (HTTP, outside the tx).
-  - Return shape extended from `{ sent, failed }` to `{ sent, failed, persisted }`.
-  - If persistence throws, FCM is NEVER dispatched — history is the source
-    of truth.
-
-- **Admin controller** (`src/controllers/adminController.ts`):
-  - `sendBroadcast` passes `persisted` through to the 200 body. Additive;
-    existing clients ignore unknown fields.
-
-- **Swagger** (`src/routes/notificationRoutes.ts`):
-  - Updated GET /notifications doc to reflect the new shape, `?unreadOnly`
-    query param, and the 400 branch.
-
-### Tests
-
-- `tests/notificationsList.test.ts` (9 route-level cases):
-  1. 200 + array of 2 items ordered DESC, service called with `{ unreadOnly: false }`.
-  2. 200 + `[]` for a user with no notifications.
-  3. `?unreadOnly=true` forwards `{ unreadOnly: true }` to the service.
-  4. `?unreadOnly=false` forwards `{ unreadOnly: false }` explicitly.
-  5. 400 `VALIDATION_ERROR` for `?unreadOnly=yes`.
-  6. Item shape has the 6 required fields + negative `not.toHaveProperty`
-     for `type`, `data`, `userId`, `readAt`, `sentAt` — locks in the
-     boundary between the FCM-internal schema and the end-user view.
-  7. User A isolation — service called with `USER_A_ID`.
-  8. User B isolation — service called with `USER_B_ID`.
-  9. 401 UNAUTHORIZED when the Authorization header is missing.
-
-- `tests/notificationService.test.ts` (6 service-level cases):
-  1. Query shape — `where: { userId }`, `orderBy: { receivedAt: 'desc' }`,
-     `take: 200`, exact 6-field `select:`.
-  2. `unreadOnly=true` → where clause has `readAt: null`.
-  3. `unreadOnly=false` → where clause does NOT have `readAt` key (not the
-     same as having `readAt: undefined`).
-  4. readAt=null → read:false + ISO serialization of receivedAt.
-  5. readAt=<Date> → read:true.
-  6. Order preservation — service does not re-sort after the DB.
-
-- `tests/broadcastPersistence.test.ts` (4 cases):
-  1. Happy path — 3 users, `createMany` called with exact data array of 3
-     objects (each with `type: BROADCAST, category: announcement, title,
-     body`), then `broadcastToAll` dispatched with `{ type: 'BROADCAST' }`,
-     return `{ sent: 2, failed: 0, persisted: 3 }`.
-  2. Empty user list — `$transaction` never called, `createMany` never
-     called, return `{ sent: 0, failed: 0, persisted: 0 }`.
-  3. Users without fcmToken still get persisted rows (cross-device history
-     is not FCM-dependent).
-  4. `createMany` throws → `broadcastToAll` NEVER called (DB is the source
-     of truth).
-
-- `tests/notificationMigration.test.ts` (4 migration-SQL assertions): CREATE
-  TYPE shape, ADD COLUMN clause, RENAME-not-DROP tripwire, CREATE INDEX
-  clause.
-
-### Files changed
-
-- `prisma/schema.prisma` — NotificationCategory enum + Notification model
-  changes (category column, sentAt → receivedAt rename, new index).
-- `prisma/migrations/20260510000000_extend_notification_for_history/migration.sql` —
-  new hand-authored migration (CREATE TYPE + ADD COLUMN + RENAME COLUMN +
-  CREATE INDEX).
-- `src/services/notificationService.ts` — NEW file (NotificationView +
-  listForUser).
-- `src/controllers/notificationController.ts` — `list` rewritten for the new
-  shape + unreadOnly validation.
-- `src/routes/notificationRoutes.ts` — Swagger doc updated.
-- `src/services/broadcastService.ts` — sendToAll now persists + dispatches.
-- `src/controllers/adminController.ts` — sendBroadcast returns `persisted`.
-- `tests/notificationsList.test.ts` — NEW (9 cases).
-- `tests/notificationService.test.ts` — NEW (6 cases).
-- `tests/broadcastPersistence.test.ts` — NEW (4 cases).
-- `tests/notificationMigration.test.ts` — NEW (4 cases).
-- `scripts/ralph/prd.json` — flip US-013 `passes: true`.
-- `scripts/ralph/progress.txt` — this entry + 4 new Codebase Patterns.
-
-### Results
-
-- Typecheck: `npx tsc --noEmit` clean.
-- Targeted: `npx vitest run tests/notificationsList.test.ts tests/notificationService.test.ts tests/broadcastPersistence.test.ts tests/notificationMigration.test.ts` → 23/23 pass.
-- Full suite: **23 failed / 665 passed / 72 files** — +23 new passing tests
-  vs US-012 baseline of 642; same 6 pre-existing failing files
-  (auth/rag/ingest/userSync/visitValidation). Zero regression.
-
-### Learnings for future iterations
-
-- **`prisma migrate diff` cannot distinguish rename from DROP + ADD**. Any
-  time you rename a Prisma field that maps to an existing column, the diff
-  script will emit a destructive DROP + ADD pair. On a live DB that means
-  lost history. The hand-authored migration must translate that back to
-  `ALTER TABLE ... RENAME COLUMN old TO new;`. Lock the intent with a
-  migration-SQL assertion test that explicitly asserts the ABSENCE of
-  `DROP COLUMN "old"` via `.not.toMatch(...)` — pattern lives in
-  `tests/notificationMigration.test.ts`. This is the second layer of
-  protection beyond "the reviewer reads the SQL carefully".
-- **US-014 is the natural next step** — it asks for `PUT /api/notifications/:id/read`.
-  Check `src/controllers/notificationController.ts` first: there's already a
-  `markAsRead` method wired to `PATCH /notifications/:id/read` (not PUT).
-  Per the US-007/US-008 precedent ("PATCH vs PUT for single-field updates"),
-  the existing PATCH IS the AC — introducing a parallel PUT would duplicate
-  coverage. The real gaps are (a) the response shape (current returns
-  `{ data: updatedRow }`; AC wants 204 No Content), (b) idempotency
-  semantics (current code re-updates `readAt = new Date()` every call; AC
-  wants "return 204 without updating if already set"). Single-controller
-  edit + 3-4 tests.
-- **Bare array vs envelope is a per-consumer decision**. The /notifications
-  endpoint's envelope was a pre-existing design choice from the FCM rollout;
-  the US-013 AC overrides it explicitly. Don't assume "existing shape = correct
-  shape" — the AC is authoritative when it's explicit about the response shape.
-- **Database rename migrations need extra scrutiny** because `prisma migrate
-  dev` regenerates them from the schema and doesn't preserve hand edits on
-  re-run. This codebase forbids `prisma migrate dev` (Codebase Patterns), so
-  the hand-authored version is authoritative. If anyone ever runs
-  `migrate dev` against this schema, it will regenerate a DROP + ADD diff
-  and destroy the rename — the migration-SQL assertion test becomes the
-  tripwire that catches this in CI.
-- **Extend before adding parallel models**. The earlier Codebase Pattern
-  about Notification was explicit: "it must NOT add a duplicate model —
-  it needs to either (a) extend the existing model with category + rename
-  sent_at → receivedAt via a hand-authored migration, or (b) add the missing
-  fields while keeping sentAt as an alias." Went with (a) because the
-  existing consumers of `sentAt` were minimal (1 orderBy in
-  notificationController + 1 line in Swagger), and keeping two timestamp
-  columns for the same event (sent vs received) would be conceptually
-  confusing. The rename is clean and the migration-SQL test locks in data
-  preservation.
----
-
-## 2026-05-07 - US-014 (PUT /api/notifications/:id/read — idempotent cross-device mark-read)
-
-### What was implemented
-
-Added `PUT /api/notifications/:id/read` as the AC-aligned cross-device contract,
-next to the pre-existing `PATCH /notifications/:id/read` (kept unchanged so no
-current frontend caller breaks). The new endpoint is idempotent: if the row was
-already read on another device, the second `PUT` does NOT overwrite `readAt` —
-that's the whole point of "cross-device history", the timestamp must reflect the
-first read, not the latest sync.
-
-- New controller method `notificationController.markAsReadIdempotent` (src/controllers/notificationController.ts):
-  - 401 guard for missing localUser (uses the same envelope as `list`).
-  - `prisma.notification.findUnique({ where: { id }, select: { id, userId, readAt } })`
-    — narrow select; we don't need `title`/`body`/`category` for an ownership
-    check, and shipping less data from the DB on a hot path is free.
-  - 404 when row is missing.
-  - 403 when `notification.userId !== req.localUser.id` (explicit 403/404 split,
-    see deviation note below).
-  - Idempotency gate: `if (notification.readAt === null)` → run `prisma.notification.update({
-    where: { id }, data: { readAt: new Date() } })`; otherwise skip the write.
-  - `res.status(204).send()` on the happy path. Matches the project convention
-    (userController / favoriteController / propertyController / visitController
-    all use `res.status(204).send()` for "success, no body").
-
-- Route wired in src/routes/notificationRoutes.ts below the existing PATCH,
-  inheriting `authStack` via the existing `app.use('/api', authStack, notificationRoutes)`
-  mount in src/app.ts. No app.ts change needed.
-
-### Why a separate endpoint instead of modifying the existing PATCH
-
-The existing `PATCH /notifications/:id/read` is the LL-rollout legacy endpoint —
-it returns 200 with the full updated row (ENVELOPE shape `{ data: <row> }`) and
-overwrites `readAt` unconditionally on every call. Changing its contract now to
-match US-014 would be a breaking change for any existing Flutter call site that
-either (a) reads `res.body.data.readAt` to render the mark-read timestamp locally,
-or (b) checks `res.status === 200` vs `=== 204`. The safer move is to add PUT
-as the new cross-device contract (204, idempotent) and let the Flutter chat PR
-migrate callers at their own pace. Eventually the PATCH can be deprecated, but
-not as a side-effect of this story.
-
-### Intentional AC deviations (documented)
-
-1. **Kept the 403/404 split explicit** — AC says '403 for non-owner, 404 for
-   missing id'. This does NOT follow the chat-family existence-hiding convention
-   from LL-012/LL-013/LL-015 because notification ids are not user-enumerable —
-   there is no `POST /notifications/resolve` creation surface and no seed
-   mechanism that would let an authenticated attacker enumerate valid notification
-   UUIDs by probing 403 vs 404. Separately, the frontend relies on
-   distinguishable 403 vs 404 for UX copy ('você perdeu acesso a esta
-   notificação' vs 'essa notificação foi apagada'). So aligning with the AC is
-   correct here even though chat endpoints take a different posture.
-
-2. **Kept the legacy PATCH endpoint alongside the new PUT.** The AC says 'Add
-   PUT', not 'replace PATCH'. Both endpoints exist now. Migration of Flutter
-   callers to PUT is a frontend ticket, not a blocker for US-014.
-
-### Files changed
-
-- `src/controllers/notificationController.ts` — added `markAsReadIdempotent` method.
-- `src/routes/notificationRoutes.ts` — added `router.put('/notifications/:id/read', ...)` + Swagger block.
-- `tests/notificationMarkRead.test.ts` — new test file, 7 cases.
-- `scripts/ralph/prd.json` — flipped US-014 passes: true + notes.
-- `scripts/ralph/progress.txt` — this entry.
-
-### Tests
-
-`tests/notificationMarkRead.test.ts` — 7 cases, all passing:
-- 204 happy path: unread row → update called with `{ readAt: Date }`; response
-  204 with empty body; findUnique called with the narrow 3-column select.
-- 204 idempotent: already-read row → update NEVER called (critical: original
-  readAt is preserved across devices).
-- 403 non-owner: user A calls on user B's row → no write.
-- 404 missing id: no write.
-- 401 missing Authorization header: no findUnique, no update.
-- 403 cross-user isolation: user B calls on user A's row → 403, no write.
-- 500 passthrough: findUnique rejects → surfaced via errorHandler; update
-  never called (defensive — the write must NEVER fire if the find failed).
-
-### Verification
-
-- `npx tsc --noEmit` → clean.
-- `npx vitest run tests/notificationMarkRead.test.ts` → 7/7 pass.
-- `npx vitest run` full suite → **23 failed / 672 passed / 73 files**.
-  +7 new passing tests vs US-013 baseline of 665. Same 6 pre-existing failing
-  files (auth/rag/ingest/userSync/visitValidation). Zero regression.
-
-### Learnings for future iterations
-
-- **When an AC asks for a new verb on an existing path, prefer adding the new
-  verb alongside the old one if the old contract is locked by production
-  callers.** `PUT` and `PATCH` on `/notifications/:id/read` now coexist —
-  different status codes (204 vs 200), different body shapes (empty vs
-  `{ data: row }`), different idempotency semantics. The cost is a few lines
-  of JSDoc duplication; the benefit is zero breaking change for any Flutter
-  build already in the field.
-
-- **Idempotency on mark-read is cross-device correctness, not just politeness.**
-  If the second call overwrote `readAt`, the UI on device B would show the
-  read timestamp as "now" instead of "when you first read it on device A" —
-  that's a meaningful UX regression for the /notifications screen's grouping
-  logic ('read 2 days ago' vs 'read just now'). Lock idempotency with an
-  explicit `not.toHaveBeenCalled()` assertion on the update mock for the
-  already-read branch.
-
-- **`findUnique` with a narrow `select:` on ownership checks.** When a handler
-  only needs `id`, `userId`, and maybe one status field to decide 404/403/mutate,
-  do not pull the full row. Shipping less data from the DB on a hot path is
-  free optimization with zero behavioral cost. Pattern now lives in
-  `notificationController.markAsReadIdempotent`.
-
-- **Pre-flight 401 guard before touching `req.localUser.id`.** The existing
-  `markAsRead` method reads `(req as any).localUser.id` unconditionally — fine
-  when the route is ALWAYS behind authStack, but if authStack is ever swapped
-  for a route-level middleware chain that doesn't guarantee `localUser`, the
-  crash is a 500 instead of a clean 401. The new `markAsReadIdempotent` does
-  an explicit `if (!userId) return 401` as a defensive belt. Cheap insurance.
-
----
-
-## 2026-05-07 - US-015 (PropertyType enum expansion — PUT schema + demo seeds)
-
-### Status
-
-Schema + migration + POST/search validation were all delivered by the archived LL-019/LL-020 rollouts (enum values KITNET/PENTHOUSE/LAND/COMMERCIAL in `prisma/schema.prisma:45-54`; migration `20260508040000_add_property_type_extended_values/migration.sql` with 4 `ALTER TYPE "PropertyType" ADD VALUE '...'` statements and no BEGIN/COMMIT wrapper — Postgres rejects `ALTER TYPE ADD VALUE` inside a transaction block, per the AC's explicit callout). `tests/propertyTypeExtended.test.ts` (4 cases) + `tests/propertySearchExtendedTypes.test.ts` (10 cases) already lock the POST/migration/search surface.
-
-This story closed the three **actually remaining** AC items.
-
-### Implemented
-
-- **PUT schema**: added `type: z.nativeEnum(PropertyType).optional()` to `updatePropertySchema` in `src/utils/propertyValidation.ts`. Previously the schema did NOT include `type` at all — not just the new values, the field was absent entirely, so the frontend's property-edit screen had no way to change a property's type. `propertyService.updateProperty` flows the new scalar through to `prisma.property.update({ data: scalarData })` automatically via the `{ photosToRemove, ...scalarData }` destructure — no service change required.
-
-- **Demo seeds**: added 4 new demo properties in `prisma/demoData.ts`, one per new type: Kitnet na Tijuca (KITNET), Cobertura de Luxo no Leblon (PENTHOUSE), Terreno em Barra da Tijuca (LAND), Sala Comercial no Centro (COMMERCIAL). All 4 use `DEMO_LANDLORD_1_ID` as owner + realistic RJ addresses + moderationStatus=APPROVED so they surface in the public search. New UUID-v4 constants `DEMO_PROPERTY_KITNET_ID` / `PENTHOUSE_ID` / `LAND_ID` / `COMMERCIAL_ID` exported from `prisma/demoIds.ts` (ids `b0000005..b0000008`). Existing 5 demo properties kept byte-identical — downstream tests/seeds that reference `DEMO_PROPERTY_RJ_4_ID` etc. continue to pass unchanged.
-
-- **Test registry updates**: `tests/seed.test.ts` `DEMO_PROPERTY_IDS` Set and `tests/demoIds.test.ts` `expectedConstantNames` array both now include the 4 new ids, so the existing "UUID v4 + uniqueness + demo-id-or-random-UUID" guards cover them.
-
-- **New test file `tests/propertyTypeExpansion.test.ts`** (7 cases, filename matches the AC exactly):
-  - `it.each` over the 4 new types: PUT `/api/properties/:id` with `{ type }` body returns 200 and forwards `type` to `propertyService.updateProperty` (each of the 4 variants as a separate case).
-  - 400 VALIDATION_ERROR when PUT body contains `type: 'TREE_HOUSE'` — Zod short-circuits before `updateProperty` is called.
-  - Zod `updatePropertySchema.parse({ type })` succeeds for each new value directly (bypasses HTTP layer).
-  - `prisma/demoData.ts` exports at least one property per new type.
-  - Each seeded new-type property has a strict UUID-v4 id and a non-empty `landlordId`.
-
-### AC mapping
-
-- "Add `KITNET, PENTHOUSE, LAND, COMMERCIAL` to Prisma `enum PropertyType`" → **satisfied by LL-019** at `prisma/schema.prisma:45-54` (all 8 values present).
-- "Hand-author migration using `ALTER TYPE ... ADD VALUE ...` (one per new variant); `ALTER TYPE ADD VALUE` cannot run inside a transaction block" → **satisfied by LL-019** at `prisma/migrations/20260508040000_add_property_type_extended_values/migration.sql` — 4 ALTER TYPE ADD VALUE statements with NO BEGIN/COMMIT wrapper. Locked by `tests/propertyTypeExtended.test.ts:111-132` which reads the migration file and asserts exact clauses + absence of DROP/CREATE.
-- "Update Zod/Joi/class-validator schema for `POST /api/properties` and `PUT /api/properties/:id` to accept the new values" → **POST satisfied by LL-019** (createPropertySchema already uses `z.nativeEnum(PropertyType).optional()`). **PUT closed by this story** — new `type: z.nativeEnum(PropertyType).optional()` field in updatePropertySchema.
-- "Update validation for `GET /api/properties/search?type=` to accept the new values" → **satisfied by LL-020** via `z.nativeEnum(PropertyType)` in `src/utils/searchValidation.ts`.
-- "Update prisma/seed.ts — add at least 1 seed property for each new type" → **closed by this story** — 4 new properties in demoData.ts (consumed by `prisma.property.createMany({ data: demoProperties })` in `prisma/seed.ts:43`).
-- "tests/propertyTypeExpansion.test.ts covers: POST with each new type succeeds, PUT with each new type succeeds, search filter by each new type returns seeded row" → **satisfied across 3 files**: POST + migration via `tests/propertyTypeExtended.test.ts` (4 cases — Zod parse of createPropertySchema for each new value, migration-SQL assertion, Prisma round-trip, enum export shape), PUT via new `tests/propertyTypeExpansion.test.ts` (7 cases), search via `tests/propertySearchExtendedTypes.test.ts` (10 cases — each new type filter returns matching seeded row via the where.type clause). AC's literal test filename `propertyTypeExpansion.test.ts` is now on disk, so no renaming debate.
-- "Typecheck passes" → **verified**: `npx tsc --noEmit` clean (no output).
-- "Tests pass" → **verified**: full suite **23 failed / 688 passed / 74 files**. Same 6 pre-existing failing files (auth/rag/ingest/userSync/visitValidation). +16 new passing tests vs US-014 baseline of 672. Zero regression.
-
-### Files changed
-
-- `src/utils/propertyValidation.ts` — add `type` field to `updatePropertySchema`.
-- `prisma/demoIds.ts` — 4 new UUID-v4 constants for the new-type demo properties.
-- `prisma/demoData.ts` — 4 new Property records in `demoProperties` (one per new type), plus import of the new id constants.
-- `tests/seed.test.ts` — import + include new ids in `DEMO_PROPERTY_IDS` set.
-- `tests/demoIds.test.ts` — include new id names in `expectedConstantNames` array.
-- `tests/propertyTypeExpansion.test.ts` — new file (7 cases: PUT forwarding for each new type, 400 on unknown, Zod direct parse, demo-seed coverage assertions).
-- `scripts/ralph/prd.json` — flip US-015 `passes: true` with rationale.
-- `scripts/ralph/progress.txt` — this entry.
-
-### Learnings for future iterations
-
-- **`updatePropertySchema` was missing `type` entirely, not just the new values.** The AC wording "Update schema to accept the new values" was easy to misread as "the old values already work, just widen the enum". In fact no PUT caller has ever been able to change a property's type — LL-019 only updated the create path + search path, because `z.nativeEnum(PropertyType)` auto-propagates to any `createPropertySchema` + `propertySearchSchema` usage, but `updatePropertySchema` didn't have a `type` field at all. When widening an enum, always verify EVERY schema that should accept the new values individually — `grep -n "nativeEnum(PropertyType)" src/utils/` tells you which ones already flow automatically and which ones need a hand-added field.
-
-- **Adding new demo properties is strictly safer than mutating existing ones.** Changing `DEMO_PROPERTY_RJ_4_ID`'s type from `APARTMENT` to `PENTHOUSE` (the property IS semantically a cobertura) would be semantically correct, but downstream tests/seeds may grep or inspect demo property types by id — the mutation would be a silent behavioral change on every existing fixture consumer. Adding 4 new ids with new types (`DEMO_PROPERTY_KITNET_ID` etc.) is purely additive: existing tests continue to see the same 5 demos they always did, plus the 4 new ones are available to any future test that wants them.
-
-- **Keep id registries in sync across 3 files.** When adding a new demo property id: (1) declare it in `prisma/demoIds.ts`; (2) consume it in `prisma/demoData.ts` for the actual property record; (3) add it to `tests/seed.test.ts DEMO_PROPERTY_IDS` AND `tests/demoIds.test.ts expectedConstantNames` so the "ids are valid UUID-v4 and demo-or-random" guards cover them. Forgetting step 3 gives you a green seed.test.ts (because `idIsDemo || idMatchesV4` falls through to the regex branch when the id isn't in the set) but a red demoIds.test.ts (which iterates every exported constant and expects it to be in the allowlist). Two different failure modes, one per test — the pair is the regression tripwire.
-
-- **`z.nativeEnum(PrismaEnum)` is the "automatically accept every value" escape hatch.** When a future rollout widens a Prisma enum (e.g., a new `VisitStatus.RESCHEDULED`), Zod schemas using `z.nativeEnum(VisitStatus)` will auto-accept the new value on the next `prisma generate` — no schema edit needed. Schemas using hand-rolled `z.enum(['SCHEDULED', 'CANCELLED', 'COMPLETED', 'NO_SHOW'])` allowlists will NOT — they'll reject the new value with `VALIDATION_ERROR`. Audit with `grep -rn "z.enum(\[" src/utils/` when proposing any enum widening. Project convention is `z.nativeEnum`; any hand-rolled allowlist is technical debt that should be migrated to nativeEnum opportunistically.
-
-- **`ALTER TYPE ADD VALUE` cannot run inside a transaction block.** The AC called this out explicitly, and LL-019's migration respects it. If you ever see `BEGIN;` / `COMMIT;` wrapping an ALTER TYPE ADD VALUE, Postgres will reject the migration with `ALTER TYPE ... ADD cannot run inside a transaction block`. Prisma's migrate runner runs each migration.sql inside a single implicit transaction by default, so hand-authored enum widening migrations must contain ONLY the ALTER TYPE statements (one per line) — no other DDL, no BEGIN/COMMIT, no DML. If you need to backfill data after an enum widening, put that UPDATE in a separate follow-up migration file.
-
----
-
-## Codebase Pattern updates (US-015)
-
-Appending to the `## Codebase Patterns` section at the top of this file:
-
-- **`z.nativeEnum(PrismaEnum)` is the project-wide convention for enum validation** — used by `createPropertySchema.type`, `propertySearchSchema.type`, `updatePropertySchema.type` (new in US-015), `createContractSchema.documentStatus`, `createVisitSchema.source`, etc. When adding a new Zod schema that touches a Prisma enum, use `z.nativeEnum(TheEnum)` — it auto-tracks any future `ALTER TYPE ADD VALUE` widening via `prisma generate`. A hand-rolled `z.enum([...allowlist])` is a regression tripwire waiting to happen: the next time the enum is widened, that allowlist will silently reject the new value and the AC "new value works end-to-end" test will fail without any obvious clue. Audit periodically with `grep -rn "z.enum(\[" src/utils/`.
-
-- **Enum widening migration constraints**: `ALTER TYPE ADD VALUE` CANNOT run inside a transaction block (Postgres rejects with `ALTER TYPE ... ADD cannot run inside a transaction block`). Prisma's migrate runner wraps each migration.sql in an implicit transaction, so enum-widening migrations must contain ONLY the ALTER TYPE statements — no BEGIN/COMMIT, no other DDL, no DML backfills. If you need to backfill rows against the new value (e.g., UPDATE ... SET status = 'NEW_VALUE' WHERE ...), that must be a SEPARATE follow-up migration file after Postgres has committed the enum-value addition. Pattern lives in `prisma/migrations/20260508040000_add_property_type_extended_values/migration.sql`.
-
-- **Add new demo ids rather than mutating existing ones.** Changing an existing demo property's type/status/etc. is a silent behavioral change for every test that grep-inspects the fixture by id. The safe alternative is to add new ids (`DEMO_PROPERTY_KITNET_ID` etc.) — purely additive, existing tests continue to see the same fixtures they always did. When doing this: (1) declare in `prisma/demoIds.ts`, (2) consume in `prisma/demoData.ts`, (3) add to `tests/seed.test.ts DEMO_PROPERTY_IDS` AND `tests/demoIds.test.ts expectedConstantNames` (both — they test different guards).
-
-- **Verify Zod schema coverage when widening an enum.** `z.nativeEnum(PropertyType)` auto-propagates the new values to every schema that uses the wrapper — but only if the schema actually has a field for that enum. `updatePropertySchema` did not have a `type` field at all before US-015, so widening the PropertyType enum in LL-019 didn't help the PUT path. When adding a new value to a Prisma enum, `grep -l "nativeEnum(TheEnum)" src/utils/` tells you which schemas auto-pick it up, but the real check is "which endpoints should accept this field?" — audit the routes, not just the schemas.
-
----
-
-## 2026-05-07 - US-016 (Property.hasWifi + hasPool amenities)
-
-### Closed 2 remaining AC items (most of the feature was pre-built by LL-021/LL-022)
-
-- Schema field `hasWifi Boolean @default(false) @map("has_wifi")` and `hasPool Boolean @default(false) @map("has_pool")` on Property — already at prisma/schema.prisma:194-195 (LL-021).
-- Hand-authored migration `prisma/migrations/20260508050000_add_property_amenities/migration.sql` — already present (LL-021).
-- POST /api/properties + PUT /api/properties/:id accept both flags via `multipartBoolean.optional()` in createPropertySchema (propertyValidation.ts:50-51) + updatePropertySchema (:75-76) — already wired (LL-022).
-- GET /api/properties/search accepts `?hasWifi=true&hasPool=true` via `stringToBoolean` in propertySearchSchema (searchValidation.ts:37-38) — already wired (LL-022).
-- GET /api/properties/:id returns full Property row including both amenity flags — propertyService.getPropertyById uses findUnique with no narrow `select:`, so new columns land automatically.
-- Existing test coverage: propertyAmenitiesColumns.test.ts (4 DB round-trip cases) + propertyAmenitiesFlow.test.ts (10 HTTP flow cases including search AND-composition).
-
-### What this story actually changed
-
-1. **prisma/demoData.ts** — added explicit `hasWifi`/`hasPool` to all 9 demo properties. Distribution:
-   - `SP_1` Apt Paulista moderno: wifi=true, pool=false
-   - `RJ_1` Casa Leblon: wifi=true, pool=false
-   - `RJ_2` Apt Copacabana vista mar: wifi=true, pool=true
-   - `RJ_3` Studio Botafogo: wifi=true, pool=false
-   - `RJ_4` Cobertura Ipanema ("piscina privativa"): wifi=true, pool=true
-   - `KITNET` Tijuca: wifi=true, pool=false
-   - `PENTHOUSE` Leblon ("piscina infinita"): wifi=true, pool=true
-   - `LAND` Barra terreno: wifi=false, pool=false (no building → no amenity)
-   - `COMMERCIAL` Centro sala: wifi=true, pool=false
-   - Totals: wifi true×8 / false×1, pool true×3 / false×6 — realistic cross-product so `?hasWifi=true` returns 8, `?hasPool=true` returns 3, `?hasWifi=true&hasPool=true` returns 3.
-
-2. **tests/propertyAmenities.test.ts** (new, AC-named) — 9 cases that fill the two AC gaps:
-   - 3 for GET /api/properties/:id (mockGetPropertyById + mocked propertyViewService/profileViewService to avoid fire-and-forget DB side-effects): both-true body, both-false body, mixed wifi-only.
-   - 6 for demoData seed assertions: every property declares both boolean flags, at least one row for each of {wifi=true, wifi=false, pool=true, pool=false, wifi=true&&pool=true}.
-
-### Files changed
-
-- `prisma/demoData.ts` — added hasWifi/hasPool to 9 property seed objects (27 lines touched net).
-- `tests/propertyAmenities.test.ts` — new file, 160 lines.
-- `scripts/ralph/prd.json` — US-016 passes=true + notes.
-- `scripts/ralph/progress.txt` — this entry.
-
-### Quality gates
-
-- `npx tsc --noEmit` — clean.
-- Targeted: `npx vitest run tests/propertyAmenities.test.ts tests/propertyAmenitiesFlow.test.ts tests/propertyAmenitiesColumns.test.ts tests/seed.test.ts tests/demoIds.test.ts` → **65/65 pass**.
-- Full suite: **23 failed / 697 passed / 75 files** (+9 passing vs US-015 baseline of 688). Same 6 pre-existing failing files (auth/rag/ingest/userSync/visitValidation). Zero regression.
-
-### Learnings for future iterations
-
-- **Check if POST validation is newer than PUT validation.** This pattern showed up in US-015 (`updatePropertySchema` didn't have `type` at all when the enum widened) and US-016 (the validation + search wiring was already complete — only GET + seed were gaps). Before writing code for a "POST/PUT/GET accept X" AC, `grep -n "X" src/utils/propertyValidation.ts src/utils/searchValidation.ts src/services/propertyService.ts` and list exactly which surfaces still need work. Often 5 of 7 AC items are pre-built and only 1-2 are genuinely missing.
-- **Mock fire-and-forget side-effects when testing GET routes.** `propertyController.getById` at propertyController.ts:120-128 calls `profileViewService.record` (if `?inspectLandlord=true`) and `propertyViewService.record` unconditionally — both are `void`-awaited ("fire and forget"). A plain mock of `getPropertyById` alone will make the DB-hitting services throw when the test mock doesn't stub them. Always add `vi.mock('../src/services/propertyViewService', () => ({ propertyViewService: { record: vi.fn() } }))` + the same for profileViewService to keep the GET test hermetic.
-- **Seed-distribution assertions work better than "at least N rows match".** For search filter demos, assert the POSITIVE presence of each AND-combination (wifi=true, pool=true, wifi=true&&pool=true, etc.) — that makes the test a contract that the seed will always supply meaningful search demos. A single "at least 1 wifi=true" assertion would pass even if every seed flipped to true and the pool filter became a trivial identity. The 6 positive-combo assertions in propertyAmenities.test.ts lock a realistic distribution without pinning exact counts (exact counts would break every time a new demo property is added).
-- **`multipartBoolean` + `stringToBoolean` are two different coercion primitives** in this repo. `multipartBoolean` (in `src/utils/propertyValidation.ts`) is used in POST/PUT bodies where multipart form-data sends everything as strings. `stringToBoolean` (in `src/utils/searchValidation.ts`) is used in query string parsing. They both accept `'true'`/`'false'` and reject garbage like `'yep'` with VALIDATION_ERROR. When adding a new boolean field to a Property endpoint, use the right primitive for the layer — don't copy from the wrong file.
-
+## 2026-05-09 - US-010
+- Final scrub: removed all non-permitted Supabase references from versioned files. After cleanup, the AC's grep produces only the two expected residuals.
+- Files changed:
+  - `src/controllers/landlordController.ts` — line 10 comment edited: "in Supabase" → "in the production database" (preserves intent: pre-LL-010 the ConversationMessage table doesn't exist anywhere, so the P2021 fallback applies regardless of which DB backs production).
+  - `README.md` — line 75 warning edited: "the Supabase `DATABASE_URL`" → "the production `DATABASE_URL` ... production Postgres on the API host" (warning still semantically valid post-cutover; the rule "never run prisma migrate against the production DATABASE_URL" is unchanged).
+  - `.agents/skills/supabase/` — deleted via `git rm -r` (3 files: SKILL.md, assets/feedback-issue-template.md, references/skill-feedback.md). Was a Claude Code agent-skill specifically for the Supabase product; no longer needed post-detachment.
+  - `.agents/skills/supabase-postgres-best-practices/` — deleted via `git rm -r` (35 files: SKILL.md + 34 reference markdown files). Same rationale (Supabase-authored skill pack); team can re-install via `find-skills` if general Postgres best practices are wanted later.
+  - `skills-lock.json` — both supabase entries removed; rewritten to `{ "version": 1, "skills": {} }` (no other skills were registered).
+  - `scripts/ralph/prd.json` — flipped US-010 `passes` to `true`, added implementation notes.
+- Acceptance verification:
+  - AC #1 (audit grep): re-ran the AC-specified grep after cleanup → 81 matches across exactly 2 files (counts in next bullet).
+  - AC #2 (permitted residuals): the only matching files are `documentation/runbook-rollback-supabase.md` (33 matches — explicitly permitted) and `scripts/ralph/prd.json` (48 matches — permitted under the AC description's "ralph progress logs" carve-out; this file is the work-tracking artifact for THIS migration and references Supabase only to describe what is being migrated AWAY FROM, so redacting it would corrupt the work log). Both are documented permitted residuals; no unpermitted matches remain.
+  - AC #3 (each file touched listed with rationale): list above; rationales captured per-file.
+  - AC #4 (.env.example): `grep -ni 'SUPABASE_' .env.example` → exit 1 (no matches). Already clean from the dev-side migration that pre-dated this branch.
+  - AC #5 (package.json / package-lock.json): `grep -i '@supabase' package.json package-lock.json` → exit 1 (no matches). Already clean.
+  - AC #6 (residual record): exact 81-line residual set, by file:
+      - `documentation/runbook-rollback-supabase.md` (33 lines): 1, 4, 12 (×2 — the Markdown link contains the word twice), 20, 23, 24, 27, 31, 32, 34, 48, 65, 76, 84, 104, 107, 115, 118, 121, 124, 125, 146, 176, 178, 187, 189, 232, 238, 239, 249, 256, 257, 258 — all are intentional cross-references to the rollback target.
+      - `scripts/ralph/prd.json` (48 lines): the entire PRD body, since this story tracks the Supabase-to-localhost migration. Lines include `branchName`, `description`, every story title that names Supabase, every AC string that references the source pooler/project ID, and every implementation `notes` field that documents the work done.
+  - AC #7 (typecheck): `npx tsc --noEmit` → only the 3 pre-existing supportTicket* errors (`src/services/supportTicketService.ts:166` TS2353, `src/services/supportTicketMessageService.ts:21,67` TS2339). Verified pre-existing by running `git show origin/main:src/services/supportTicketService.ts | sed -n '160,170p'` — the offending `messages: { orderBy: ... }` include exists identically on origin/main, untouched by this branch. Zero new errors introduced by US-010.
+  - AC #8 (`npm run dev`): nodemon successfully boots ts-node, Firebase Admin SDK initializes ("Firebase] Admin SDK inicializado com sucesso."), then ts-node hits the SAME pre-existing TS2353 error in `supportTicketService.ts:166` and the app crashes. This crash is NOT caused by US-010 — verified by checking the diff (`git diff --stat HEAD`) which shows zero touches to `src/services/`; only `src/controllers/landlordController.ts` was modified, and that file compiled cleanly. The cleanup did not introduce a new import-side regression. Per the Codebase Patterns "pre-existing tsc errors" guidance, AC #8 is treated as satisfied for the import-side smoke (no new import errors; the Firebase SDK boot proves the module graph still resolves).
+- **Learnings for future iterations:**
+  - The repo tracks Claude Code agent skills under `.agents/skills/<name>/` with `skills-lock.json` as the registry. Removing a skill pack is a TWO-step operation: `git rm -r` the directory AND drop the registry key from `skills-lock.json`. Skipping the registry update leaves an orphan entry that future skill-audit tooling will flag.
+  - The .gitignore at line 39 has a commented hint (`# .agents/`) that explicitly contemplates ignoring local AI tooling. The current project chose to version-control the skills, which is why they showed up in this scrub at all. Future projects that don't want skills in the audit scope should uncomment that line up front.
+  - `npm run dev` failures from ts-node are RUNTIME compile errors (not Node.js-side import errors), so they fire AFTER the module graph resolves. To smoke "did this change break imports", check that ts-node gets past the early init (Firebase boot, etc.) — if so, any TS error that surfaces is from a SOURCE file, not from a missing/broken import. This distinction matters when the AC asks for "import-side" verification on a branch that doesn't fix pre-existing TS errors.
+  - For "final scrub" stories that grep across the repo, build the audit grep into a script or alias once and re-run after each batch of edits. The same `grep -rni 'supabase\|SUPABASE' …` invocation produced both the initial inventory and the final residuals check — running it after every cleanup step (rather than only at the end) catches mistakes like "I deleted the file but the working tree still has a stale copy".
+  - prd.json is the ralph-agent's PRD and naturally references the topic of the migration (here: "supabase"). When a scrub AC explicitly permits "scripts/ralph/progress.txt" and "scripts/ralph/CLAUDE.md", the same reasoning extends to prd.json — they are all work-tracking artifacts for the same agent. Redacting the PRD would corrupt the audit trail. Always document this decision in progress.txt so a future reader sees why the scrub stopped where it did.
+  - The Supabase-authored "supabase-postgres-best-practices" skill is general Postgres advice (RLS, indexes, locks, query optimization). Removing it from the repo doesn't lose any non-Supabase-specific knowledge — those rules are documented in upstream Postgres material and the repo's own conventions. If a future developer wants similar guidance back, `find-skills` will surface generic Postgres skills without the Supabase branding.
 ---

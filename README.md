@@ -72,7 +72,7 @@ A API possui respostas curtas, técnicas e padronizadas. Sempre que ocorrer um e
 
 Older demo seeds inserted human-readable ids like `user-demo-landlord-1` and `prop-demo-rj-1`. These fail the strict `z.string().uuid()` validators in `src/utils/`, so any environment holding those legacy rows must be dropped and re-seeded with the new canonical UUID literals exported from `prisma/demoIds.ts`.
 
-> **Warning:** Never run `prisma migrate` or `prisma db seed` against the Supabase `DATABASE_URL` in `.env` — that URL points at production. Always override `DATABASE_URL` inline to the local Docker database (`alphatoca_db` on `127.0.0.1:5433`, user `admin`, password `admin_pwd`, database `alphatoca`).
+> **Warning:** Never run `prisma migrate` or `prisma db seed` against the production `DATABASE_URL` in `.env` — that URL points at the production Postgres on the API host. Always override `DATABASE_URL` inline to the local Docker database (`alphatoca_db` on `127.0.0.1:5433`, user `admin`, password `admin_pwd`, database `alphatoca`).
 
 ### Local re-seed flow
 
