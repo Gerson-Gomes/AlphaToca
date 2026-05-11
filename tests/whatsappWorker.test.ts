@@ -23,15 +23,6 @@ vi.mock('ioredis', () => {
     return { default: FakeIORedis };
 });
 
-vi.mock('bullmq', () => {
-    class FakeWorker {
-        constructor(_name: string, _handler: unknown, _opts: unknown) { /* noop */ }
-        on() { return this; }
-        close() { return Promise.resolve(); }
-    }
-    return { Worker: FakeWorker, Job: class {} };
-});
-
 vi.mock('../src/config/db', () => ({
     default: {
         user: { upsert: vi.fn() },
