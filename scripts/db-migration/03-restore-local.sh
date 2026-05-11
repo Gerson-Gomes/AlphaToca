@@ -159,7 +159,6 @@ DO $$
 DECLARE
     rec   RECORD;
     cnt   BIGINT;
-    fmt   CONSTANT TEXT := '  %-18s | %s';
 BEGIN
     RAISE NOTICE '';
     RAISE NOTICE '  %-18s | %s', 'Table', 'Rows';
@@ -174,10 +173,10 @@ BEGIN
         ) AS t(label, tbl)
     LOOP
         IF to_regclass('public.' || quote_ident(rec.tbl)) IS NULL THEN
-            RAISE NOTICE fmt, rec.label, '<not in schema>';
+            RAISE NOTICE '  %-18s | %s', rec.label, '<not in schema>';
         ELSE
             EXECUTE format('SELECT count(*) FROM public.%I', rec.tbl) INTO cnt;
-            RAISE NOTICE fmt, rec.label, cnt::text;
+            RAISE NOTICE '  %-18s | %s', rec.label, cnt::text;
         END IF;
     END LOOP;
     RAISE NOTICE '';

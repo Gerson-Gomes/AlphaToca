@@ -27,7 +27,7 @@ set -euo pipefail
 # --- Configurable knobs ---------------------------------------------------------
 ENV_FILE="${1:-./.env}"
 NEW_PASSWORD="${2:-}"
-PM2_NAME="${PM2_NAME:-alphatoca-backend}"
+PM2_NAME="${PM2_NAME:-alphatoca-api}"
 APP_ROLE="${APP_ROLE:-imoveis}"
 APP_DB="${APP_DB:-imoveis}"
 APP_HOST="${APP_HOST:-127.0.0.1}"

@@ -16,6 +16,9 @@
 
 set -euo pipefail
 
+# Força o uso do cliente PostgreSQL 17
+export PATH="/usr/lib/postgresql/17/bin:$PATH"
+
 # --- Format choice --------------------------------------------------------------
 # `--jobs=N` (parallel dump) requires `--format=directory`; it is NOT supported
 # with `--format=custom`. The PRD (FR-3, AC line 40) requests both `--format=custom`

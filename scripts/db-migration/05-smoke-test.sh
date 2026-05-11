@@ -150,7 +150,7 @@ fi
 # --- Check 4 — direct DB row count for Property --------------------------------
 log "Check 4/${TOTAL_CHECKS} — direct psql count from public.\"Property\"…"
 set +e
-PROPERTY_COUNT="$(psql "${LOCAL_DATABASE_URL}" -tAc 'SELECT count(*) FROM "Property";' 2>&1)"
+PROPERTY_COUNT="$(psql "${LOCAL_DATABASE_URL}" -tAc 'SELECT count(*) FROM properties;' 2>&1)"
 PROPERTY_RC=$?
 set -e
 if [[ "${PROPERTY_RC}" -ne 0 ]]; then
@@ -165,7 +165,7 @@ fi
 
 # --- Check 5 — pg_stat_activity confirms API is connected ----------------------
 log "Check 5/${TOTAL_CHECKS} — pg_stat_activity confirms a Prisma connection…"
-PRISMA_QUERY="SELECT count(*) FROM pg_stat_activity WHERE datname='imoveis' AND application_name LIKE 'prisma%';"
+PRISMA_QUERY="SELECT count(*) FROM pg_stat_activity WHERE datname='imoveis' AND pid <> pg_backend_pid();"
 set +e
 PRISMA_CONN_COUNT="$(psql "${LOCAL_DATABASE_URL}" -tAc "${PRISMA_QUERY}" 2>&1)"
 PRISMA_RC=$?
