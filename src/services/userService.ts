@@ -1,4 +1,4 @@
-import { Role, User } from '@prisma/client';
+import { Role, User, UserStatus } from '@prisma/client';
 import prisma from '../config/db';
 
 export const userService = {
@@ -34,6 +34,25 @@ export const userService = {
       });
     } catch (error) {
       return null; // User not found
+    }
+  },
+
+  async updateUserStatus(
+    id: string,
+    payload: { status: UserStatus; suspendedUntil?: string | null; reason?: string | null },
+  ): Promise<User | null> {
+    try {
+      return await prisma.user.update({
+        where: { id },
+        data: {
+          status: payload.status,
+          ...(payload.suspendedUntil !== undefined
+            ? { suspendedUntil: payload.suspendedUntil ? new Date(payload.suspendedUntil) : null }
+            : {}),
+        },
+      });
+    } catch (error) {
+      return null;
     }
   },
 

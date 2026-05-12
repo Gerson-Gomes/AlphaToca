@@ -162,4 +162,6 @@ router.put('/users/:id', adminOnly, userController.update);
  */
 router.delete('/users/:id', adminOnly, userController.delete);
 
+router.patch('/admin/users/:id/status', adminOnly, userController.updateStatus);
+
 export default router;

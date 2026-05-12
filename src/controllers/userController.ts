@@ -150,5 +150,34 @@ export const userController = {
     } catch (error) {
       next(error);
     }
+  },
+
+  async updateStatus(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+      const { status, suspendedUntil, reason } = req.body;
+
+      if (!status || !['ACTIVE', 'SUSPENDED', 'BANNED'].includes(status)) {
+        return res.status(400).json({
+          status: 400,
+          code: 'VALIDATION_ERROR',
+          messages: [{ message: 'status must be ACTIVE, SUSPENDED, or BANNED' }],
+        });
+      }
+
+      const user = await userService.updateUserStatus(id, { status, suspendedUntil, reason });
+
+      if (!user) {
+        return res.status(404).json({
+          status: 404,
+          code: 'USER_NOT_FOUND',
+          messages: [{ message: `User ${id} not found.` }],
+        });
+      }
+
+      return res.status(200).json(user);
+    } catch (error) {
+      next(error);
+    }
   }
 };
