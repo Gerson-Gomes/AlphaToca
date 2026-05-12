@@ -21,6 +21,7 @@ import conversationRoutes from './routes/conversationRoutes';
 import deeplinkRoutes from './routes/deeplinkRoutes';
 import supportRoutes from './routes/supportRoutes';
 import landlordRoutes from './routes/landlordRoutes';
+import reportRoutes from './routes/reportRoutes';
 import { checkJwt, authSyncMiddleware, requireRole, validateAuthConfig } from './middlewares/authMiddleware';
 import { Role } from '@prisma/client';
 import prisma from './config/db';
@@ -141,6 +142,9 @@ app.use('/api', authStack, conversationRoutes);
 
 // Support Routes (ticket open — US-018)
 app.use('/api', authStack, supportRoutes);
+
+// Report Routes (user reports + admin report queue)
+app.use('/api', authStack, reportRoutes);
 
 // Landlord Dashboard Routes (metrics — LL-002)
 app.use('/api', authStack, requireRole(Role.LANDLORD), landlordRoutes);
