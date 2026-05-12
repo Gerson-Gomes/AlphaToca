@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { kafka, admin, producer, consumer } from '../src/config/kafka';
+import { kafka, admin, producer, consumer } from '../../src/config/kafka';
 
 describe('Kafka Config - src/config/kafka.ts', () => {
   describe('Initialization', () => {
@@ -37,7 +37,7 @@ describe('Kafka Config - src/config/kafka.ts', () => {
 
       expect(() => {
         // Re-require para forçar re-avaliação
-        delete require.cache[require.resolve('../src/config/kafka')];
+        delete require.cache[require.resolve('../../src/config/kafka')];
       }).toThrow(); // Vai lançar erro no import
 
       process.env.KAFKA_BROKERS = originalEnv;

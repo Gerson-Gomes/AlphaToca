@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { validateKafkaEnv, logKafkaConfig } from '../src/utils/validateKafkaEnv';
+import { validateKafkaEnv, logKafkaConfig } from '../../src/utils/validateKafkaEnv';
 
 describe('validateKafkaEnv - src/utils/validateKafkaEnv.ts', () => {
   const originalEnv = process.env;
