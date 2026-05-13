@@ -1,39 +1,23 @@
-import { Worker, Job } from 'bullmq';
-import IORedis from 'ioredis';
 import prisma from '../config/db';
+import { produceVisitReminder } from '../services/kafkaProducer';
 import { pushNotificationService } from '../services/pushNotificationService';
 import { logger } from '../config/logger';
 
 /**
- * Worker de Lembretes de Visita
+ * Worker de Lembretes de Visita (Migrado para Kafka)
  *
- * Roda via cron job a cada hora (configurado abaixo).
+ * Roda via cron job a cada hora (veja scheduleReminders abaixo).
  * A cada execução, busca visitas com status SCHEDULED que ocorrem:
  *   - Em aproximadamente 24 horas (janela: 23h30 a 24h30)
  *   - Em aproximadamente 2 horas  (janela: 1h30 a 2h30)
  *
- * Para cada visita encontrada, dispara VISIT_REMINDER para o inquilino e o locador.
+ * Para cada visita encontrada, produz eventos VISIT_REMINDER para Kafka.
+ * O Kafka consumer (kafkaConsumer.ts) processa esses eventos e dispara notificações.
  *
  * Idempotência: A janela de ±30 minutos garante que o job horário nunca perca
  * uma visita, mas pode processar a mesma visita duas vezes se o cron atrasar.
  * Isso é aceitável — duplicar um lembrete é menos grave que não enviá-lo.
  */
-
-if (!process.env.REDIS_URL) {
-  throw new Error('[ReminderWorker] REDIS_URL não definida no ambiente.');
-}
-
-const connection = new IORedis(process.env.REDIS_URL, {
-  maxRetriesPerRequest: null,
-  enableReadyCheck: true,
-  lazyConnect: false,
-  retryStrategy: () => null,
-});
-
-connection.on('error', (err) => {
-  logger.error({ err }, '[ReminderWorker] redis connection failed');
-  process.exit(1);
-});
 
 // Janela de ±30 min em torno do horário alvo para garantir cobertura entre execuções horárias
 const WINDOW_MS = 30 * 60 * 1000;
@@ -106,44 +90,62 @@ async function sendRemindersForWindow(targetHours: 24 | 2): Promise<void> {
   await Promise.allSettled(promises);
 }
 
-// ---------------------------------------------------------------------------
-// Worker BullMQ — processador de jobs
-// ---------------------------------------------------------------------------
-export const visitReminderWorker = new Worker<{ windowHours: 24 | 2 }>(
-  'visit-reminders',
-  async (job: Job<{ windowHours: 24 | 2 }>) => {
-    const { windowHours } = job.data;
-    logger.info({ jobId: job.id, windowHours }, '[ReminderWorker] processando job de lembrete');
-    await sendRemindersForWindow(windowHours);
-  },
-  { connection }
-);
+/**
+ * Produz eventos de lembrete de visita para Kafka
+ * Disparado a cada hora pelo agendador (cron)
+ */
+async function produceReminderEvents(): Promise<void> {
+  try {
+    // Usar timestamp para garantir keys únicas (Kafka exige keys para particionamento)
+    const timestamp = Date.now();
 
-visitReminderWorker.on('completed', (job: Job) => {
-  logger.info({ jobId: job.id }, '[ReminderWorker] job concluído com sucesso');
-});
+    // Produzir evento para lembrete de 24h
+    await produceVisitReminder(
+      { windowHours: 24 },
+      `reminder-24h-${timestamp}`
+    );
+    logger.info('[visit-reminder-worker] 24h reminder event produced to kafka');
 
-visitReminderWorker.on('failed', (job: Job | undefined, err: Error) => {
-  logger.error({ jobId: job?.id, err }, '[ReminderWorker] job falhou');
-});
-
-// ---------------------------------------------------------------------------
-// Cron: dispara 2 jobs a cada hora (janela de 24h e janela de 2h)
-// ---------------------------------------------------------------------------
-async function scheduleReminderJobs(): Promise<void> {
-  const { notificationQueue } = await import('../queues/notificationQueue');
-
-  // Disparo imediato ao iniciar + repetição a cada hora via setInterval
-  const run = async () => {
-    await notificationQueue.add('reminder-24h', { windowHours: 24 });
-    await notificationQueue.add('reminder-2h', { windowHours: 2 });
-    logger.info('[ReminderWorker] Jobs de lembrete agendados para esta hora.');
-  };
-
-  await run();
-  setInterval(run, 60 * 60 * 1000); // a cada 1 hora
+    // Produzir evento para lembrete de 2h
+    await produceVisitReminder(
+      { windowHours: 2 },
+      `reminder-2h-${timestamp}`
+    );
+    logger.info('[visit-reminder-worker] 2h reminder event produced to kafka');
+  } catch (err) {
+    logger.error(
+      { err },
+      '[visit-reminder-worker] failed to produce reminder events to kafka'
+    );
+    // Falha será retentada na próxima execução do cron (1 hora depois)
+  }
 }
 
-scheduleReminderJobs().catch((err) => {
-  logger.error({ err }, '[ReminderWorker] Falha ao inicializar cron de lembretes');
-});
+/**
+ * Agenda a produção de eventos de lembrete de visita
+ * Dispara imediatamente e repete a cada hora
+ */
+export async function scheduleReminders(): Promise<void> {
+  // Execução imediata
+  await produceReminderEvents().catch((err) => {
+    logger.error(
+      { err },
+      '[visit-reminder-worker] failed on initial schedule attempt'
+    );
+  });
+
+  // Repetir a cada 1 hora
+  setInterval(
+    async () => {
+      await produceReminderEvents().catch((err) => {
+        logger.error(
+          { err },
+          '[visit-reminder-worker] failed on scheduled attempt'
+        );
+      });
+    },
+    60 * 60 * 1000 // 1 hora em ms
+  );
+
+  logger.info('[visit-reminder-worker] reminder scheduler started (executes every hour)');
+}
