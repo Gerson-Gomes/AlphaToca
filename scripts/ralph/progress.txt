@@ -1,90 +1,26 @@
 # Ralph Progress Log
-Started: Mon May 11 03:00:00 PM -03 2026
-Feature: hospedagem-local (rodar API I-Moveis em localhost end-to-end)
-Source PRD: tasks/prd-hospedagem-local.md
-Branch: ralph/hospedagem-local
+Started: Wed May 13 04:20:36 PM -03 2026
 ---
 
 ## Codebase Patterns
-- Pre-existing tsc errors on `main` (post-#67 merge): `src/services/supportTicketMessageService.ts` and `src/services/supportTicketService.ts` reference a `supportTicketMessage` Prisma model + `messages` include that aren't in the generated Prisma client. NOT introduced by Ralph — verify by running `git stash && git checkout main && npx tsc --noEmit` before blaming your change. Treat the AC "Typecheck passes" as "no NEW errors" for stories that don't touch `src/`.
-- Source PRD lives at `tasks/prd-hospedagem-local.md` — read it for non-AC context (decisions baked in, technical considerations, non-goals).
-- Auth middleware (`src/middlewares/authMiddleware.ts`) uses Firebase Admin SDK, not Auth0 — apesar das vars AUTH0_* aparecerem em `.env.example` (artefato histórico).
-- Server boot file `src/server.ts` segue ordem fixa (após US-003, dentro de IIFE async): dotenv/config → http → app → (cond) workers (await import dinâmico) → (cond) assertRagSecrets → validateWebhookConfig → bootstrapLangSmith → setupSwagger → http.createServer → initializeSocket → server.listen. Não reordenar.
-- Logger convention: `logger.info({ ctx }, '[server] mensagem')` ou `logger.warn({ ctx }, '[server] mensagem')` — sempre prefixo entre colchetes. Mensagens sem ctx usam `logger.warn('[server] mensagem')` (1 arg).
-- docker-compose.yml hoje só tem Redis em 6380:6379 — Postgres é nativo via apt (`scripts/db-migration/01-provision-postgres.sh` provisiona role/db `imoveis`).
-- Em `.env.example`, o bloco POSTGRES_USER/PASSWORD/DB é APENAS para o perfil `optional-db` do docker-compose (Postgres em Docker na porta 5433). O default real (Postgres nativo em 5432) usa role/db `imoveis`, configurada via DATABASE_URL/DIRECT_URL. Não confundir os dois ao alterar credenciais — admin/alphatoca = Docker opcional; imoveis/imoveis = nativo.
-- Prisma 6 exige DIRECT_URL além de DATABASE_URL para `prisma migrate` funcionar. Mantenha ambas com a mesma connection string em setups locais (sem PgBouncer).
-- tsconfig.json: `module: CommonJS` + `target: ES2022` — top-level await NÃO é suportado. Para usar await em entry points, envolva em IIFE async: `(async () => { ... })();`.
-- Feature flags de debug em `src/server.ts` (US-003): `DISABLE_WORKERS=true` pula imports de whatsappWorker/visitReminderWorker; `DISABLE_RAG_VALIDATION=true` pula assertRagSecrets(). Defaults preservam comportamento atual.
+- `src/app.ts` mounts `express.static` BEFORE the `authStack` so static assets bypass `checkJwt`. Any new public file route must follow the same ordering.
+- Static-file responses are customized via `express.static(root, { setHeaders })` — the callback signature is `(res: ServerResponse) => void`, NOT `(res: Response) => void`. Import `ServerResponse` from `node:http` (`import type { ServerResponse } from 'http'`) for the type.
+- Image upload URLs are stored relative as `/uploads/<propertyId>/<file>.ext` (see `propertyImageStorageService.savePropertyImages`). Contract PDFs follow the same shape under `/uploads/contract-<id>/<file>.pdf` (see `contractDocumentStorageService.saveContractDocument`). DO NOT migrate these to absolute URLs — the backend dual-mount in `/uploads` and `/api/uploads` is the supported way to make them resolve.
+- Tests in `tests/` follow a `supertest` + `request(app)` pattern. `tests/contractPdf.test.ts` is the canonical reference for tests that need a real fixture file under `uploads/` — it uses `beforeAll`/`afterAll` to mkdir/rm a temp dir under `UPLOADS_ROOT = path.resolve(__dirname, '../uploads')`.
+- Tests that import `src/app` must set Firebase env vars (FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY) BEFORE the `import app from '../src/app'` line, because `validateAuthConfig()` runs at module load.
+- `npm run build` runs `tsc` (no emit issues at HEAD). Use it as the typecheck gate before commit.
 
 ---
 
-## 2026-05-11 19:30 - US-001
-- Implementado: Atualizar .env.example para Postgres nativo em 127.0.0.1:5432
-- Files changed:
-  - .env.example: DATABASE_URL agora aponta para postgresql://imoveis:sua_senha_aqui@127.0.0.1:5432/imoveis?schema=public (era admin@127.0.0.1:5444/alphatoca)
-  - .env.example: adicionado DIRECT_URL (mesma connection string) — necessário para prisma migrate em Prisma 6
-  - .env.example: comentário acima do bloco DATABASE_URL/DIRECT_URL explicando default nativo + perfil optional-db
-  - .env.example: comentário acima do bloco POSTGRES_USER/PASSWORD/DB esclarecendo que só é usado pelo perfil optional-db (Docker, porta 5433)
-- Quality checks:
-  - `npx tsc --noEmit`: 4 erros pré-existentes em supportTicket*.ts (mesmos da Codebase Patterns) — nenhum NOVO erro introduzido. .env.example não afeta TS.
-  - grep validations: DATABASE_URL e DIRECT_URL aparecem exatamente 1× cada, ambas em 127.0.0.1:5432; '5444' tem zero ocorrências.
+## 2026-05-13 - US-001
+- Added dual `express.static` mount in `src/app.ts`: `/uploads` (new — matches what Flutter clients build via baseUrl + image.url) and `/api/uploads` (legacy compat). Both share a single `setUploadsHeaders` callback that emits `Cross-Origin-Resource-Policy: cross-origin` and `Cache-Control: public, max-age=86400`.
+- Inline comment explains the rationale and references `tasks/prd-fix-image-serving-mismatch.md` so the dual mount is not deleted in a future refactor.
+- Both mounts sit at lines 66-67, ahead of every `app.use('/api', authStack, ...)` line, so static files never hit `checkJwt`.
+- Files changed: `src/app.ts` (added `ServerResponse` type import, hoisted `uploadsRoot` const, added `setUploadsHeaders` helper, added `/api/uploads` mount).
+- `npm run build` exits 0. `grep -n "express.static" src/app.ts` returns 2 lines (66, 67) as required by the acceptance criteria.
 - **Learnings for future iterations:**
-  - .env.example tinha credenciais duplicadas conceitualmente: o bloco POSTGRES_USER/PASSWORD/DB (com user `admin`, db `alphatoca`) era usado apenas pelo Docker antigo, mas DATABASE_URL apontava para `127.0.0.1:5444` que não existe mais. A correção alinhou DATABASE_URL com `scripts/db-migration/01-provision-postgres.sh` (role `imoveis`, db `imoveis`, porta 5432).
-  - Próxima iteração (US-003) vai adicionar mais entradas (DISABLE_WORKERS, DISABLE_RAG_VALIDATION) ao final do .env.example — não regredir os comentários de header de DATABASE_URL.
+  - PRD text described the source mount as `/api/uploads`, but `git log` on `src/app.ts` shows it had been hotfix-reverted to `/uploads` only. End state — both prefixes mounted — matches PRD intent regardless of starting position. Future iterations: always cross-check `git log -p -- <file>` against PRD assumptions.
+  - The branch `main` had drifted 30 commits ahead of the local checkout. The Ralph-managed files (`scripts/ralph/{.last-branch,prd.json,progress.txt}`) had three-way merge conflicts on pull. Resolution: `git checkout --theirs` on those files preserved the new Ralph cycle's state; the previous cycle's artifacts had already been archived to `scripts/ralph/archive/2026-05-13-supabase-to-localhost-db-migration/`.
+  - `node_modules` is NOT checked in and was missing on fresh checkout — `npm install` is a required prerequisite before `npm run build`.
+  - `express.static`'s `setHeaders` callback receives a `http.ServerResponse`, not an Express `Response`. Use the node `http` type to keep the typecheck strict and avoid `any`.
 ---
-
-## 2026-05-11 19:35 - US-002
-- Implementado: Adicionar serviço Postgres opcional (perfil optional-db) ao docker-compose.yml
-- Files changed:
-  - docker-compose.yml: adicionado serviço `postgres` com image postgres:16-alpine, profile `optional-db`, mapeamento 5433:5432, environment lendo POSTGRES_USER/PASSWORD/DB do .env, volume nomeado postgres_data
-  - docker-compose.yml: bloco `volumes:` declarado no topo (necessário para volume nomeado)
-  - docker-compose.yml: comentário no topo explicando comando default (redis-only) vs comando com perfil (--profile optional-db)
-  - Serviço redis (alphatoca_redis em 6380:6379) permanece inalterado e sem profile (sobe por default)
-- Quality checks:
-  - `docker compose config` (default): mostra apenas redis (postgres oculto sem profile) — comportamento correto
-  - `docker compose --profile optional-db config`: mostra ambos serviços + volume postgres_data, sintaxe YAML válida
-  - `npx tsc --noEmit`: 4 erros pré-existentes em supportTicket*.ts (mesmos da Codebase Patterns) — nenhum NOVO erro introduzido
-- **Learnings for future iterations:**
-  - Docker Compose v2 `profiles: ["nome"]` é a forma idiomática de tornar serviços opt-in. `docker compose up -d` ignora serviços com profile; só sobem quando você passa `--profile nome` ou `COMPOSE_PROFILES=nome`.
-  - Volumes nomeados (`postgres_data`) exigem declaração no bloco top-level `volumes:` mesmo quando referenciados em apenas 1 serviço — caso contrário Compose trata como bind mount com path relativo.
-  - Quando o serviço Docker Postgres (porta host 5433) coexiste com Postgres nativo (porta host 5432), as duas instâncias são independentes — DATABASE_URL em .env continua apontando para 5432 (nativo); para usar o Docker, dev precisa editar manualmente DATABASE_URL para 5433. Esse trade-off está documentado no comentário do compose e (futuramente) será explicitado no README (US-004).
----
-
-## 2026-05-11 19:50 - US-003
-- Implementado: Feature flags DISABLE_WORKERS e DISABLE_RAG_VALIDATION em src/server.ts
-- Files changed:
-  - src/server.ts: convertido para IIFE async (`(async () => { ... })()`) — tsconfig usa `module: CommonJS` então top-level await não é opção. Imports estáticos de `./workers/whatsappWorker` e `./workers/visitReminderWorker` removidos do topo e substituídos por `await import(...)` dinâmicos dentro do bloco condicional.
-  - src/server.ts: bloco condicional `if (process.env.DISABLE_WORKERS === 'true')` pula os dois `await import` e emite `logger.warn('[server] workers desabilitados via DISABLE_WORKERS')`. Default (undefined / '' / 'false') executa os dois imports — comportamento equivalente ao estático original.
-  - src/server.ts: `assertRagSecrets()` envolto em `if (process.env.DISABLE_RAG_VALIDATION === 'true')` — quando true, pula e emite `logger.warn('[server] RAG secret validation pulada via DISABLE_RAG_VALIDATION — endpoints RAG podem falhar')`. Default mantém validação ativa.
-  - src/server.ts: ordem de validateWebhookConfig() → bootstrapLangSmith() → setupSwagger(app) → http.createServer → initializeSocket(server) → server.listen() preservada exatamente.
-  - .env.example: 2 entradas comentadas adicionadas no fim do arquivo, sob header "# Feature flags de debug (branch hospedagem_local)" — formato exato pedido pelo AC.
-- Nada alterado em src/workers/, src/queues/, src/config/rag.ts, controllers, routes, schemas, prisma.
-- Quality checks:
-  - `npx tsc --noEmit`: 4 erros pré-existentes em supportTicket*.ts (mesmos da Codebase Patterns) — nenhum NOVO erro introduzido pelas mudanças em src/server.ts.
-  - grep `DISABLE_WORKERS|DISABLE_RAG_VALIDATION` em .env.example: ambas presentes 1× cada, comentadas, no final do arquivo.
-  - grep US-001 (DATABASE_URL/DIRECT_URL/5444): edits de US-001 intactos — DATABASE_URL e DIRECT_URL apontando para 127.0.0.1:5432 (1× cada), zero ocorrências de 5444.
-- **Learnings for future iterations:**
-  - tsconfig do projeto: `module: CommonJS` + `target: ES2022`. Top-level await NÃO é suportado nesta combinação (precisaria de `module: ES2022` ou `Node16`). IIFE async é o padrão correto para entry points que precisam de await condicional.
-  - Quando usar `logger.warn` sem objeto de contexto, passar 1 string só é OK pelo signature do pino (`warn(msg)` ou `warn(obj, msg)`). Manter o prefixo `[server]` para consistência.
-  - Ao editar src/server.ts, lembrar que o boot envolve workers BullMQ — pular workers via flag tem efeito cascata: filas WhatsApp e lembretes de visita não processam jobs até reativar a flag. Útil para debug local sem Redis/BullMQ, mas testes de integração que dependam de filas vão falhar silenciosamente.
-  - Ao editar .env.example, sempre verificar antes que edits anteriores (DATABASE_URL/DIRECT_URL de US-001) permaneçam intactos — fácil de regredir se substituir blocos grandes em vez de fazer append no fim.
----
-
-## 2026-05-11 20:05 - US-004
-- Implementado: Documentar setup local completo no README.md
-- Files changed:
-  - README.md: nova seção "## Rodando localmente (branch hospedagem_local)" inserida ANTES de "## Re-seeding after the UUID migration" (mais próxima de uma seção 'Setup' existente). Conteúdo: pré-requisitos (Node 20+, Docker, Postgres 16 nativo com link para `scripts/db-migration/01-provision-postgres.sh`, credenciais Firebase/Gemini), 6 passos numerados (cp .env, docker compose up -d redis, opcional --profile optional-db, prisma migrate deploy, npm run seed, npm run dev), validação curl /health/ready, subseção "Feature flags de debug" (DISABLE_WORKERS + DISABLE_RAG_VALIDATION), subseção "Notas" (Firebase Admin SDK vs Auth0, Gemini 5 RPM free tier, WhatsApp ngrok), referência a 3 PRDs (emergency-localhost-migration, supabase-to-localhost-db-migration, hospedagem-local).
-  - Seção "## Re-seeding after the UUID migration" pré-existente preservada exatamente — nenhuma deleção.
-- Quality checks:
-  - `npx tsc --noEmit`: 4 erros pré-existentes em supportTicket*.ts (Codebase Patterns) — nenhum NOVO erro. README.md não afeta TS, rodado como sanity check exigido pelo AC.
-  - Ordem dos passos confere com AC: (1) cp .env.example .env → (2) docker compose up -d redis → (3) opcional perfil optional-db (5433) → (4) npx prisma migrate deploy → (5) npm run seed → (6) npm run dev.
-  - Subseção Notas inclui exatamente os 3 itens (a, b, c) pedidos no AC.
-  - 3 PRDs referenciados como links Markdown.
-- **Learnings for future iterations:**
-  - README pré-existente já tinha seção "## Re-seeding after the UUID migration" com credenciais/portas antigas (admin@5433/alphatoca, do Docker original). Não foi tocada nesta US porque o AC exige preservação de docs existentes; futuras refatorações podem opcionalmente atualizar essa seção para refletir o novo perfil optional-db (alphatoca_postgres em 5433 com vars do .env via POSTGRES_USER/PASSWORD/DB).
-  - Posicionar seções novas no README: "antes ou logo após qualquer seção 'Getting Started' / 'Setup' existente" — neste repo, a seção mais próxima de setup era "Re-seeding after the UUID migration"; inserir imediatamente antes funciona como ancoragem.
-  - Quando o AC pede passos numerados em ordem específica, redigir como lista numerada Markdown (1., 2., ...) com bloco de código bash imediatamente abaixo de cada passo torna o documento agradável de seguir e fácil de validar contra o AC.
-  - Subseções com ### dentro da seção principal (## Rodando localmente) é o padrão Markdown; AC pediu "Subseção 'Feature flags de debug'" e "Subseção 'Notas'" — ### é a profundidade correta.
----
-
