@@ -8,6 +8,7 @@ import { assertRagSecrets } from './config/rag';
 import { validateWebhookConfig } from './controllers/webhookController';
 import { initializeSocket } from './config/socket';
 import { initializeKafkaConsumerWithPrisma, shutdownKafkaConsumer } from './services/kafkaConsumerInit';
+import { connectProducer, disconnectProducer } from './services/kafkaProducer';
 import { logger } from './config/logger';
 
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -37,9 +38,12 @@ const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
     // Anexa WebSocket (Socket.IO) ao servidor HTTP
     initializeSocket(server);
 
-    // Inicializa Kafka Consumer (substitui BullMQ workers).
+    // Inicializa Kafka Producer e Consumer (substitui BullMQ workers).
     // Também é desabilitado pela flag DISABLE_WORKERS para debug local sem broker.
     if (process.env.DISABLE_WORKERS !== 'true') {
+        connectProducer().catch((err) => {
+            logger.error({ err }, '[server] failed to connect kafka producer');
+        });
         initializeKafkaConsumerWithPrisma().catch((err) => {
             logger.error({ err }, '[server] failed to start kafka consumer');
         });
@@ -51,6 +55,9 @@ const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
         server.close(async () => {
             await shutdownKafkaConsumer().catch((err) => {
                 logger.error({ err }, '[server] failed to shutdown kafka consumer');
+            });
+            await disconnectProducer().catch((err) => {
+                logger.error({ err }, '[server] failed to disconnect kafka producer');
             });
             logger.info({ signal }, '[server] closed');
             process.exit(0);
