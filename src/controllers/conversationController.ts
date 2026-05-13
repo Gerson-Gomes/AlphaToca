@@ -234,7 +234,7 @@ export const conversationController = {
         });
       }
 
-      const message = await conversationService.createMessage(id, localUser.id, content);
+      const message = await conversationService.createMessage(id, localUser.id, localUser.name, content);
 
       // LL-014: broadcast para ambas as rooms APÓS o insert ter sucesso.
       // Fazer o emit antes seria incorreto — uma falha no service deixaria os
