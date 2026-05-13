@@ -17,8 +17,12 @@
         "`grep -n \"express.static\" src/app.ts` mostra dois resultados (um em `/uploads` e outro em `/api/uploads`)"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "Implemented 2026-05-13. src/app.ts now mounts express.static at both /uploads (new) and /api/uploads (compat), sharing a setUploadsHeaders function that injects Cross-Origin-Resource-Policy: cross-origin and Cache-Control: public, max-age=86400. Inline comment explains the dual mount and references tasks/prd-fix-image-serving-mismatch.md. Both mounts sit before the authStack and the /api routes (lines 66-67), so they do not pass through checkJwt. `npm run build` passes (0 errors). `grep -n express.static src/app.ts` returns exactly two lines (66 and 67). Note: PRD text referenced an existing mount at /api/uploads, but the actual code on main HEAD had /uploads only (reverted by an earlier hotfix). End state matches PRD intent regardless."
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Teste de integracao: ambos os mounts servem arquivo e bloqueiam path traversal",
       "description": "As a developer, I want a Vitest integration test that asserts both `/uploads` and `/api/uploads` serve a real image file from the `uploads/` directory AND reject path-traversal attempts, so that a future refactor that removes one mount fails CI instead of production.",
       "acceptanceCriteria": [
         "Novo arquivo `tests/uploadsStaticMount.test.ts` usando o mesmo padrao `supertest` + `request(app)` de `tests/contractPdf.test.ts`",
