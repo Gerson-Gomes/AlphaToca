@@ -25,7 +25,6 @@ import reportRoutes from './routes/reportRoutes';
 import { checkJwt, authSyncMiddleware, requireRole, validateAuthConfig } from './middlewares/authMiddleware';
 import { Role } from '@prisma/client';
 import prisma from './config/db';
-import { queueRedisConnection } from './queues/whatsappQueue';
 import { logger } from './config/logger';
 
 // Validate Auth0 configuration at startup
@@ -49,7 +48,7 @@ app.use(
 );
 
 // Serve static files from the 'uploads' directory
-app.use('/api/uploads', express.static(path.join(__dirname, '../uploads')));
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Liveness probe — processo está respondendo.
 app.get('/health', (req: Request, res: Response) => {
@@ -71,12 +70,9 @@ app.get('/health/ready', async (_req: Request, res: Response) => {
         logger.error({ err }, '[health] db check failed');
     }
 
-    try {
-        const pong = await queueRedisConnection.ping();
-        if (pong === 'PONG') checks.redis = 'ok';
-    } catch (err) {
-        logger.error({ err }, '[health] redis check failed');
-    }
+    // Redis check removido — BullMQ foi substituído por Kafka.
+    // Redis ainda é usado pelo Socket.IO, mas o health check do
+    // Kafka Consumer já valida a conectividade indiretamente.
 
     // Gemini: só confirma presença da chave — não consome cota fazendo call real.
     if (process.env.GOOGLE_API_KEY && process.env.GOOGLE_API_KEY.trim() !== '') {
