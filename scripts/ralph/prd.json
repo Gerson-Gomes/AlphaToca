@@ -54,8 +54,8 @@
         "`grep -i 'uploads' BACKEND_HANDOFF.md` encontra a nova secao"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented 2026-05-13. Added a new top-level section in BACKEND_HANDOFF.md titled 'Servimento de imagens (uploads/) — duplo mount' placed immediately before 'Documentos de referência'. Section covers: (a) URL generation sites — propertyImageStorageService.savePropertyImages (PropertyImage.url) and contractDocumentStorageService.saveContractDocument (Contract.pdfUrl); (b) stored format /uploads/<propertyId>/<file>.ext and /uploads/contract-<contractId>/<file>.pdf; (c) the dual mount at src/app.ts lines 66-67, why both prefixes exist, and the shared setUploadsHeaders callback (CORP + Cache-Control); (d) explicit statement that there is NO data migration. References tasks/prd-fix-image-serving-mismatch.md as the authoritative source. Notes that contract PDF downloads continue through the protected GET /api/contracts/:id/pdf endpoint and are NOT replaced by the dual mount. Alerts infra that uploads/ must be in the server backup because the files are not regeneratable. Mentions tests/uploadsStaticMount.test.ts as the regression guard. `grep -i 'uploads' BACKEND_HANDOFF.md` matches 13 lines, all from the new section. `npm run build` => exit 0."
     }
   ]
 }

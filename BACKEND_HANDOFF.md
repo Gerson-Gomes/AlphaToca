@@ -388,6 +388,68 @@ etc.) que não mudam entre imóveis. `BACKEND_GAPS.md §2` (gerado na Fatia
 
 ---
 
+## Servimento de imagens (`uploads/`) — duplo mount
+
+Aviso para quem refatorar `src/app.ts`: existem **dois** `express.static` montados
+no mesmo diretório (`uploads/`). Não é duplicação acidental — remover um dos dois
+quebra produção. PRD autoritativo: `tasks/prd-fix-image-serving-mismatch.md`.
+
+**Onde as URLs são geradas:**
+
+- `src/services/propertyImageStorageService.ts::savePropertyImages` — fotos de
+  imóveis. Persiste em `PropertyImage.url`.
+- `src/services/contractDocumentStorageService.ts::saveContractDocument` —
+  PDFs de contrato (versão histórica). Persiste em `Contract.pdfUrl`.
+
+**Formato armazenado no banco** (Postgres, sem prefixo de host):
+
+```
+/uploads/<propertyId>/<file>.ext        # fotos de imóvel
+/uploads/contract-<contractId>/<file>.pdf   # PDFs de contrato (histórico)
+```
+
+**Por que existem dois mounts em `src/app.ts`** (linhas 66-67, ANTES do
+`authStack` para não passarem por `checkJwt`):
+
+```
+app.use('/uploads',     express.static(uploadsRoot, { setHeaders }))  // novo
+app.use('/api/uploads', express.static(uploadsRoot, { setHeaders }))  // compat
+```
+
+- O cliente Flutter (`app/`) monta `baseUrl + image.url`. Como `image.url` já
+  começa com `/uploads/...`, o mount em `/uploads` é o que resolve as fotos
+  sem o cliente ter que conhecer o segmento `/api`.
+- O mount em `/api/uploads` é mantido por retrocompatibilidade: clientes
+  legados (admin, scripts, integrações externas) podem ter URLs absolutas
+  cacheadas com o prefixo completo. Não custa nada manter os dois apontando
+  para a mesma raiz.
+- Ambos compartilham `setUploadsHeaders`, que injeta
+  `Cross-Origin-Resource-Policy: cross-origin` (necessário para o `<img>` no
+  webapp/admin) e `Cache-Control: public, max-age=86400`.
+
+**Não há migration de dados.** O banco continua com as URLs no formato
+`/uploads/...` exatamente como foram gravadas — o fix é 100% backend, sem
+script de update no Postgres e sem deploy do cliente Flutter.
+
+**PDFs de contrato continuam protegidos.** O fluxo de download de contrato
+passa por `GET /api/contracts/:id/pdf` (autenticado, com checagem de quem
+pode ver o PDF). O duplo mount **não substitui** esse endpoint — ele só
+serve assets públicos (imagens de imóvel já são públicas hoje). Se um PDF
+for servido também via `/uploads/...` no futuro, lembrar que esse caminho
+**não** tem `checkJwt` e qualquer um com a URL acessa.
+
+**Alerta para o time de infra:** o diretório `uploads/` no servidor de
+produção é o storage canônico desses assets — **precisa entrar no backup**.
+Os arquivos **não são regeneráveis** (não vêm de um bucket externo nem de
+um build); perder esse diretório significa perder as fotos cadastradas pelos
+landlords e os PDFs históricos de contrato.
+
+Testes de regressão: `tests/uploadsStaticMount.test.ts` exercita os dois
+mounts e três variantes de path-traversal. Se um refactor remover um dos
+mounts, o CI quebra antes de produção.
+
+---
+
 ## Documentos de referência
 
 - `BACKEND_LANDLORD_GAPS.md` — detalhe completo de cada item 1-7 deste
