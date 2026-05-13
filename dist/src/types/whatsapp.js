@@ -1,0 +1,11 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.WhatsAppEntrySchema = exports.WhatsAppChangeSchema = exports.WhatsAppChangeValueSchema = exports.WhatsAppStatusSchema = exports.WhatsAppTextMessageSchema = exports.WhatsAppContactSchema = exports.WhatsAppWebhookSchema = void 0;
+var whatsappSchema_1 = require("../schemas/whatsappSchema");
+Object.defineProperty(exports, "WhatsAppWebhookSchema", { enumerable: true, get: function () { return whatsappSchema_1.WhatsAppWebhookSchema; } });
+Object.defineProperty(exports, "WhatsAppContactSchema", { enumerable: true, get: function () { return whatsappSchema_1.WhatsAppContactSchema; } });
+Object.defineProperty(exports, "WhatsAppTextMessageSchema", { enumerable: true, get: function () { return whatsappSchema_1.WhatsAppTextMessageSchema; } });
+Object.defineProperty(exports, "WhatsAppStatusSchema", { enumerable: true, get: function () { return whatsappSchema_1.WhatsAppStatusSchema; } });
+Object.defineProperty(exports, "WhatsAppChangeValueSchema", { enumerable: true, get: function () { return whatsappSchema_1.WhatsAppChangeValueSchema; } });
+Object.defineProperty(exports, "WhatsAppChangeSchema", { enumerable: true, get: function () { return whatsappSchema_1.WhatsAppChangeSchema; } });
+Object.defineProperty(exports, "WhatsAppEntrySchema", { enumerable: true, get: function () { return whatsappSchema_1.WhatsAppEntrySchema; } });
