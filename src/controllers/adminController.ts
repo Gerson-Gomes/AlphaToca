@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { ModerationStatus } from '@prisma/client';
+import { ContractStatus, ModerationStatus, Prisma } from '@prisma/client';
 import prisma from '../config/db';
 import { propertyService } from '../services/propertyService';
 import { broadcastService, broadcastSchema } from '../services/broadcastService';
@@ -25,6 +25,8 @@ export const adminController = {
         usersByRole,
         propertiesByStatus,
         propertiesByModeration,
+        openSupportTickets,
+        pendingReports,
       ] = await Promise.all([
         prisma.user.count(),
         prisma.property.count(),
@@ -32,6 +34,8 @@ export const adminController = {
         prisma.user.groupBy({ by: ['role'], _count: { _all: true } }),
         prisma.property.groupBy({ by: ['status'], _count: { _all: true } }),
         prisma.property.groupBy({ by: ['moderationStatus'], _count: { _all: true } }),
+        prisma.supportTicket.count({ where: { status: 'OPEN' } }),
+        prisma.report.count({ where: { status: 'PENDING' } }),
       ]);
 
       const toCountMap = <K extends string>(rows: any[], key: K) =>
@@ -50,6 +54,8 @@ export const adminController = {
           properties: totalProperties,
           visits: totalVisits,
           pendingModeration,
+          openSupportTickets,
+          pendingReports,
         },
         usersByRole: toCountMap(usersByRole, 'role'),
         propertiesByStatus: toCountMap(propertiesByStatus, 'status'),
@@ -96,6 +102,75 @@ export const adminController = {
         sent: result.sent,
         failed: result.failed,
         persisted: result.persisted,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  async listContracts(req: Request, res: Response, next: NextFunction) {
+    try {
+      const statusParam = typeof req.query.status === 'string'
+        ? (req.query.status as string).toUpperCase()
+        : undefined;
+
+      const expiringInDays = typeof req.query.expiringInDays === 'string'
+        ? parseIntParam(req.query.expiringInDays, 0, 0, 365)
+        : undefined;
+
+      const page = parseIntParam(req.query.page, 1, PAGE_MIN, Number.MAX_SAFE_INTEGER);
+      const pageSize = parseIntParam(req.query.limit, 20, LIMIT_MIN, LIMIT_MAX);
+
+      const now = new Date();
+      const where: Prisma.ContractWhereInput = {};
+      if (statusParam && ['ACTIVE', 'TERMINATED', 'COMPLETED'].includes(statusParam)) {
+        where.status = statusParam as ContractStatus;
+      }
+      if (expiringInDays && expiringInDays > 0) {
+        const futureDate = new Date(now);
+        futureDate.setDate(futureDate.getDate() + expiringInDays);
+        where.endDate = { gte: now, lte: futureDate };
+        where.status = 'ACTIVE';
+      }
+
+      const [total, contracts] = await Promise.all([
+        prisma.contract.count({ where }),
+        prisma.contract.findMany({
+          where,
+          orderBy: { createdAt: 'desc' },
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+          include: {
+            property: { select: { id: true, address: true, city: true, state: true } },
+            tenant: { select: { id: true, name: true } },
+          },
+        }),
+      ]);
+
+      const data = contracts.map((c: any) => ({
+        id: c.id,
+        status: c.status,
+        tenantName: c.tenant?.name ?? 'N/A',
+        tenantId: c.tenant?.id ?? null,
+        propertyAddress: c.property
+          ? [c.property.address, c.property.city, c.property.state].filter(Boolean).join(', ')
+          : 'N/A',
+        propertyId: c.property?.id ?? null,
+        monthlyRent: c.monthlyRent instanceof Object && 'toNumber' in c.monthlyRent
+          ? (c.monthlyRent as any).toNumber()
+          : Number(c.monthlyRent),
+        startDate: c.startDate instanceof Date ? c.startDate.toISOString() : c.startDate,
+        endDate: c.endDate instanceof Date ? c.endDate.toISOString() : c.endDate,
+        documentStatus: c.documentStatus,
+      }));
+
+      return res.status(200).json({
+        data,
+        meta: {
+          page,
+          total,
+          totalPages: Math.ceil(total / pageSize),
+        },
       });
     } catch (error) {
       next(error);

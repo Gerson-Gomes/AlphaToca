@@ -138,4 +138,6 @@ router.get('/admin/properties', adminOnly, adminController.listPendingProperties
  */
 router.post('/admin/broadcast', adminOnly, adminController.sendBroadcast);
 
+router.get('/admin/contracts', adminOnly, adminController.listContracts);
+
 export default router;

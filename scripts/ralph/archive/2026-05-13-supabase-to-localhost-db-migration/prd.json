@@ -17,12 +17,12 @@
         "`grep -n \"express.static\" src/app.ts` mostra dois resultados (um em `/uploads` e outro em `/api/uploads`)"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "Implemented 2026-05-13. src/app.ts now mounts express.static at both /uploads (new) and /api/uploads (compat), sharing a setUploadsHeaders function that injects Cross-Origin-Resource-Policy: cross-origin and Cache-Control: public, max-age=86400. Inline comment explains the dual mount and references tasks/prd-fix-image-serving-mismatch.md. Both mounts sit before the authStack and the /api routes (lines 66-67), so they do not pass through checkJwt. `npm run build` passes (0 errors). `grep -n express.static src/app.ts` returns exactly two lines (66 and 67). Note: PRD text referenced an existing mount at /api/uploads, but the actual code on main HEAD had /uploads only (reverted by an earlier hotfix). End state matches PRD intent regardless."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Teste de integracao Vitest cobrindo os dois mounts e bloqueio de path traversal",
+      "title": "Teste de integracao: ambos os mounts servem arquivo e bloqueiam path traversal",
       "description": "As a developer, I want a Vitest integration test that asserts both `/uploads` and `/api/uploads` serve a real image file from the `uploads/` directory AND reject path-traversal attempts, so that a future refactor that removes one mount fails CI instead of production.",
       "acceptanceCriteria": [
         "Novo arquivo `tests/uploadsStaticMount.test.ts` usando o mesmo padrao `supertest` + `request(app)` de `tests/contractPdf.test.ts`",
@@ -38,8 +38,8 @@
         "`npm run build` passa sem erros de tipo"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "Implemented 2026-05-13. New file tests/uploadsStaticMount.test.ts (9 tests, all passing) covers the dual mount and path-traversal hardening. Fixture (1x1 PNG bytes) written to uploads/test-fixture/sample.png in beforeAll and removed in afterAll. Asserts: (a) GET /uploads/test-fixture/sample.png and (b) GET /api/uploads/test-fixture/sample.png both return 200 with content-type matching /^image//; (c) cross-origin-resource-policy: cross-origin header is present on both; (d) cache-control header carries max-age on both; (e) /uploads/../package.json, /api/uploads/../package.json, and /uploads/%2e%2e/package.json all return non-200. `npm test -- tests/uploadsStaticMount.test.ts` => 9/9 pass. `npm run build` => exit 0. Also fixed a pre-existing malformed JSON in scripts/ralph/prd.json (US-002 was missing its object-open boundary, so jq could not parse the file)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-003",
@@ -54,8 +54,8 @@
         "`grep -i 'uploads' BACKEND_HANDOFF.md` encontra a nova secao"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "Implemented 2026-05-13. Added a new top-level section in BACKEND_HANDOFF.md titled 'Servimento de imagens (uploads/) — duplo mount' placed immediately before 'Documentos de referência'. Section covers: (a) URL generation sites — propertyImageStorageService.savePropertyImages (PropertyImage.url) and contractDocumentStorageService.saveContractDocument (Contract.pdfUrl); (b) stored format /uploads/<propertyId>/<file>.ext and /uploads/contract-<contractId>/<file>.pdf; (c) the dual mount at src/app.ts lines 66-67, why both prefixes exist, and the shared setUploadsHeaders callback (CORP + Cache-Control); (d) explicit statement that there is NO data migration. References tasks/prd-fix-image-serving-mismatch.md as the authoritative source. Notes that contract PDF downloads continue through the protected GET /api/contracts/:id/pdf endpoint and are NOT replaced by the dual mount. Alerts infra that uploads/ must be in the server backup because the files are not regeneratable. Mentions tests/uploadsStaticMount.test.ts as the regression guard. `grep -i 'uploads' BACKEND_HANDOFF.md` matches 13 lines, all from the new section. `npm run build` => exit 0."
+      "passes": false,
+      "notes": ""
     }
   ]
 }

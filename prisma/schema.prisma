@@ -129,6 +129,27 @@ enum RentalPaymentStatus {
   LATE
 }
 
+// Admin: status de conta do usuário.
+// ACTIVE = normal, SUSPENDED = temporário (suspendedUntil define término),
+// BANNED = permanente.
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+// Admin: status de uma denúncia (report).
+// PENDING = nova, aguardando triagem.
+// REVIEWING = em análise pelo admin.
+// RESOLVED = ação tomada (conteúdo removido, usuário punido, etc.).
+// DISMISSED = denúncia considerada improcedente.
+enum ReportStatus {
+  PENDING
+  REVIEWING
+  RESOLVED
+  DISMISSED
+}
+
 // 3. Modelos (Tabelas)
 
 model User {
@@ -145,6 +166,9 @@ model User {
   // Prisma Studio/seed enquanto o endpoint admin (PRD §8 Q3) não é lançado.
   isIdentityVerified  Boolean   @default(false) @map("is_identity_verified")
   identityVerifiedAt  DateTime? @map("identity_verified_at")
+  // Admin: status de conta + suspensão temporária
+  status        UserStatus @default(ACTIVE)
+  suspendedUntil DateTime? @map("suspended_until")
 
   // Relacionamentos inversos (Obrigações do Prisma)
   properties          Property[]      @relation("LandlordProperties")
@@ -164,6 +188,7 @@ model User {
   supportTicketsAssigned  SupportTicket[] @relation("SupportTicketAssignee")
   supportTicketMessages   SupportTicketMessage[] @relation("SupportMessageSender")
   profileViewsReceived    ProfileView[]   @relation("LandlordProfileViews")
+  reportsMade             Report[]        @relation("ReportReporter")
 
   @@map("users")
 }
@@ -717,4 +742,27 @@ model ContactClickEvent {
 
   @@index([propertyId, clickedAt], name: "contact_click_events_property_time_idx")
   @@map("contact_click_events")
+}
+
+// Denúncia criada por um usuário contra outro usuário ou imóvel.
+// O frontend admin consome via GET /api/admin/reports e resolve via
+// PATCH /api/admin/reports/:id.
+model Report {
+  id          String       @id @default(uuid())
+  reporterId  String       @map("reporter_id")
+  reporter    User         @relation("ReportReporter", fields: [reporterId], references: [id])
+  targetType  String       @map("target_type") // 'USER' | 'PROPERTY'
+  targetId    String       @map("target_id")
+  reason      String       // 'inappropriate_behavior' | 'fake_listing' | 'fraud' | 'other'
+  description String
+  status      ReportStatus @default(PENDING)
+  resolution  String?
+  resolvedBy  String?      @map("resolved_by")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  resolvedAt  DateTime?    @map("resolved_at")
+
+  @@index([status, createdAt(sort: Desc)], name: "reports_status_created_at_idx")
+  @@index([targetType, createdAt(sort: Desc)], name: "reports_target_type_created_at_idx")
+  @@index([reporterId, createdAt(sort: Desc)], name: "reports_reporter_created_at_idx")
+  @@map("reports")
 }

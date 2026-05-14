@@ -10,6 +10,7 @@ import { initializeSocket } from './config/socket';
 import { initializeKafkaConsumerWithPrisma, shutdownKafkaConsumer } from './services/kafkaConsumerInit';
 import { connectProducer, disconnectProducer } from './services/kafkaProducer';
 import { logger } from './config/logger';
+import { connectProducer, disconnectProducer } from './services/kafkaProducer';
 
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
@@ -38,7 +39,7 @@ const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
     // Anexa WebSocket (Socket.IO) ao servidor HTTP
     initializeSocket(server);
 
-    // Inicializa Kafka Producer + Consumer (substitui BullMQ workers).
+    // Inicializa Kafka Producer e Consumer (substitui BullMQ workers).
     // Também é desabilitado pela flag DISABLE_WORKERS para debug local sem broker.
     if (process.env.DISABLE_WORKERS !== 'true') {
         connectProducer().catch((err) => {

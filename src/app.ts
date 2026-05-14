@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express, { Express, Request, Response } from 'express';
+import type { ServerResponse } from 'http';
 import path from 'path';
 import cors from 'cors';
 import { errorHandler } from './middlewares/errorHandler';
@@ -21,6 +22,7 @@ import conversationRoutes from './routes/conversationRoutes';
 import deeplinkRoutes from './routes/deeplinkRoutes';
 import supportRoutes from './routes/supportRoutes';
 import landlordRoutes from './routes/landlordRoutes';
+import reportRoutes from './routes/reportRoutes';
 import { checkJwt, authSyncMiddleware, requireRole, validateAuthConfig } from './middlewares/authMiddleware';
 import { Role } from '@prisma/client';
 import prisma from './config/db';
@@ -46,11 +48,23 @@ app.use(
     }),
 );
 
-// Serve static files from the 'uploads' directory
-// Mounted on both paths: DB stores `/uploads/...` (direct), frontend prepends API base → `/api/uploads/...`.
-const uploadsStatic = express.static(path.join(__dirname, '../uploads'));
-app.use('/uploads', uploadsStatic);
-app.use('/api/uploads', uploadsStatic);
+// Serve static files from the 'uploads' directory.
+//
+// Dois mounts ANTES de `authStack` (sem checkJwt). URLs históricas em
+// `PropertyImage.url` e `Contract.pdfUrl` foram gravadas como `/uploads/...`
+// (ver propertyImageStorageService.savePropertyImages,
+// contractDocumentStorageService.saveContractDocument). O cliente Flutter
+// concatena baseUrl + image.url, então o mount em `/uploads` resolve isso
+// sem migration de dados; `/api/uploads` é mantido por retrocompatibilidade
+// com qualquer cliente legado/admin que tenha gravado o prefixo completo.
+// Ver tasks/prd-fix-image-serving-mismatch.md.
+const uploadsRoot = path.join(__dirname, '../uploads');
+const setUploadsHeaders = (res: ServerResponse) => {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+};
+app.use('/uploads', express.static(uploadsRoot, { setHeaders: setUploadsHeaders }));
+app.use('/api/uploads', express.static(uploadsRoot, { setHeaders: setUploadsHeaders }));
 
 // Liveness probe — processo está respondendo.
 app.get('/health', (req: Request, res: Response) => {
@@ -140,6 +154,9 @@ app.use('/api', authStack, conversationRoutes);
 
 // Support Routes (ticket open — US-018)
 app.use('/api', authStack, supportRoutes);
+
+// Report Routes (user reports + admin report queue)
+app.use('/api', authStack, reportRoutes);
 
 // Landlord Dashboard Routes (metrics — LL-002)
 app.use('/api', authStack, requireRole(Role.LANDLORD), landlordRoutes);

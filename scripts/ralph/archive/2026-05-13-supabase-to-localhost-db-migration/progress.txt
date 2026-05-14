@@ -1,0 +1,21 @@
+# Ralph Progress Log
+Started: Wed May 13 2026
+Feature: ralph/fix-image-serving-mismatch
+Source PRD: tasks/prd-fix-image-serving-mismatch.md
+---
+
+## Codebase Patterns
+- Branch is `ralph/fix-image-serving-mismatch` (from `prd.json.branchName`); created from `main` if missing.
+- Static file handler currently registered ONCE in `src/app.ts:51` as `app.use('/api/uploads', express.static(path.join(__dirname, '../uploads')))`. Stored URLs in DB (`PropertyImage.url`, `Contract.pdfUrl`) use the `/uploads/...` prefix without `/api` — this is the mismatch the feature fixes.
+- Stored URL formats to preserve (do NOT migrate):
+  - Property images: `/uploads/<propertyId>/<uuid>.<jpg|png>` (`src/services/propertyImageStorageService.ts:56`)
+  - Contract PDFs: `/uploads/contracts/<contractId>/<uuid>.pdf` (`src/services/contractDocumentStorageService.ts:48`)
+- `contractController.getPdf` (`src/controllers/contractController.ts:250`) already resolves the `/uploads/...` prefix correctly via `path.resolve(__dirname, '../../', relative)` with an UPLOADS_ROOT prefix-check guard. Do NOT touch this controller — it stays as-is.
+- Express middleware order in `src/app.ts`: static mounts MUST go before `app.use('/api', authStack, ...)` so they bypass `checkJwt`. The existing `/api/uploads` mount is already in the right place (line 51, before all auth-protected routes).
+- Tests use `supertest` + `request(app)` against the exported Express app from `src/app.ts`. See `tests/contractPdf.test.ts` for the canonical pattern of testing a `sendFile`/static-style response with fixture files in `uploads/`.
+- Test config (`vitest.config.ts`) runs `.test.ts` files in `tests/`. Test files import the app via `import app from '../src/app'`.
+- The `.env` is loaded by `import 'dotenv/config'` at the top of `src/app.ts` — tests inherit whatever is in the local `.env`.
+- `express.static` default behavior: normalizes `..` segments and refuses to serve files outside the root. URL-encoded traversal (`%2e%2e`) is also blocked by Node's path normalization before `express.static` sees it. Verify in US-002 rather than assuming.
+- `express.static` accepts `{ setHeaders: (res, path) => res.setHeader(...) }` to inject custom response headers on each served file. Extract a single shared function and pass it to BOTH mounts so headers stay in sync.
+- Cross-Origin-Resource-Policy header value `cross-origin` is the right call for public images that need to be embeddable in third-party origins (future web/PWA). Do not use `same-origin` or `same-site` here.
+- `BACKEND_HANDOFF.md` lives at repo root; check its existing structure before adding a new section so the heading style matches.

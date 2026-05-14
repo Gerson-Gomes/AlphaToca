@@ -27,6 +27,7 @@ export interface VisitReminderPayload {
  */
 export async function produceEvent(opts: ProduceEventOptions): Promise<void> {
   try {
+    await connectProducer();
     await producer.send({
       topic: opts.topic,
       messages: [
@@ -45,11 +46,33 @@ export async function produceEvent(opts: ProduceEventOptions): Promise<void> {
       { topic: opts.topic, key: opts.key },
       '[kafka-producer] event produced successfully'
     );
-  } catch (err) {
-    logger.error(
-      { err, topic: opts.topic, key: opts.key },
-      '[kafka-producer] produce failed'
-    );
+  } catch (err: any) {
+    // Reconecta e tenta mais uma vez em erros retriable (ex: desconexão)
+    if (err?.retriable) {
+      logger.warn({ topic: opts.topic }, '[kafka-producer] retrying after reconnect');
+      try {
+        await connectProducer();
+        await producer.send({
+          topic: opts.topic,
+          messages: [
+            {
+              key: opts.key ?? null,
+              value: JSON.stringify(opts.payload),
+              headers: {
+                'content-type': 'application/json',
+                'timestamp': new Date().toISOString(),
+              },
+            },
+          ],
+        });
+        logger.info({ topic: opts.topic, key: opts.key }, '[kafka-producer] event produced (retry)');
+        return;
+      } catch (retryErr) {
+        logger.error({ err: retryErr, topic: opts.topic, key: opts.key }, '[kafka-producer] produce failed after retry');
+        throw retryErr;
+      }
+    }
+    logger.error({ err, topic: opts.topic, key: opts.key }, '[kafka-producer] produce failed');
     throw err;
   }
 }

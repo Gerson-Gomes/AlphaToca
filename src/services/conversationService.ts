@@ -35,12 +35,16 @@ export type ConversationSummary = {
 // Shape da resposta de GET /api/conversations/:id/messages — uma linha por
 // mensagem persistida. `readAt` é `null` para mensagens que ainda não foram
 // marcadas como lidas pelo destinatário (o "outro" participante da thread).
+// `isMine` é derivado comparando authorId com o userId do caller.
 export type ConversationMessageView = {
   id: string;
+  conversationId: string;
   authorId: string;
+  authorName: string;
   content: string;
   createdAt: string;
   readAt: string | null;
+  isMine: boolean;
 };
 
 // Resultado interno do listMessages — inclui a lista paginada de mensagens e
@@ -292,9 +296,22 @@ export const conversationService = {
     }
 
     const readAtByNewly = new Set(unreadIds);
+
+    // Batch resolve author names (no relation in Prisma schema for ConversationMessage.author)
+    const authorIds = [...new Set(rows.map((r) => r.authorId))];
+    const authors = authorIds.length > 0
+      ? await prisma.user.findMany({
+          where: { id: { in: authorIds } },
+          select: { id: true, name: true },
+        })
+      : [];
+    const authorNameMap = new Map(authors.map((a) => [a.id, a.name]));
+
     const messages: ConversationMessageView[] = rows.map((r) => ({
       id: r.id,
+      conversationId,
       authorId: r.authorId,
+      authorName: authorNameMap.get(r.authorId) ?? 'Usuário',
       content: r.content,
       createdAt: r.createdAt.toISOString(),
       readAt: readAtByNewly.has(r.id)
@@ -302,6 +319,7 @@ export const conversationService = {
         : r.readAt
           ? r.readAt.toISOString()
           : null,
+      isMine: r.authorId === userId,
     }));
 
     return { messages, markedReadIds: unreadIds };
@@ -357,6 +375,7 @@ export const conversationService = {
   async createMessage(
     conversationId: string,
     authorId: string,
+    authorName: string,
     content: string,
   ): Promise<ConversationMessageView> {
     const row = await prisma.$transaction(async (tx) => {
@@ -385,10 +404,13 @@ export const conversationService = {
 
     return {
       id: row.id,
+      conversationId,
       authorId: row.authorId,
+      authorName,
       content: row.content,
       createdAt: row.createdAt.toISOString(),
       readAt: row.readAt ? row.readAt.toISOString() : null,
+      isMine: true,
     };
   },
 };
