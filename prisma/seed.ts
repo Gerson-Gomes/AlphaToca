@@ -20,6 +20,7 @@ export async function main() {
   await prisma.rentalDocument.deleteMany().catch(() => { });
   await prisma.aiExtractedInsight.deleteMany().catch(() => { });
   await prisma.rentalProcess.deleteMany().catch(() => { });
+  await prisma.visit.deleteMany().catch(() => { });
   await prisma.propertyImage.deleteMany();
   await prisma.property.deleteMany();
   await prisma.user.deleteMany();
