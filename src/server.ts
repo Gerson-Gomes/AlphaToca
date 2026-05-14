@@ -10,6 +10,7 @@ import { initializeSocket } from './config/socket';
 import { initializeKafkaConsumerWithPrisma, shutdownKafkaConsumer } from './services/kafkaConsumerInit';
 import { connectProducer, disconnectProducer } from './services/kafkaProducer';
 import { logger } from './config/logger';
+import { connectProducer, disconnectProducer } from './services/kafkaProducer';
 
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
