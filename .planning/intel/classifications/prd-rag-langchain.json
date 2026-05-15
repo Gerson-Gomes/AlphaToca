@@ -1,0 +1,35 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/tasks/prd-rag-langchain.md",
+  "type": "PRD",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "PRD: RAG Implementation with LangChain for WhatsApp Chatbot",
+  "summary": "Product requirements for adding a LangChain-based RAG pipeline to the AlphaToca WhatsApp chatbot, covering ingestion, retrieval, grounded answers, and lead extraction.",
+  "scope": [
+    "RAG pipeline",
+    "LangChain",
+    "WhatsApp chatbot",
+    "KnowledgeDocument ingestion",
+    "pgvector retrieval",
+    "ChatSession handling",
+    "whatsappWorker",
+    "lead insight extraction",
+    "RentalProcess",
+    "AiExtractedInsight",
+    "human handoff"
+  ],
+  "cross_refs": [
+    "documentation/buisness_plan.md",
+    "src/config/rag.ts",
+    "src/scripts/ingestKnowledge.ts",
+    "src/services/ragRetrieverService.ts",
+    "src/services/ragChainService.ts",
+    "src/services/leadExtractionService.ts",
+    "src/scripts/evalRag.ts",
+    "src/services/whatsappService.ts",
+    "src/workers/whatsappWorker.ts",
+    "whatsappWorker.ts"
+  ],
+  "locked": false,
+  "precedence": null
+}

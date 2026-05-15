@@ -1,0 +1,21 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/conductor/code_styleguides/javascript.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Google JavaScript Style Guide Summary",
+  "summary": "Summary of key rules and best practices from the Google JavaScript Style Guide covering formatting, naming, language features, and JSDoc conventions.",
+  "scope": [
+    "JavaScript coding style",
+    "file structure",
+    "formatting rules",
+    "language features",
+    "naming conventions",
+    "JSDoc"
+  ],
+  "cross_refs": [
+    "https://google.github.io/styleguide/jsguide.html"
+  ],
+  "locked": false,
+  "precedence": null
+}

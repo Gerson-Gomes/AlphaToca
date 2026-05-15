@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/conductor/tracks/auth_jwt_auth0_20260416/index.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Track auth_jwt_auth0_20260416 Context",
+  "summary": "Index page listing links to the specification, implementation plan, and metadata for the auth_jwt_auth0_20260416 track.",
+  "scope": ["auth_jwt_auth0_20260416 track", "track navigation"],
+  "cross_refs": ["./spec.md", "./plan.md", "./metadata.json"],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

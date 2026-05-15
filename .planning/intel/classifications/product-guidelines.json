@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/conductor/product-guidelines.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Product Guidelines",
+  "summary": "Prose-based product guidelines covering tone, UX principles, backend architecture style, and error handling conventions for the AlphaToca backend.",
+  "scope": ["tone and voice", "UX principles", "backend architecture", "code style", "error handling", "RAG integration", "WhatsApp webhooks", "API", "Zod validation", "ErrorResponse interface"],
+  "cross_refs": [],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

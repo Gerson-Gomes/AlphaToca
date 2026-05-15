@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/conductor/tracks.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Tracks Registry",
+  "summary": "An index/registry listing conductor tracks, currently pointing to the JWT and Auth0 authentication track directory.",
+  "scope": ["tracks registry", "conductor tracks", "auth_jwt_auth0 track"],
+  "cross_refs": ["./tracks/auth_jwt_auth0_20260416/"],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

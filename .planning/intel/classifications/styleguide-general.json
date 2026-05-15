@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/conductor/code_styleguides/general.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "General Code Style Principles",
+  "summary": "General coding style principles (readability, consistency, simplicity, maintainability, documentation) applying across all languages and frameworks in the project.",
+  "scope": ["code style", "readability", "consistency", "simplicity", "maintainability", "documentation"],
+  "cross_refs": [],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

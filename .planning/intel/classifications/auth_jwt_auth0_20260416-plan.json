@@ -1,0 +1,26 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/conductor/tracks/auth_jwt_auth0_20260416/plan.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Implementation Plan: JWT and Auth0 Authentication",
+  "summary": "Phased TDD implementation plan tracking progress of JWT/Auth0 authentication integration with middleware, user sync, and route security.",
+  "scope": [
+    "JWT authentication",
+    "Auth0 integration",
+    "express-oauth2-jwt-bearer middleware",
+    "jwks-rsa",
+    "user synchronization service",
+    "upsertUserFromAuth0",
+    "route security",
+    "Prisma user sync"
+  ],
+  "cross_refs": [
+    "workflow.md",
+    ".env.example",
+    "src/server.ts"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

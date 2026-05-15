@@ -1,0 +1,21 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/conductor/product.md",
+  "type": "PRD",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Initial Concept",
+  "summary": "Product definition for a backend API powering a mobile apartment rental platform with WhatsApp-based RAG lead qualification.",
+  "scope": [
+    "backend API",
+    "mobile rental platform",
+    "WhatsApp integration",
+    "RAG system",
+    "property listings",
+    "lead qualification",
+    "PostgreSQL pgvector"
+  ],
+  "cross_refs": [],
+  "locked": false,
+  "precedence": null,
+  "notes": "Product vision doc with target audience, value proposition, and key features — PRD-style content without formal user stories or acceptance criteria. No frontmatter or filename convention; classified by content signals."
+}

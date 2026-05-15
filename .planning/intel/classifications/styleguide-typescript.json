@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/conductor/code_styleguides/typescript.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Google TypeScript Style Guide Summary",
+  "summary": "Summary of key rules and best practices from the Google TypeScript Style Guide, as enforced by the gts tool.",
+  "scope": ["TypeScript", "code style", "naming conventions", "type system", "JSDoc", "language features"],
+  "cross_refs": ["https://google.github.io/styleguide/tsguide.html"],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

@@ -1,0 +1,21 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/conductor/index.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Project Context",
+  "summary": "Index page linking to project definition, workflow, and management documents within the conductor directory.",
+  "scope": ["project context", "documentation index", "conductor"],
+  "cross_refs": [
+    "./product.md",
+    "./product-guidelines.md",
+    "./tech-stack.md",
+    "./workflow.md",
+    "./code_styleguides/",
+    "./tracks.md",
+    "./tracks/"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

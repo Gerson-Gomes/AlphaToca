@@ -50,29 +50,6 @@ coverage/
 .DS_Store
 Thumbs.db
 
-# Uploads (user-generated content)
-uploads/
-
-# Database dumps
-*.dump
-*.dump.toc
-
-# AI Agent generated/regenerable artifacts
-skills-lock.json
-.planning/
-
-# Temporary scratch files
-scratch_zod.js
-
-# Infrastructure plans with credentials
-plan_hospedagem.md
-
-# AI Agent orchestrator
-conductor/
-
-# Development task plan
-plan.md
-
 # IDE
 .vscode/
 .idea/

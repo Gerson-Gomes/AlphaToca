@@ -1,0 +1,20 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/conductor/tracks/auth_jwt_auth0_20260416/spec.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Track Specification: Implement JWT and Auth0 Authentication",
+  "summary": "Technical specification for integrating Auth0 as identity provider with JWT validation middleware and user synchronization to the local PostgreSQL database.",
+  "scope": [
+    "Auth0 integration",
+    "JWT validation",
+    "express-oauth2-jwt-bearer middleware",
+    "user onboarding flow",
+    "Prisma Role enum mapping",
+    "Express route protection",
+    "user profile synchronization"
+  ],
+  "cross_refs": [],
+  "locked": false,
+  "precedence": null
+}

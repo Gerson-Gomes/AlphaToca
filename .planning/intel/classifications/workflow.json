@@ -1,0 +1,30 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/conductor/workflow.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Project Workflow",
+  "summary": "Describes the project's task lifecycle, TDD process, quality gates, commit conventions, deployment steps, and emergency procedures.",
+  "scope": [
+    "task workflow",
+    "TDD process",
+    "phase checkpointing",
+    "quality gates",
+    "development commands",
+    "testing requirements",
+    "code review process",
+    "commit guidelines",
+    "deployment workflow",
+    "emergency procedures"
+  ],
+  "cross_refs": [
+    "plan.md",
+    "tech-stack.md",
+    "code_styleguides/",
+    "product.md",
+    "product-guidelines.md"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

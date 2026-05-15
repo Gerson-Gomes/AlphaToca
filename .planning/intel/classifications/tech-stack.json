@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/conductor/tech-stack.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Technology Stack",
+  "summary": "Inventory of the project's chosen technologies spanning language, runtime, framework, data layer, auth, queues, AI/RAG components, and messaging integration.",
+  "scope": ["TypeScript", "Node.js", "Express", "PostgreSQL", "pgvector", "Prisma", "Auth0", "JWT", "Redis", "BullMQ", "LangChain", "WhatsApp Cloud API"],
+  "cross_refs": [],
+  "locked": false,
+  "precedence": null,
+  "notes": "Reads as a stack inventory with brief rationale rather than a single decision record; no Context/Decision/Consequences structure or Status field, so classified as DOC. Could be argued as ADR-adjacent given the locked-in tech choices, but lacks ADR formal structure."
+}

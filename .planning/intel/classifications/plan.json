@@ -1,0 +1,32 @@
+{
+  "source_path": "/home/omar-gerson/AlphaContainer/FimDeCiclo/AlphaToca-Backend/plan.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "AlphaToca Backend - Plano de Tarefas",
+  "summary": "Task plan (Jira-ready checklist) covering webhooks, BullMQ workers, WhatsApp outbound, chat state, RAG/LangChain, lead qualification, and documentation phases for AlphaToca backend.",
+  "scope": [
+    "WhatsApp webhooks",
+    "BullMQ queue",
+    "Redis",
+    "whatsappWorker",
+    "WhatsApp Cloud API outbound",
+    "ChatSession and Message repositories",
+    "LangChain RAG with pgvector",
+    "KnowledgeDocument seeder",
+    "RentalProcess lead qualification",
+    "AiExtractedInsight",
+    "Swagger/OpenAPI documentation",
+    "test coverage"
+  ],
+  "cross_refs": [
+    "conductor/workflow.md",
+    "webhookController.ts",
+    "workers/whatsappWorker.ts",
+    "propertyRoutes",
+    "userRoutes"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": "Task/roadmap checklist rather than a decision, requirement spec, or API contract. No frontmatter, no ADR Decision/Consequences, no user stories, no API schemas. Classified as DOC (supporting project context). Implicit requirements exist but are phrased as action items, making PRD a weaker secondary signal."
+}
